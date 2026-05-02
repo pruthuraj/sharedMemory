@@ -2,7 +2,7 @@
 
 This project is a small local WebSocket server for sharing memory between agent-like clients. It is "MCP-like" in purpose, but it does not implement the official Model Context Protocol.
 
-Agents can register an ID, set and get shared keys, subscribe to updates, relate memories through a deterministic graph, and link to other agent IDs for forwarded activity notifications. State is in memory only.
+Agents can register an ID, set and get shared keys, subscribe to updates, relate memories through a deterministic graph, and link to other agent IDs for forwarded activity notifications. State is in memory by default, with optional JSON persistence.
 
 ## Files
 - `server.js`: startup wrapper for `npm start`.
@@ -27,6 +27,12 @@ Start the server:
 
 ```bash
 npm start
+```
+
+Start with persistent storage:
+
+```bash
+MEMORY_FILE=data/memory.json npm start
 ```
 
 Run example agents in separate terminals:
@@ -58,7 +64,15 @@ npm test
   "connectedAgents": ["agentA"],
   "memoryKeys": ["greeting"],
   "memoryCount": 1,
-  "relationCount": 0
+  "relationCount": 0,
+  "persistence": {
+    "enabled": true,
+    "file": "D:\\Pruthu\\cv projects\\test\\sharedMemory\\data\\memory.json",
+    "dirty": false,
+    "lastLoadedAt": 1714694400000,
+    "lastFlushedAt": 1714694400500,
+    "lastFlushError": null
+  }
 }
 ```
 
@@ -67,6 +81,47 @@ npm test
 - `memoryKeys`: keys currently stored in memory.
 - `memoryCount`: number of memory entries.
 - `relationCount`: number of memory graph edges.
+- `persistence`: durability status. When `MEMORY_FILE` is unset, `enabled` is `false`.
+
+## Persistence
+
+Persistence is optional and controlled by `MEMORY_FILE`.
+
+```bash
+MEMORY_FILE=data/memory.json npm start
+```
+
+The server loads the file on startup. Missing files start with an empty graph. Invalid JSON fails startup clearly. Edges that reference missing memory entries are dropped during load to preserve graph integrity.
+
+Runtime mutations stay RAM-first. `set`, `relate`, `unrelate`, and `delete` mark the store dirty and schedule a debounced flush. The flush writes JSON atomically by writing a temp file next to the target and renaming it over the target. `close()`, `SIGINT`, and `SIGTERM` force a final flush.
+
+Persisted JSON shape:
+
+```json
+{
+  "entries": {
+    "project.architecture": {
+      "value": "Full details...",
+      "summary": "Server is split into focused modules.",
+      "tags": ["architecture", "server"],
+      "importance": 8,
+      "updatedAt": 1714694400000,
+      "updatedBy": "agentA"
+    }
+  },
+  "edges": [
+    {
+      "from": "project.database",
+      "to": "project.architecture",
+      "relation": "depends_on",
+      "reason": "Database choices affect architecture.",
+      "weight": 0.8,
+      "updatedAt": 1714694400100,
+      "updatedBy": "agentA"
+    }
+  ]
+}
+```
 
 ## WebSocket Protocol
 
@@ -436,7 +491,7 @@ The server returns `{ "type": "error", "message": "..." }` for invalid input.
 
 ## Limitations
 
-- State is in memory only and is lost on restart.
+- State is lost on restart unless `MEMORY_FILE` is configured.
 - There is no authentication or authorization.
 - This is not a real MCP server implementation.
 - Concurrent writes are last-write-wins.

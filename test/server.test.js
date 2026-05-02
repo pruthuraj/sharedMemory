@@ -1,8 +1,16 @@
 const assert = require('node:assert/strict');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const test = require('node:test');
 const WebSocket = require('ws');
 
 const { createSharedMemoryServer } = require('../src/server');
+
+function tempPath(name) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'shared-memory-server-test-'));
+    return path.join(dir, name);
+}
 
 async function startServer(options = {}) {
     const appServer = createSharedMemoryServer(options);
@@ -112,10 +120,46 @@ test('register, set, get, list, and status remain compatible', async () => {
             memoryKeys: ['greeting'],
             memoryCount: 1,
             relationCount: 0,
+            persistence: {
+                enabled: false,
+                file: null,
+                dirty: false,
+                lastLoadedAt: null,
+                lastFlushedAt: null,
+                lastFlushError: null,
+            },
         });
     } finally {
         await appServer.close();
     }
+});
+
+test('status reports enabled persistence and close flushes pending state', async () => {
+    const file = tempPath('memory.json');
+    const { appServer, httpUrl, wsUrl } = await startServer({
+        persistence: { file, debounceMs: 10000 },
+    });
+
+    try {
+        const client = await connectClient(wsUrl);
+        await client.waitFor((message) => message.type === 'welcome');
+        client.send({ type: 'register', agentId: 'agentA' });
+        await client.waitFor((message) => message.type === 'registered');
+        client.send({ type: 'set', key: 'durable', value: 'saved', summary: 'Saved memory' });
+        await client.waitFor((message) => message.type === 'ok' && message.key === 'durable');
+
+        const status = await fetch(`${httpUrl}/status`).then((response) => response.json());
+        assert.equal(status.persistence.enabled, true);
+        assert.equal(status.persistence.file, file);
+        assert.equal(status.persistence.dirty, true);
+        assert.equal(typeof status.persistence.lastLoadedAt, 'number');
+        assert.equal(status.persistence.lastFlushedAt, null);
+    } finally {
+        await appServer.close();
+    }
+
+    const persisted = JSON.parse(fs.readFileSync(file, 'utf8'));
+    assert.equal(persisted.entries.durable.summary, 'Saved memory');
 });
 
 test('set supports metadata and fallback summaries', async () => {

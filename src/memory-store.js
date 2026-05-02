@@ -1,7 +1,20 @@
+const fs = require('fs');
+const path = require('path');
+
 const DEFAULT_IMPORTANCE = 0;
 const DEFAULT_MAP_DEPTH = 1;
 const DEFAULT_MAP_LIMIT = 10;
+const DEFAULT_PERSISTENCE_DEBOUNCE_MS = 500;
 const FALLBACK_SUMMARY_LIMIT = 120;
+const RELATION_TYPES = new Set([
+    'related_to',
+    'depends_on',
+    'supports',
+    'contradicts',
+    'mentions',
+    'derived_from',
+    'next_step',
+]);
 
 function edgeId(from, relation, to) {
     return `${from}\u0000${relation}\u0000${to}`;
@@ -54,10 +67,103 @@ function sortNodeRecords(a, b) {
     return a.key.localeCompare(b.key);
 }
 
+function isPlainObject(value) {
+    return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isNonEmptyString(value) {
+    return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isValidImportance(value) {
+    return Number.isInteger(value) && value >= 0 && value <= 10;
+}
+
+function isValidWeight(value) {
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1;
+}
+
+function atomicTempFile(file) {
+    return path.join(
+        path.dirname(file),
+        `.${path.basename(file)}.${process.pid}.${Date.now()}.tmp`,
+    );
+}
+
+async function atomicWriteJson(file, state) {
+    const dir = path.dirname(file);
+    const tempFile = atomicTempFile(file);
+    const json = `${JSON.stringify(state, null, 2)}\n`;
+
+    await fs.promises.mkdir(dir, { recursive: true });
+
+    try {
+        await fs.promises.writeFile(tempFile, json, 'utf8');
+        await fs.promises.rename(tempFile, file);
+    } catch (error) {
+        try {
+            await fs.promises.unlink(tempFile);
+        } catch (unlinkError) {
+            if (unlinkError.code !== 'ENOENT') {
+                // Ignore cleanup failures; preserve the original write error.
+            }
+        }
+        throw error;
+    }
+}
+
+function atomicWriteJsonSync(file, state) {
+    const dir = path.dirname(file);
+    const tempFile = atomicTempFile(file);
+    const json = `${JSON.stringify(state, null, 2)}\n`;
+
+    fs.mkdirSync(dir, { recursive: true });
+
+    try {
+        fs.writeFileSync(tempFile, json, 'utf8');
+        fs.renameSync(tempFile, file);
+    } catch (error) {
+        try {
+            fs.unlinkSync(tempFile);
+        } catch (unlinkError) {
+            if (unlinkError.code !== 'ENOENT') {
+                // Ignore cleanup failures; preserve the original write error.
+            }
+        }
+        throw error;
+    }
+}
+
 function createMemoryStore(options = {}) {
     const now = options.now || Date.now;
     const entries = new Map();
     const edges = new Map();
+    const persistenceOptions = options.persistence || null;
+    const persistence = persistenceOptions && persistenceOptions.file
+        ? {
+            enabled: true,
+            file: path.resolve(persistenceOptions.file),
+            debounceMs: persistenceOptions.debounceMs ?? DEFAULT_PERSISTENCE_DEBOUNCE_MS,
+            scheduler: persistenceOptions.scheduler || {
+                setTimeout,
+                clearTimeout,
+            },
+        }
+        : {
+            enabled: false,
+            file: null,
+            debounceMs: DEFAULT_PERSISTENCE_DEBOUNCE_MS,
+            scheduler: {
+                setTimeout,
+                clearTimeout,
+            },
+        };
+    let dirty = false;
+    let flushTimer = null;
+    let flushPromise = null;
+    let lastLoadedAt = null;
+    let lastFlushedAt = null;
+    let lastFlushError = null;
 
     function incidentEdges(key) {
         return Array.from(edges.values()).filter((edge) => edge.from === key || edge.to === key);
@@ -136,6 +242,184 @@ function createMemoryStore(options = {}) {
         };
     }
 
+    function exportState() {
+        const exportedEntries = {};
+
+        for (const [key, entry] of entries.entries()) {
+            exportedEntries[key] = {
+                value: entry.value,
+                summary: entry.summary,
+                tags: entry.tags.slice(),
+                importance: entry.importance,
+                updatedAt: entry.updatedAt,
+                updatedBy: entry.updatedBy,
+            };
+        }
+
+        const exportedEdges = Array.from(edges.values())
+            .map(({ id, ...edge }) => edge)
+            .sort((a, b) => {
+                const byFrom = a.from.localeCompare(b.from);
+                if (byFrom !== 0) return byFrom;
+                const byRelation = a.relation.localeCompare(b.relation);
+                if (byRelation !== 0) return byRelation;
+                return a.to.localeCompare(b.to);
+            });
+
+        return {
+            entries: exportedEntries,
+            edges: exportedEdges,
+        };
+    }
+
+    function importState(state) {
+        entries.clear();
+        edges.clear();
+
+        if (!isPlainObject(state)) return;
+
+        const loadedEntries = isPlainObject(state.entries) ? state.entries : {};
+        for (const [key, entry] of Object.entries(loadedEntries)) {
+            if (!isNonEmptyString(key) || !isPlainObject(entry)) continue;
+
+            entries.set(key, {
+                value: entry.value,
+                summary: isNonEmptyString(entry.summary) ? entry.summary : safeSummary(entry.value),
+                tags: normalizeTags(entry.tags),
+                importance: isValidImportance(entry.importance) ? entry.importance : DEFAULT_IMPORTANCE,
+                updatedAt: typeof entry.updatedAt === 'number' && Number.isFinite(entry.updatedAt)
+                    ? entry.updatedAt
+                    : now(),
+                updatedBy: entry.updatedBy ?? null,
+            });
+        }
+
+        const loadedEdges = Array.isArray(state.edges) ? state.edges : [];
+        for (const edge of loadedEdges) {
+            if (!isPlainObject(edge)) continue;
+            if (!isNonEmptyString(edge.from) || !isNonEmptyString(edge.to)) continue;
+            if (edge.from === edge.to) continue;
+            if (!entries.has(edge.from) || !entries.has(edge.to)) continue;
+            if (!isNonEmptyString(edge.relation) || !RELATION_TYPES.has(edge.relation)) continue;
+
+            const id = edgeId(edge.from, edge.relation, edge.to);
+            edges.set(id, {
+                id,
+                from: edge.from,
+                to: edge.to,
+                relation: edge.relation,
+                reason: isNonEmptyString(edge.reason) ? edge.reason : '',
+                weight: isValidWeight(edge.weight) ? edge.weight : 1,
+                updatedAt: typeof edge.updatedAt === 'number' && Number.isFinite(edge.updatedAt)
+                    ? edge.updatedAt
+                    : now(),
+                updatedBy: edge.updatedBy ?? null,
+            });
+        }
+    }
+
+    function loadPersistedState() {
+        if (!persistence.enabled) return;
+        if (!fs.existsSync(persistence.file)) {
+            lastLoadedAt = Date.now();
+            return;
+        }
+
+        let parsed;
+        try {
+            parsed = JSON.parse(fs.readFileSync(persistence.file, 'utf8'));
+        } catch (error) {
+            throw new Error(`Failed to load memory persistence file ${persistence.file}: ${error.message}`);
+        }
+
+        importState(parsed);
+        lastLoadedAt = Date.now();
+    }
+
+    function persistenceStatus() {
+        return {
+            enabled: persistence.enabled,
+            file: persistence.file,
+            dirty,
+            lastLoadedAt,
+            lastFlushedAt,
+            lastFlushError,
+        };
+    }
+
+    function clearPendingFlush() {
+        if (!flushTimer) return;
+        persistence.scheduler.clearTimeout(flushTimer);
+        flushTimer = null;
+    }
+
+    async function flush() {
+        if (!persistence.enabled) return false;
+        clearPendingFlush();
+        if (!dirty) return false;
+        if (flushPromise) return flushPromise;
+
+        flushPromise = atomicWriteJson(persistence.file, exportState())
+            .then(() => {
+                dirty = false;
+                lastFlushedAt = Date.now();
+                lastFlushError = null;
+                return true;
+            })
+            .catch((error) => {
+                dirty = true;
+                lastFlushError = error.message;
+                console.error(`Failed to flush memory persistence: ${error.message}`);
+                return false;
+            })
+            .finally(() => {
+                flushPromise = null;
+            });
+
+        return flushPromise;
+    }
+
+    function flushSync() {
+        if (!persistence.enabled || !dirty) return false;
+        clearPendingFlush();
+
+        try {
+            atomicWriteJsonSync(persistence.file, exportState());
+            dirty = false;
+            lastFlushedAt = Date.now();
+            lastFlushError = null;
+            return true;
+        } catch (error) {
+            dirty = true;
+            lastFlushError = error.message;
+            console.error(`Failed to synchronously flush memory persistence: ${error.message}`);
+            return false;
+        }
+    }
+
+    function scheduleFlush() {
+        if (!persistence.enabled || flushTimer) return;
+
+        flushTimer = persistence.scheduler.setTimeout(async () => {
+            flushTimer = null;
+            try {
+                await flush();
+            } catch (error) {
+                dirty = true;
+                lastFlushError = error.message;
+                console.error(`Failed to flush memory persistence: ${error.message}`);
+            }
+        }, persistence.debounceMs);
+    }
+
+    function markDirty() {
+        if (!persistence.enabled) return;
+        dirty = true;
+        scheduleFlush();
+    }
+
+    loadPersistedState();
+
     return {
         set(key, value, updatedBy, metadata = {}) {
             const entry = {
@@ -147,6 +431,7 @@ function createMemoryStore(options = {}) {
                 updatedBy,
             };
             entries.set(key, entry);
+            markDirty();
             return entry;
         },
 
@@ -165,6 +450,9 @@ function createMemoryStore(options = {}) {
                 }
             }
 
+            if (removed || removedEdges.length > 0) {
+                markDirty();
+            }
             return { removed, removedEdges };
         },
 
@@ -203,6 +491,7 @@ function createMemoryStore(options = {}) {
             };
 
             edges.set(id, edge);
+            markDirty();
             return { ok: true, action, edge };
         },
 
@@ -218,11 +507,23 @@ function createMemoryStore(options = {}) {
                 updatedAt: now(),
                 updatedBy: null,
             };
-            edges.delete(id);
+            if (edges.delete(id)) {
+                markDirty();
+            }
             return edge;
         },
 
         map,
+
+        exportState,
+
+        importState,
+
+        flush,
+
+        flushSync,
+
+        persistenceStatus,
 
         safeSummary,
     };

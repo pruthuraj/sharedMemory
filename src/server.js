@@ -16,7 +16,13 @@ function createSharedMemoryServer(options = {}) {
     const app = express();
     const server = http.createServer(app);
     const wss = new WebSocket.Server({ server });
-    const memory = options.memoryStore || createMemoryStore({ now: options.now });
+    const persistence = options.persistence || (
+        process.env.MEMORY_FILE ? { file: process.env.MEMORY_FILE } : null
+    );
+    const memory = options.memoryStore || createMemoryStore({
+        now: options.now,
+        persistence,
+    });
     const agents = options.agentRegistry || createAgentRegistry({ genId: options.genId });
 
     app.get('/status', (req, res) => {
@@ -26,6 +32,7 @@ function createSharedMemoryServer(options = {}) {
             memoryKeys: memory.keys(),
             memoryCount: memory.count(),
             relationCount: memory.relationCount(),
+            persistence: memory.persistenceStatus(),
         });
     });
 
@@ -192,7 +199,9 @@ function createSharedMemoryServer(options = {}) {
             return server.listen(...args);
         },
 
-        close() {
+        async close() {
+            await memory.flush();
+
             for (const client of wss.clients) {
                 client.terminate();
             }
