@@ -3,7 +3,12 @@ const http = require('http');
 const WebSocket = require('ws');
 
 const { createAgentRegistry } = require('./agent-registry');
-const { notifyKeyUpdate, notifyLinkedAgents, safeSend } = require('./delivery');
+const {
+    notifyKeyUpdate,
+    notifyLinkedAgents,
+    notifyRelationUpdate,
+    safeSend,
+} = require('./delivery');
 const { createMemoryStore } = require('./memory-store');
 const { parseMessage } = require('./protocol');
 
@@ -19,8 +24,16 @@ function createSharedMemoryServer(options = {}) {
             agents: agents.ids(),
             connectedAgents: agents.connectedIds(),
             memoryKeys: memory.keys(),
+            memoryCount: memory.count(),
+            relationCount: memory.relationCount(),
         });
     });
+
+    function publicEdge(edge) {
+        if (!edge) return edge;
+        const { id, ...rest } = edge;
+        return rest;
+    }
 
     wss.on('connection', (ws) => {
         let agentId = agents.createTemporary(ws);
@@ -49,7 +62,11 @@ function createSharedMemoryServer(options = {}) {
                 }
 
                 case 'set': {
-                    const entry = memory.set(data.key, data.value, agentId);
+                    const entry = memory.set(data.key, data.value, agentId, {
+                        summary: data.summary,
+                        tags: data.tags,
+                        importance: data.importance,
+                    });
                     safeSend(ws, { type: 'ok', action: 'set', key: data.key });
                     notifyKeyUpdate(agents, data.key, entry);
                     notifyLinkedAgents(agents, agentId, { action: 'set', key: data.key, entry });
@@ -96,6 +113,61 @@ function createSharedMemoryServer(options = {}) {
                         agents: agents.ids(),
                         memoryKeys: memory.keys(),
                     });
+                    break;
+                }
+
+                case 'relate': {
+                    const result = memory.relate(data.from, data.to, data.relation, agentId, {
+                        reason: data.reason,
+                        weight: data.weight,
+                    });
+
+                    if (!result.ok) {
+                        safeSend(ws, { type: 'error', message: result.error });
+                        break;
+                    }
+
+                    const edge = publicEdge(result.edge);
+                    safeSend(ws, { type: 'related', action: result.action, edge });
+                    notifyRelationUpdate(agents, result.action, edge);
+                    break;
+                }
+
+                case 'unrelate': {
+                    const edge = publicEdge(memory.unrelate(data.from, data.to, data.relation));
+                    safeSend(ws, {
+                        type: 'unrelated',
+                        from: data.from,
+                        to: data.to,
+                        relation: data.relation,
+                    });
+                    notifyRelationUpdate(agents, 'deleted', edge);
+                    break;
+                }
+
+                case 'delete': {
+                    const result = memory.delete(data.key);
+                    safeSend(ws, { type: 'deleted', key: data.key, removed: result.removed });
+                    notifyKeyUpdate(agents, data.key, null, { action: 'deleted' });
+
+                    for (const removedEdge of result.removedEdges) {
+                        notifyRelationUpdate(agents, 'cascade-deleted', publicEdge(removedEdge));
+                    }
+                    break;
+                }
+
+                case 'map': {
+                    const result = memory.map(data.key, {
+                        depth: data.depth,
+                        limit: data.limit,
+                    });
+
+                    if (!result) {
+                        safeSend(ws, { type: 'error', message: 'missing-node' });
+                        break;
+                    }
+
+                    safeSend(ws, { type: 'map-result', ...result });
                     break;
                 }
 

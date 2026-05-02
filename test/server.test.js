@@ -4,8 +4,8 @@ const WebSocket = require('ws');
 
 const { createSharedMemoryServer } = require('../src/server');
 
-async function startServer() {
-    const appServer = createSharedMemoryServer();
+async function startServer(options = {}) {
+    const appServer = createSharedMemoryServer(options);
 
     await new Promise((resolve) => {
         appServer.listen(0, '127.0.0.1', resolve);
@@ -110,7 +110,221 @@ test('register, set, get, list, and status remain compatible', async () => {
             agents: ['agentA'],
             connectedAgents: ['agentA'],
             memoryKeys: ['greeting'],
+            memoryCount: 1,
+            relationCount: 0,
         });
+    } finally {
+        await appServer.close();
+    }
+});
+
+test('set supports metadata and fallback summaries', async () => {
+    const { appServer, wsUrl } = await startServer();
+
+    try {
+        const client = await connectClient(wsUrl);
+        await client.waitFor((message) => message.type === 'welcome');
+        client.send({ type: 'register', agentId: 'agentA' });
+        await client.waitFor((message) => message.type === 'registered');
+
+        client.send({
+            type: 'set',
+            key: 'project.architecture',
+            value: 'server modules',
+            summary: 'Server is split into focused modules.',
+            tags: ['architecture', 'server'],
+            importance: 8,
+        });
+        await client.waitFor((message) => message.type === 'ok' && message.key === 'project.architecture');
+
+        client.send({ type: 'get', key: 'project.architecture' });
+        const metadataResult = await client.waitFor(
+            (message) => message.type === 'result' && message.key === 'project.architecture',
+        );
+        assert.equal(metadataResult.entry.summary, 'Server is split into focused modules.');
+        assert.deepEqual(metadataResult.entry.tags, ['architecture', 'server']);
+        assert.equal(metadataResult.entry.importance, 8);
+
+        client.send({ type: 'set', key: 'fallback', value: '  noisy\n\n summary\ttext  ' });
+        await client.waitFor((message) => message.type === 'ok' && message.key === 'fallback');
+        client.send({ type: 'get', key: 'fallback' });
+        const fallbackResult = await client.waitFor(
+            (message) => message.type === 'result' && message.key === 'fallback',
+        );
+        assert.equal(fallbackResult.entry.summary, 'noisy summary text');
+
+        client.send({ type: 'set', key: 'bad', value: true, importance: 11 });
+        assert.deepEqual(await client.waitFor((message) => message.message === 'invalid-importance'), {
+            type: 'error',
+            message: 'invalid-importance',
+        });
+    } finally {
+        await appServer.close();
+    }
+});
+
+test('relate creates and updates edges with exactly-once incident notifications', async () => {
+    const { appServer, wsUrl } = await startServer();
+
+    try {
+        const actor = await connectClient(wsUrl);
+        await actor.waitFor((message) => message.type === 'welcome');
+        actor.send({ type: 'register', agentId: 'actor' });
+        await actor.waitFor((message) => message.type === 'registered');
+
+        const subscriber = await connectClient(wsUrl);
+        await subscriber.waitFor((message) => message.type === 'welcome');
+        subscriber.send({ type: 'register', agentId: 'subscriber' });
+        await subscriber.waitFor((message) => message.type === 'registered');
+
+        for (const key of ['project.database', 'project.architecture']) {
+            actor.send({ type: 'set', key, value: key, summary: key, importance: 5 });
+            await actor.waitFor((message) => message.type === 'ok' && message.key === key);
+            subscriber.send({ type: 'subscribe', key });
+            await subscriber.waitFor((message) => message.type === 'subscribed' && message.key === key);
+        }
+
+        const beforeCreate = subscriber.messages.filter((message) => message.type === 'relation-update').length;
+        actor.send({
+            type: 'relate',
+            from: 'project.database',
+            to: 'project.architecture',
+            relation: 'depends_on',
+            reason: 'Database decisions affect architecture.',
+            weight: 0.8,
+        });
+
+        const createAck = await actor.waitFor((message) => message.type === 'related');
+        assert.equal(createAck.action, 'created');
+        assert.equal(createAck.edge.reason, 'Database decisions affect architecture.');
+        assert.equal(createAck.edge.weight, 0.8);
+
+        const createNotice = await subscriber.waitFor(
+            (message) => message.type === 'relation-update' && message.action === 'created',
+        );
+        assert.deepEqual(createNotice.keys, ['project.database', 'project.architecture']);
+        assert.equal(createNotice.edge.relation, 'depends_on');
+
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        const afterCreate = subscriber.messages.filter((message) => message.type === 'relation-update').length;
+        assert.equal(afterCreate - beforeCreate, 1);
+
+        actor.send({
+            type: 'relate',
+            from: 'project.database',
+            to: 'project.architecture',
+            relation: 'depends_on',
+            reason: 'Updated reason.',
+            weight: 0.4,
+        });
+
+        const updateAck = await actor.waitFor(
+            (message) => message.type === 'related' && message.action === 'updated',
+        );
+        assert.equal(updateAck.edge.reason, 'Updated reason.');
+        assert.equal(updateAck.edge.weight, 0.4);
+        await subscriber.waitFor((message) => message.type === 'relation-update' && message.action === 'updated');
+    } finally {
+        await appServer.close();
+    }
+});
+
+test('relation validation rejects self edges and missing nodes', async () => {
+    const { appServer, wsUrl } = await startServer();
+
+    try {
+        const client = await connectClient(wsUrl);
+        await client.waitFor((message) => message.type === 'welcome');
+        client.send({ type: 'register', agentId: 'agentA' });
+        await client.waitFor((message) => message.type === 'registered');
+
+        client.send({ type: 'set', key: 'nodeA', value: 'A' });
+        await client.waitFor((message) => message.type === 'ok' && message.key === 'nodeA');
+
+        client.send({ type: 'relate', from: 'nodeA', to: 'nodeA', relation: 'related_to' });
+        assert.deepEqual(await client.waitFor((message) => message.message === 'self-relation-not-allowed'), {
+            type: 'error',
+            message: 'self-relation-not-allowed',
+        });
+
+        client.send({ type: 'relate', from: 'nodeA', to: 'missing', relation: 'related_to' });
+        assert.deepEqual(await client.waitFor((message) => message.message === 'missing-node'), {
+            type: 'error',
+            message: 'missing-node',
+        });
+
+        client.send({ type: 'relate', from: 'nodeA', to: 'missing', relation: 'bad_relation' });
+        assert.deepEqual(await client.waitFor((message) => message.message === 'invalid-relation'), {
+            type: 'error',
+            message: 'invalid-relation',
+        });
+    } finally {
+        await appServer.close();
+    }
+});
+
+test('unrelate and delete emit distinct graph lifecycle notifications', async () => {
+    const { appServer, httpUrl, wsUrl } = await startServer();
+
+    try {
+        const actor = await connectClient(wsUrl);
+        await actor.waitFor((message) => message.type === 'welcome');
+        actor.send({ type: 'register', agentId: 'actor' });
+        await actor.waitFor((message) => message.type === 'registered');
+
+        const subscriber = await connectClient(wsUrl);
+        await subscriber.waitFor((message) => message.type === 'welcome');
+        subscriber.send({ type: 'register', agentId: 'subscriber' });
+        await subscriber.waitFor((message) => message.type === 'registered');
+
+        for (const key of ['nodeA', 'nodeB', 'nodeC']) {
+            actor.send({ type: 'set', key, value: key, summary: key });
+            await actor.waitFor((message) => message.type === 'ok' && message.key === key);
+            subscriber.send({ type: 'subscribe', key });
+            await subscriber.waitFor((message) => message.type === 'subscribed' && message.key === key);
+        }
+
+        actor.send({ type: 'relate', from: 'nodeA', to: 'nodeB', relation: 'supports' });
+        await actor.waitFor((message) => message.type === 'related' && message.action === 'created');
+        await subscriber.waitFor((message) => message.type === 'relation-update' && message.action === 'created');
+
+        actor.send({ type: 'unrelate', from: 'nodeA', to: 'nodeB', relation: 'supports' });
+        assert.deepEqual(await actor.waitFor((message) => message.type === 'unrelated'), {
+            type: 'unrelated',
+            from: 'nodeA',
+            to: 'nodeB',
+            relation: 'supports',
+        });
+        await subscriber.waitFor((message) => message.type === 'relation-update' && message.action === 'deleted');
+
+        actor.send({ type: 'relate', from: 'nodeA', to: 'nodeB', relation: 'supports' });
+        await actor.waitFor((message) => message.type === 'related' && message.action === 'created');
+        actor.send({ type: 'relate', from: 'nodeC', to: 'nodeA', relation: 'depends_on' });
+        await actor.waitFor((message) => message.type === 'related' && message.edge.from === 'nodeC');
+
+        actor.send({ type: 'delete', key: 'nodeA' });
+        assert.deepEqual(await actor.waitFor((message) => message.type === 'deleted'), {
+            type: 'deleted',
+            key: 'nodeA',
+            removed: true,
+        });
+        await subscriber.waitFor(
+            (message) => message.type === 'update' && message.key === 'nodeA' && message.action === 'deleted',
+        );
+
+        const cascadeNotices = [];
+        while (cascadeNotices.length < 2) {
+            const notice = await subscriber.waitFor(
+                (message) => message.type === 'relation-update' && message.action === 'cascade-deleted',
+            );
+            cascadeNotices.push(`${notice.edge.from}:${notice.edge.relation}:${notice.edge.to}`);
+            subscriber.messages.splice(subscriber.messages.indexOf(notice), 1);
+        }
+        assert.deepEqual(cascadeNotices.sort(), ['nodeA:supports:nodeB', 'nodeC:depends_on:nodeA']);
+
+        const status = await fetch(`${httpUrl}/status`).then((response) => response.json());
+        assert.equal(status.memoryCount, 2);
+        assert.equal(status.relationCount, 0);
     } finally {
         await appServer.close();
     }

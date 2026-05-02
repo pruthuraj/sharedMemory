@@ -7,6 +7,20 @@ const COMMAND_TYPES = new Set([
     'link',
     'unlink',
     'list',
+    'relate',
+    'unrelate',
+    'delete',
+    'map',
+]);
+
+const RELATION_TYPES = new Set([
+    'related_to',
+    'depends_on',
+    'supports',
+    'contradicts',
+    'mentions',
+    'derived_from',
+    'next_step',
 ]);
 
 function isPlainObject(value) {
@@ -15,6 +29,54 @@ function isPlainObject(value) {
 
 function isNonEmptyString(value) {
     return typeof value === 'string' && value.trim().length > 0;
+}
+
+function hasOwn(object, key) {
+    return Object.prototype.hasOwnProperty.call(object, key);
+}
+
+function isIntegerInRange(value, min, max) {
+    return Number.isInteger(value) && value >= min && value <= max;
+}
+
+function isNumberInRange(value, min, max) {
+    return typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max;
+}
+
+function hasValidTags(tags) {
+    return Array.isArray(tags) && tags.every(isNonEmptyString);
+}
+
+function validateSetMetadata(message) {
+    if (hasOwn(message, 'summary') && !isNonEmptyString(message.summary)) {
+        return { ok: false, error: 'invalid-summary' };
+    }
+
+    if (hasOwn(message, 'tags') && !hasValidTags(message.tags)) {
+        return { ok: false, error: 'invalid-tags' };
+    }
+
+    if (hasOwn(message, 'importance') && !isIntegerInRange(message.importance, 0, 10)) {
+        return { ok: false, error: 'invalid-importance' };
+    }
+
+    return null;
+}
+
+function validateRelationFields(message) {
+    if (!isNonEmptyString(message.from)) {
+        return { ok: false, error: 'missing-from' };
+    }
+
+    if (!isNonEmptyString(message.to)) {
+        return { ok: false, error: 'missing-to' };
+    }
+
+    if (!isNonEmptyString(message.relation) || !RELATION_TYPES.has(message.relation)) {
+        return { ok: false, error: 'invalid-relation' };
+    }
+
+    return null;
 }
 
 function parseMessage(raw) {
@@ -47,9 +109,15 @@ function validateMessage(message) {
             return { ok: true, message };
 
         case 'set':
+            if (!isNonEmptyString(message.key)) {
+                return { ok: false, error: 'missing-key' };
+            }
+            return validateSetMetadata(message) || { ok: true, message };
+
         case 'get':
         case 'subscribe':
         case 'unsubscribe':
+        case 'delete':
             if (!isNonEmptyString(message.key)) {
                 return { ok: false, error: 'missing-key' };
             }
@@ -65,6 +133,41 @@ function validateMessage(message) {
         case 'list':
             return { ok: true, message };
 
+        case 'relate': {
+            const relationError = validateRelationFields(message);
+            if (relationError) return relationError;
+
+            if (hasOwn(message, 'reason') && !isNonEmptyString(message.reason)) {
+                return { ok: false, error: 'invalid-reason' };
+            }
+
+            if (hasOwn(message, 'weight') && !isNumberInRange(message.weight, 0, 1)) {
+                return { ok: false, error: 'invalid-weight' };
+            }
+
+            return { ok: true, message };
+        }
+
+        case 'unrelate': {
+            const relationError = validateRelationFields(message);
+            return relationError || { ok: true, message };
+        }
+
+        case 'map':
+            if (!isNonEmptyString(message.key)) {
+                return { ok: false, error: 'missing-key' };
+            }
+
+            if (hasOwn(message, 'depth') && !isIntegerInRange(message.depth, 0, 10)) {
+                return { ok: false, error: 'invalid-depth' };
+            }
+
+            if (hasOwn(message, 'limit') && !isIntegerInRange(message.limit, 1, 100)) {
+                return { ok: false, error: 'invalid-limit' };
+            }
+
+            return { ok: true, message };
+
         default:
             return { ok: false, error: 'unknown-type' };
     }
@@ -72,4 +175,5 @@ function validateMessage(message) {
 
 module.exports = {
     parseMessage,
+    RELATION_TYPES,
 };
