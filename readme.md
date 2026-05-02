@@ -1,223 +1,271 @@
-# MCP Shared Memory Server (local)
+# MCP Shared Memory Server
 
-This project provides a small, local "MCP-like" server that exposes a shared memory store and a simple linking model for AI agents via WebSocket. It's intended for local testing and prototyping: agents can `set` and `get` shared keys, `subscribe` to updates, and link to other agents so messages can be forwarded.
-Contents
+This project is a small local WebSocket server for sharing memory between agent-like clients. It is "MCP-like" in purpose, but it does not implement the official Model Context Protocol.
 
-- [server.js](server.js#L1) — HTTP + WebSocket server and in-memory shared store.
-- [example_agent.js](example_agent.js#L1) — small example agent showing register/set/subscribe flows.
-- [package.json](package.json#L1) — project metadata and `npm start` script.
-  Goals
-- Provide a single shared memory surface agents can read/write.
-- Notify subscribers when keys change.
-- Allow simple agent-to-agent linking (forwarding of messages).
-- Keep the system minimal and easy to extend (persistence, auth, CRDTs later).
-  Quick start
+Agents can register an ID, set and get shared keys, subscribe to updates, and link to other agent IDs for forwarded activity notifications. State is in memory only.
 
-1. Install dependencies:
+## Files
+- `server.js`: startup wrapper for `npm start`.
+- `src/server.js`: Express, HTTP, WebSocket setup, and lifecycle helpers.
+- `src/protocol.js`: JSON message parsing and validation.
+- `src/memory-store.js`: in-memory key/value store.
+- `src/agent-registry.js`: agent IDs, registrations, subscriptions, links, disconnects.
+- `src/delivery.js`: safe WebSocket delivery helpers.
+- `example_agent.js`: simple client that registers, subscribes, sets a key, and lists server state.
+- `test/server.test.js`: integration tests for the protocol and reliability behavior.
+
+## Quick Start
+
+Install dependencies:
 
 ```bash
 npm install
 ```
 
-2. Start the server:
+Start the server:
 
 ```bash
 npm start
 ```
 
-3. Run example agents (in separate terminals):
+Run example agents in separate terminals:
 
 ```bash
 node example_agent.js agentA
 node example_agent.js agentB
 ```
 
-Verify
-
-- Check status endpoint:
+Check server status:
 
 ```bash
 curl http://localhost:3000/status
 ```
 
-- Observe console output from `example_agent.js` — it will register, set a key, and print updates it receives.
-  Architecture overview
-- HTTP server: small status endpoint at `/status` that lists known agent IDs and stored memory keys.
-- WebSocket server: agents connect and speak a tiny JSON protocol.
-- In-memory store: a simple object mapping keys → { value, updatedAt, updatedBy }.
-- Agents registry: map of agentId → { ws, subscriptions: Set, links: Set }. A disconnected agent keeps a placeholder record so other agents can link to it by ID.
-  JSON WebSocket protocol
-  All messages are JSON objects. The server replies with JSON. Below are the supported request `type` values, fields, and examples.
+Run tests:
 
-- `register`
-  - Purpose: set or confirm the agent's ID with the server.
-  - Request example:
+```bash
+npm test
+```
+
+## HTTP Status
+
+`GET /status` returns:
+
+```json
+{
+  "agents": ["agentA"],
+  "connectedAgents": ["agentA"],
+  "memoryKeys": ["greeting"]
+}
+```
+
+- `agents`: all known agent IDs, including offline placeholders.
+- `connectedAgents`: agent IDs with a live WebSocket.
+- `memoryKeys`: keys currently stored in memory.
+
+## WebSocket Protocol
+
+Connect to:
+
+```text
+ws://localhost:3000
+```
+
+All messages are JSON objects with a `type` field.
+
+### `register`
+
+Registers or confirms an agent ID.
 
 ```json
 { "type": "register", "agentId": "agentA" }
 ```
 
-- `set`
-  - Purpose: set a memory key's value (overwrites previous value).
-  - Request example:
+Response:
+
+```json
+{ "type": "registered", "agentId": "agentA" }
+```
+
+If another live connection already owns that ID, the server returns:
+
+```json
+{ "type": "error", "message": "duplicate-agent" }
+```
+
+Offline agent IDs can be reclaimed by a later connection.
+
+### `set`
+
+Stores a memory value.
 
 ```json
 { "type": "set", "key": "greeting", "value": "hello from agentA" }
 ```
 
-    - Server will store: `{ value, updatedAt, updatedBy }` and broadcast updates to subscribers.
+Response:
 
-- `get`
-  - Purpose: read a key's current entry.
-  - Request example:
+```json
+{ "type": "ok", "action": "set", "key": "greeting" }
+```
+
+The stored entry has this shape:
+
+```json
+{
+  "value": "hello from agentA",
+  "updatedAt": 1714694400000,
+  "updatedBy": "agentA"
+}
+```
+
+### `get`
+
+Reads a memory key.
 
 ```json
 { "type": "get", "key": "greeting" }
 ```
 
-    - Response example:
+Response:
 
 ```json
-{ "type": "result", "key": "greeting", "entry": { "value": "hello", "updatedAt": 162..., "updatedBy": "agentA" } }
+{
+  "type": "result",
+  "key": "greeting",
+  "entry": {
+    "value": "hello from agentA",
+    "updatedAt": 1714694400000,
+    "updatedBy": "agentA"
+  }
+}
 ```
 
-- `subscribe`
-  - Purpose: subscribe to updates for a key. Server sends `update` messages when the key changes.
-  - Request example:
+If the key does not exist, `entry` is `null`.
+
+### `subscribe`
+
+Subscribes to updates for a key.
 
 ```json
 { "type": "subscribe", "key": "greeting" }
 ```
 
-    - Immediate server behavior: acknowledges with `{ type: 'subscribed', key }` and sends current value if present.
+Response:
 
-- `unsubscribe`
-  - Purpose: stop receiving updates for a key.
-  - Request example:
+```json
+{ "type": "subscribed", "key": "greeting" }
+```
+
+If the key already has a value, the server immediately sends an `update`. Future `set` calls for the same key also send `update` messages to subscribers.
+
+```json
+{
+  "type": "update",
+  "key": "greeting",
+  "entry": {
+    "value": "new value",
+    "updatedAt": 1714694400000,
+    "updatedBy": "agentB"
+  }
+}
+```
+
+### `unsubscribe`
+
+Stops updates for a key.
 
 ```json
 { "type": "unsubscribe", "key": "greeting" }
 ```
 
-- `link`
-  - Purpose: create a logical link from this agent to another agent ID. When this agent performs actions, a linked agent can receive forwarded `linked` notifications.
-  - Request example:
+Response:
+
+```json
+{ "type": "unsubscribed", "key": "greeting" }
+```
+
+### `link`
+
+Creates a one-way logical link from the current agent to a target agent ID.
 
 ```json
 { "type": "link", "target": "agentB" }
 ```
 
-    - Note: linking only records the target ID on the source agent; it does not enforce bidirectional links.
+Response:
 
-- `unlink`
-  - Purpose: remove a previously created link.
+```json
+{ "type": "linked", "target": "agentB" }
+```
+
+When the source agent performs a `set`, the live linked target receives:
+
+```json
+{
+  "type": "linked",
+  "from": "agentA",
+  "payload": {
+    "action": "set",
+    "key": "greeting",
+    "entry": {
+      "value": "hello",
+      "updatedAt": 1714694400000,
+      "updatedBy": "agentA"
+    }
+  }
+}
+```
+
+Offline linked targets are skipped safely.
+
+### `unlink`
+
+Removes a one-way link.
 
 ```json
 { "type": "unlink", "target": "agentB" }
 ```
 
-- `list`
-  - Purpose: ask the server for known agent IDs and memory keys.
+Response:
+
+```json
+{ "type": "unlinked", "target": "agentB" }
+```
+
+### `list`
+
+Lists known agent IDs and memory keys.
 
 ```json
 { "type": "list" }
 ```
 
-Server-originated message types
-
-- `welcome`: sent when a connection is first accepted; contains a temporary or assigned `agentId`.
-- `registered`: ack for `register` with confirmed `agentId`.
-- `ok`: generic acknowledgement for actions like `set`.
-- `update`: notification that a key changed. Example payload:
+Response:
 
 ```json
-{ "type": "update", "key": "greeting", "entry": { "value": "hi", "updatedAt": 162..., "updatedBy": "agentB" } }
+{
+  "type": "list",
+  "agents": ["agentA", "agentB"],
+  "memoryKeys": ["greeting"]
+}
 ```
 
-- `linked`: delivered to agents that are linked from another agent when that agent performs an action; includes `from` and `payload` fields.
+## Validation
 
-Example agent flow
+The server returns `{ "type": "error", "message": "..." }` for invalid input.
 
-1. Agent connects to `ws://localhost:3000`.
-2. Agent sends `{ "type": "register", "agentId": "agentA" }`.
-3. Agent subscribes to `greeting`:
+- Invalid JSON: `invalid-json`
+- JSON that is not an object: `invalid-message`
+- Unknown or missing command type: `unknown-type`
+- Missing or blank `key`: `missing-key`
+- Missing or blank `target`: `missing-target`
+- Blank `agentId`: `missing-agentId`
+- Duplicate live agent ID: `duplicate-agent`
 
-```json
-{ "type": "subscribe", "key": "greeting" }
-```
+## Limitations
 
-4. Another agent sets the key:
-
-```json
-{ "type": "set", "key": "greeting", "value": "hello from agentB" }
-```
-
-5. The first agent receives an `update` message with the new entry.
-
-Operational notes & limitations
-
-- In-memory only: the current implementation keeps all state in memory. Restarting the server clears memory and agent runtime state.
-- No authentication: anyone who can open the WebSocket can register as any agent ID. Consider adding token-based auth in production.
-- Concurrency / conflicts: concurrent `set` operations are last-write-wins. For stronger guarantees across distributed agents, use CRDTs or add a leader/locking mechanism.
-
-Extensions — suggested next steps
-
-- Persistence: write memory entries to disk or a small database (SQLite, LevelDB, or Redis) to survive restarts.
-- Auth: add TLS + token-based registration and an `admin` role for management operations.
-- Message routing: implement bidirectional linking, message queuing for offline agents, or reliable delivery semantics.
-
-Troubleshooting
-
-- If agents don't receive updates:
-  - Check server console for errors.
-  - Confirm `/status` shows connected agent IDs.
-  - Ensure the agent subscribed to the correct key name.
-
-- Use `wscat` or `WebSocket` clients to manually exercise the protocol.
-
-Contact
-
-- If you want, I can add persistence, authentication, or a small dashboard to visualize shared memory. Ask which feature to implement next.
-
-# MCP Shared Memory Server (local)
-
-This repository contains a minimal, local "MCP-like" server that provides a shared memory store and simple linking between AI agents over WebSocket.
-
-Files added:
-
-- [server.js](server.js#L1) — main server (HTTP + WebSocket).
-- [example_agent.js](example_agent.js#L1) — example agent client.
-- [package.json](package.json#L1) — Node dependencies and start script.
-
-Quick start
-
-1. Install dependencies:
-
-```bash
-npm install
-```
-
-2. Start the server:
-
-```bash
-npm start
-```
-
-3. Run an example agent in another terminal:
-
-```bash
-node example_agent.js agentA
-node example_agent.js agentB
-```
-
-Behavior
-
-- Agents connect via WebSocket to `ws://localhost:3000`.
-- Simple JSON protocol supported: `register`, `set`, `get`, `subscribe`, `unsubscribe`, `link`, `unlink`, `list`.
-- Shared memory is kept in-memory; updates are broadcast to subscribers and linked agents.
-
-Next steps (optional):
-
-- Add persistent storage (file or DB) for memory.
-- Add authentication/authorization for agents.
-- Add richer conflict resolution or CRDTs for concurrent writes.
+- State is in memory only and is lost on restart.
+- There is no authentication or authorization.
+- This is not a real MCP server implementation.
+- Concurrent writes are last-write-wins.

@@ -4,7 +4,8 @@
   "description": "Local MCP-like server providing shared memory and agent linking via WebSocket",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test"
   },
   "dependencies": {
     "express": "^4.18.2",
