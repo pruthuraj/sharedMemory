@@ -178,6 +178,17 @@ function createSharedMemoryServer(options = {}) {
                     break;
                 }
 
+                case 'search': {
+                    const { results, total } = memory.search({
+                        query: data.query,
+                        tags: data.tags,
+                        minImportance: data.minImportance,
+                        limit: data.limit,
+                    });
+                    safeSend(ws, { type: 'search-result', results, total });
+                    break;
+                }
+
                 default:
                     safeSend(ws, { type: 'error', message: 'unknown-type' });
             }

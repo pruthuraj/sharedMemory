@@ -11,6 +11,7 @@ const COMMAND_TYPES = new Set([
     'unrelate',
     'delete',
     'map',
+    'search',
 ]);
 
 const RELATION_TYPES = new Set([
@@ -167,6 +168,33 @@ function validateMessage(message) {
             }
 
             return { ok: true, message };
+
+        case 'search': {
+            if (hasOwn(message, 'query') && !isNonEmptyString(message.query)) {
+                return { ok: false, error: 'invalid-query' };
+            }
+
+            if (hasOwn(message, 'tags') && !hasValidTags(message.tags)) {
+                return { ok: false, error: 'invalid-tags' };
+            }
+
+            if (hasOwn(message, 'minImportance') && !isIntegerInRange(message.minImportance, 0, 10)) {
+                return { ok: false, error: 'invalid-importance' };
+            }
+
+            if (hasOwn(message, 'limit') && !isIntegerInRange(message.limit, 1, 100)) {
+                return { ok: false, error: 'invalid-limit' };
+            }
+
+            const hasQuery = hasOwn(message, 'query');
+            const hasTags = hasOwn(message, 'tags') && message.tags.length > 0;
+            const hasMinImportance = hasOwn(message, 'minImportance');
+            if (!hasQuery && !hasTags && !hasMinImportance) {
+                return { ok: false, error: 'missing-filter' };
+            }
+
+            return { ok: true, message };
+        }
 
         default:
             return { ok: false, error: 'unknown-type' };

@@ -240,6 +240,66 @@ test('flushSync writes a valid atomic snapshot', () => {
     assert.equal(memory.persistenceStatus().dirty, false);
 });
 
+test('search returns metadata-only matches sorted by importance, recency, then key', () => {
+    const memory = createTimedStore();
+
+    memory.set('alpha', { secret: 1 }, 'agentA', { summary: 'alpha summary', tags: ['x'], importance: 5 });
+    memory.set('bravo', { secret: 2 }, 'agentA', { summary: 'bravo summary', tags: ['x'], importance: 9 });
+    memory.set('charlie', { secret: 3 }, 'agentA', { summary: 'charlie summary', tags: ['x'], importance: 5 });
+    memory.set('delta', { secret: 4 }, 'agentA', { summary: 'delta summary', tags: ['y'], importance: 9 });
+
+    const result = memory.search({ tags: ['x'] });
+
+    assert.equal(result.total, 3);
+    assert.equal(result.results.length, 3);
+    assert.deepEqual(result.results.map((r) => r.key), ['bravo', 'charlie', 'alpha']);
+    for (const record of result.results) {
+        assert.equal(Object.prototype.hasOwnProperty.call(record, 'value'), false);
+        assert.ok(record.summary);
+    }
+});
+
+test('search applies limit but reports pre-limit total', () => {
+    const memory = createTimedStore();
+
+    for (const key of ['k1', 'k2', 'k3', 'k4', 'k5']) {
+        memory.set(key, key, 'agentA', { summary: key, tags: ['x'], importance: 5 });
+    }
+
+    const result = memory.search({ tags: ['x'], limit: 2 });
+    assert.equal(result.results.length, 2);
+    assert.equal(result.total, 5);
+});
+
+test('search query is case-insensitive across key, summary, and tags', () => {
+    const memory = createTimedStore();
+
+    memory.set('AlphaKey', 'value-a', 'agentA', { summary: 'plain summary', tags: ['t1'], importance: 3 });
+    memory.set('regular', 'value-b', 'agentA', { summary: 'Has SPECIAL summary', tags: ['t2'], importance: 3 });
+    memory.set('plain', 'value-c', 'agentA', { summary: 'no match', tags: ['Findable'], importance: 3 });
+
+    const byKey = memory.search({ query: 'alpha' });
+    assert.deepEqual(byKey.results.map((r) => r.key), ['AlphaKey']);
+
+    const bySummary = memory.search({ query: 'special' });
+    assert.deepEqual(bySummary.results.map((r) => r.key), ['regular']);
+
+    const byTag = memory.search({ query: 'findable' });
+    assert.deepEqual(byTag.results.map((r) => r.key), ['plain']);
+});
+
+test('search requires ALL provided tags (AND semantics)', () => {
+    const memory = createTimedStore();
+
+    memory.set('both', 'b', 'agentA', { summary: 'both', tags: ['a', 'b'], importance: 5 });
+    memory.set('only-a', 'a', 'agentA', { summary: 'only a', tags: ['a'], importance: 5 });
+    memory.set('only-b', 'b', 'agentA', { summary: 'only b', tags: ['b'], importance: 5 });
+
+    const result = memory.search({ tags: ['a', 'b'] });
+    assert.equal(result.total, 1);
+    assert.deepEqual(result.results.map((r) => r.key), ['both']);
+});
+
 function createTimedStoreWithPersistence(file) {
     let time = 100;
     return createMemoryStore({

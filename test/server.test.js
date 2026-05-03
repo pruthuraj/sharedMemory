@@ -518,3 +518,59 @@ test('link, unlink, and offline linked targets are safe', async () => {
         await appServer.close();
     }
 });
+
+test('search command returns metadata-only filtered results', async () => {
+    const { appServer, wsUrl } = await startServer();
+
+    try {
+        const client = await connectClient(wsUrl);
+        await client.waitFor((message) => message.type === 'welcome');
+        client.send({ type: 'register', agentId: 'agentA' });
+        await client.waitFor((message) => message.type === 'registered');
+
+        client.send({ type: 'set', key: 'high-x', value: 'hidden-1', tags: ['x'], importance: 7 });
+        await client.waitFor((message) => message.type === 'ok' && message.key === 'high-x');
+        client.send({ type: 'set', key: 'low-x', value: 'hidden-2', tags: ['x'], importance: 2 });
+        await client.waitFor((message) => message.type === 'ok' && message.key === 'low-x');
+        client.send({ type: 'set', key: 'high-y', value: 'hidden-3', tags: ['y'], importance: 8 });
+        await client.waitFor((message) => message.type === 'ok' && message.key === 'high-y');
+
+        client.send({ type: 'search', tags: ['x'], minImportance: 5 });
+        const result = await client.waitFor((message) => message.type === 'search-result');
+        assert.equal(result.total, 1);
+        assert.equal(result.results.length, 1);
+        assert.equal(result.results[0].key, 'high-x');
+        assert.equal(Object.prototype.hasOwnProperty.call(result.results[0], 'value'), false);
+    } finally {
+        await appServer.close();
+    }
+});
+
+test('search validates filters and rejects invalid input', async () => {
+    const { appServer, wsUrl } = await startServer();
+
+    try {
+        const client = await connectClient(wsUrl);
+        await client.waitFor((message) => message.type === 'welcome');
+        client.send({ type: 'register', agentId: 'agentA' });
+        await client.waitFor((message) => message.type === 'registered');
+
+        client.send({ type: 'search' });
+        const noFilter = await client.waitFor((message) => message.type === 'error');
+        assert.equal(noFilter.message, 'missing-filter');
+
+        client.send({ type: 'search', query: '   ' });
+        const blankQuery = await client.waitFor(
+            (message) => message.type === 'error' && message.message === 'invalid-query',
+        );
+        assert.equal(blankQuery.message, 'invalid-query');
+
+        client.send({ type: 'search', minImportance: 99 });
+        const badImportance = await client.waitFor(
+            (message) => message.type === 'error' && message.message === 'invalid-importance',
+        );
+        assert.equal(badImportance.message, 'invalid-importance');
+    } finally {
+        await appServer.close();
+    }
+});

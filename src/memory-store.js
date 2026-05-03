@@ -515,6 +515,45 @@ function createMemoryStore(options = {}) {
 
         map,
 
+        search(filters = {}) {
+            const rawQuery = typeof filters.query === 'string' ? filters.query.trim().toLowerCase() : '';
+            const query = rawQuery.length > 0 ? rawQuery : null;
+
+            const rawTags = Array.isArray(filters.tags)
+                ? filters.tags.map((tag) => (typeof tag === 'string' ? tag.trim().toLowerCase() : '')).filter(Boolean)
+                : [];
+            const tags = rawTags.length > 0 ? rawTags : null;
+
+            const minImportance = Number.isInteger(filters.minImportance) ? filters.minImportance : null;
+            const limit = Number.isInteger(filters.limit) && filters.limit > 0 ? filters.limit : 20;
+
+            const matched = [];
+            for (const [key, entry] of entries.entries()) {
+                if (minImportance !== null && entry.importance < minImportance) continue;
+
+                if (tags) {
+                    const entryTagsLower = entry.tags.map((tag) => tag.toLowerCase());
+                    const hasAll = tags.every((tag) => entryTagsLower.includes(tag));
+                    if (!hasAll) continue;
+                }
+
+                if (query) {
+                    const haystack = [
+                        key.toLowerCase(),
+                        (entry.summary || '').toLowerCase(),
+                        ...entry.tags.map((tag) => tag.toLowerCase()),
+                    ];
+                    if (!haystack.some((field) => field.includes(query))) continue;
+                }
+
+                matched.push({ key, entry });
+            }
+
+            matched.sort(sortNodeRecords);
+            const results = matched.slice(0, limit).map(({ key, entry }) => nodeMetadata(key, entry));
+            return { results, total: matched.length };
+        },
+
         exportState,
 
         importState,
