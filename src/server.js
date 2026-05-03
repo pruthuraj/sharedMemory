@@ -49,22 +49,23 @@ function createSharedMemoryServer(options = {}) {
         ws.on('message', (raw) => {
             const parsed = parseMessage(raw);
             if (!parsed.ok) {
-                safeSend(ws, { type: 'error', message: parsed.error });
+                safeSend(ws, { type: 'error', message: parsed.error, requestId: parsed.requestId });
                 return;
             }
 
             const data = parsed.message;
+            const requestId = data.requestId;
 
             switch (data.type) {
                 case 'register': {
                     const result = agents.register(agentId, data.agentId || agentId, ws);
                     if (!result.ok) {
-                        safeSend(ws, { type: 'error', message: result.error });
+                        safeSend(ws, { type: 'error', message: result.error, requestId });
                         break;
                     }
 
                     agentId = result.agentId;
-                    safeSend(ws, { type: 'registered', agentId });
+                    safeSend(ws, { type: 'registered', agentId, requestId });
                     break;
                 }
 
@@ -74,20 +75,20 @@ function createSharedMemoryServer(options = {}) {
                         tags: data.tags,
                         importance: data.importance,
                     });
-                    safeSend(ws, { type: 'ok', action: 'set', key: data.key });
+                    safeSend(ws, { type: 'ok', action: 'set', key: data.key, requestId });
                     notifyKeyUpdate(agents, data.key, entry);
                     notifyLinkedAgents(agents, agentId, { action: 'set', key: data.key, entry });
                     break;
                 }
 
                 case 'get': {
-                    safeSend(ws, { type: 'result', key: data.key, entry: memory.get(data.key) });
+                    safeSend(ws, { type: 'result', key: data.key, entry: memory.get(data.key), requestId });
                     break;
                 }
 
                 case 'subscribe': {
                     agents.subscribe(agentId, data.key);
-                    safeSend(ws, { type: 'subscribed', key: data.key });
+                    safeSend(ws, { type: 'subscribed', key: data.key, requestId });
 
                     const entry = memory.get(data.key);
                     if (entry) {
@@ -98,19 +99,19 @@ function createSharedMemoryServer(options = {}) {
 
                 case 'unsubscribe': {
                     agents.unsubscribe(agentId, data.key);
-                    safeSend(ws, { type: 'unsubscribed', key: data.key });
+                    safeSend(ws, { type: 'unsubscribed', key: data.key, requestId });
                     break;
                 }
 
                 case 'link': {
                     agents.link(agentId, data.target);
-                    safeSend(ws, { type: 'linked', target: data.target });
+                    safeSend(ws, { type: 'linked', target: data.target, requestId });
                     break;
                 }
 
                 case 'unlink': {
                     agents.unlink(agentId, data.target);
-                    safeSend(ws, { type: 'unlinked', target: data.target });
+                    safeSend(ws, { type: 'unlinked', target: data.target, requestId });
                     break;
                 }
 
@@ -119,6 +120,7 @@ function createSharedMemoryServer(options = {}) {
                         type: 'list',
                         agents: agents.ids(),
                         memoryKeys: memory.keys(),
+                        requestId,
                     });
                     break;
                 }
@@ -130,12 +132,12 @@ function createSharedMemoryServer(options = {}) {
                     });
 
                     if (!result.ok) {
-                        safeSend(ws, { type: 'error', message: result.error });
+                        safeSend(ws, { type: 'error', message: result.error, requestId });
                         break;
                     }
 
                     const edge = publicEdge(result.edge);
-                    safeSend(ws, { type: 'related', action: result.action, edge });
+                    safeSend(ws, { type: 'related', action: result.action, edge, requestId });
                     notifyRelationUpdate(agents, result.action, edge);
                     break;
                 }
@@ -147,6 +149,7 @@ function createSharedMemoryServer(options = {}) {
                         from: data.from,
                         to: data.to,
                         relation: data.relation,
+                        requestId,
                     });
                     notifyRelationUpdate(agents, 'deleted', edge);
                     break;
@@ -154,7 +157,7 @@ function createSharedMemoryServer(options = {}) {
 
                 case 'delete': {
                     const result = memory.delete(data.key);
-                    safeSend(ws, { type: 'deleted', key: data.key, removed: result.removed });
+                    safeSend(ws, { type: 'deleted', key: data.key, removed: result.removed, requestId });
                     notifyKeyUpdate(agents, data.key, null, { action: 'deleted' });
 
                     for (const removedEdge of result.removedEdges) {
@@ -170,11 +173,11 @@ function createSharedMemoryServer(options = {}) {
                     });
 
                     if (!result) {
-                        safeSend(ws, { type: 'error', message: 'missing-node' });
+                        safeSend(ws, { type: 'error', message: 'missing-node', requestId });
                         break;
                     }
 
-                    safeSend(ws, { type: 'map-result', ...result });
+                    safeSend(ws, { type: 'map-result', ...result, requestId });
                     break;
                 }
 
@@ -185,12 +188,12 @@ function createSharedMemoryServer(options = {}) {
                         minImportance: data.minImportance,
                         limit: data.limit,
                     });
-                    safeSend(ws, { type: 'search-result', results, total });
+                    safeSend(ws, { type: 'search-result', results, total, requestId });
                     break;
                 }
 
                 default:
-                    safeSend(ws, { type: 'error', message: 'unknown-type' });
+                    safeSend(ws, { type: 'error', message: 'unknown-type', requestId });
             }
         });
 

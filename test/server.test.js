@@ -574,3 +574,197 @@ test('search validates filters and rejects invalid input', async () => {
         await appServer.close();
     }
 });
+
+test('requestId echoes on success acks across every command type', async () => {
+    const { appServer, wsUrl } = await startServer();
+
+    try {
+        const client = await connectClient(wsUrl);
+        await client.waitFor((message) => message.type === 'welcome');
+
+        client.send({ type: 'register', agentId: 'agentA', requestId: 'r-register' });
+        const registered = await client.waitFor((message) => message.type === 'registered');
+        assert.equal(registered.requestId, 'r-register');
+
+        client.send({ type: 'set', key: 'k1', value: 'v1', requestId: 'r-set-1' });
+        const setAck1 = await client.waitFor((message) => message.type === 'ok' && message.key === 'k1');
+        assert.equal(setAck1.requestId, 'r-set-1');
+
+        client.send({ type: 'set', key: 'k2', value: 'v2', requestId: 'r-set-2' });
+        await client.waitFor((message) => message.type === 'ok' && message.key === 'k2');
+
+        client.send({ type: 'get', key: 'k1', requestId: 'r-get' });
+        const getResult = await client.waitFor((message) => message.type === 'result' && message.key === 'k1');
+        assert.equal(getResult.requestId, 'r-get');
+
+        client.send({ type: 'subscribe', key: 'k1', requestId: 'r-sub' });
+        const subAck = await client.waitFor((message) => message.type === 'subscribed' && message.key === 'k1');
+        assert.equal(subAck.requestId, 'r-sub');
+
+        client.send({ type: 'unsubscribe', key: 'k1', requestId: 'r-unsub' });
+        const unsubAck = await client.waitFor((message) => message.type === 'unsubscribed' && message.key === 'k1');
+        assert.equal(unsubAck.requestId, 'r-unsub');
+
+        client.send({ type: 'link', target: 'other', requestId: 'r-link' });
+        const linkAck = await client.waitFor(
+            (message) => message.type === 'linked' && message.target === 'other',
+        );
+        assert.equal(linkAck.requestId, 'r-link');
+
+        client.send({ type: 'unlink', target: 'other', requestId: 'r-unlink' });
+        const unlinkAck = await client.waitFor((message) => message.type === 'unlinked');
+        assert.equal(unlinkAck.requestId, 'r-unlink');
+
+        client.send({ type: 'list', requestId: 'r-list' });
+        const listResult = await client.waitFor((message) => message.type === 'list');
+        assert.equal(listResult.requestId, 'r-list');
+
+        client.send({
+            type: 'relate', from: 'k1', to: 'k2', relation: 'related_to', requestId: 'r-relate',
+        });
+        const relateAck = await client.waitFor((message) => message.type === 'related');
+        assert.equal(relateAck.requestId, 'r-relate');
+
+        client.send({ type: 'map', key: 'k1', depth: 1, limit: 10, requestId: 'r-map' });
+        const mapResult = await client.waitFor((message) => message.type === 'map-result');
+        assert.equal(mapResult.requestId, 'r-map');
+
+        client.send({ type: 'search', query: 'k', requestId: 'r-search' });
+        const searchResult = await client.waitFor((message) => message.type === 'search-result');
+        assert.equal(searchResult.requestId, 'r-search');
+
+        client.send({
+            type: 'unrelate', from: 'k1', to: 'k2', relation: 'related_to', requestId: 'r-unrelate',
+        });
+        const unrelateAck = await client.waitFor((message) => message.type === 'unrelated');
+        assert.equal(unrelateAck.requestId, 'r-unrelate');
+
+        client.send({ type: 'delete', key: 'k1', requestId: 'r-delete' });
+        const deleteAck = await client.waitFor((message) => message.type === 'deleted');
+        assert.equal(deleteAck.requestId, 'r-delete');
+    } finally {
+        await appServer.close();
+    }
+});
+
+test('requestId preserves type and value, including 0 and empty string', async () => {
+    const { appServer, wsUrl } = await startServer();
+
+    try {
+        const client = await connectClient(wsUrl);
+        await client.waitFor((message) => message.type === 'welcome');
+        client.send({ type: 'register', agentId: 'agentA' });
+        await client.waitFor((message) => message.type === 'registered');
+
+        const cases = ['abc', 42, 0, ''];
+        for (let i = 0; i < cases.length; i += 1) {
+            const requestId = cases[i];
+            const key = `k${i}`;
+            client.send({ type: 'set', key, value: 'v', requestId });
+            const ack = await client.waitFor((message) => message.type === 'ok' && message.key === key);
+            assert.strictEqual(ack.requestId, requestId);
+        }
+    } finally {
+        await appServer.close();
+    }
+});
+
+test('errors echo the requestId, but invalid-requestId omits it', async () => {
+    const { appServer, wsUrl } = await startServer();
+
+    try {
+        const client = await connectClient(wsUrl);
+        await client.waitFor((message) => message.type === 'welcome');
+
+        client.send({ type: 'set', requestId: 'r1' });
+        const missingKey = await client.waitFor(
+            (message) => message.type === 'error' && message.message === 'missing-key',
+        );
+        assert.equal(missingKey.requestId, 'r1');
+
+        client.send({ type: 'nope', requestId: 'r2' });
+        const unknownType = await client.waitFor(
+            (message) => message.type === 'error' && message.message === 'unknown-type',
+        );
+        assert.equal(unknownType.requestId, 'r2');
+
+        client.send({ type: 'set', key: 'k', value: 'v', requestId: null });
+        const invalidId = await client.waitFor(
+            (message) => message.type === 'error' && message.message === 'invalid-requestId',
+        );
+        assert.equal(Object.prototype.hasOwnProperty.call(invalidId, 'requestId'), false);
+    } finally {
+        await appServer.close();
+    }
+});
+
+test('broadcasts (update, relation-update, cross-agent linked) carry no requestId', async () => {
+    const { appServer, wsUrl } = await startServer();
+
+    try {
+        const writer = await connectClient(wsUrl);
+        await writer.waitFor((message) => message.type === 'welcome');
+        writer.send({ type: 'register', agentId: 'agentA' });
+        await writer.waitFor((message) => message.type === 'registered');
+
+        const observer = await connectClient(wsUrl);
+        await observer.waitFor((message) => message.type === 'welcome');
+        observer.send({ type: 'register', agentId: 'agentB' });
+        await observer.waitFor((message) => message.type === 'registered');
+
+        writer.send({ type: 'set', key: 'preexisting', value: 'first' });
+        await writer.waitFor((message) => message.type === 'ok' && message.key === 'preexisting');
+        observer.send({ type: 'subscribe', key: 'preexisting', requestId: 'sub-rid' });
+        const subAck = await observer.waitFor(
+            (message) => message.type === 'subscribed' && message.key === 'preexisting',
+        );
+        assert.equal(subAck.requestId, 'sub-rid');
+        const initialUpdate = await observer.waitFor(
+            (message) => message.type === 'update' && message.key === 'preexisting',
+        );
+        assert.equal(Object.prototype.hasOwnProperty.call(initialUpdate, 'requestId'), false);
+
+        observer.send({ type: 'subscribe', key: 'shared' });
+        await observer.waitFor((message) => message.type === 'subscribed' && message.key === 'shared');
+        observer.send({ type: 'subscribe', key: 'other' });
+        await observer.waitFor((message) => message.type === 'subscribed' && message.key === 'other');
+
+        writer.send({ type: 'link', target: 'agentB' });
+        await writer.waitFor((message) => message.type === 'linked' && message.target === 'agentB');
+
+        writer.send({ type: 'set', key: 'shared', value: 'broadcast', requestId: 'a-rid' });
+        const ownAck = await writer.waitFor(
+            (message) => message.type === 'ok' && message.key === 'shared',
+        );
+        assert.equal(ownAck.requestId, 'a-rid');
+
+        const update = await observer.waitFor(
+            (message) => message.type === 'update' && message.key === 'shared',
+        );
+        assert.equal(Object.prototype.hasOwnProperty.call(update, 'requestId'), false);
+
+        const linkedBroadcast = await observer.waitFor(
+            (message) => message.type === 'linked' && message.from === 'agentA',
+        );
+        assert.equal(Object.prototype.hasOwnProperty.call(linkedBroadcast, 'requestId'), false);
+
+        writer.send({ type: 'set', key: 'other', value: 'second' });
+        await writer.waitFor((message) => message.type === 'ok' && message.key === 'other');
+        writer.send({
+            type: 'relate',
+            from: 'shared',
+            to: 'other',
+            relation: 'related_to',
+            requestId: 'rel-rid',
+        });
+        const relateAck = await writer.waitFor((message) => message.type === 'related');
+        assert.equal(relateAck.requestId, 'rel-rid');
+
+        const relationUpdate = await observer.waitFor(
+            (message) => message.type === 'relation-update' && message.action === 'created',
+        );
+        assert.equal(Object.prototype.hasOwnProperty.call(relationUpdate, 'requestId'), false);
+    } finally {
+        await appServer.close();
+    }
+});

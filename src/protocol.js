@@ -44,6 +44,10 @@ function isNumberInRange(value, min, max) {
     return typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max;
 }
 
+function isValidRequestId(value) {
+    return typeof value === 'string' || (typeof value === 'number' && Number.isFinite(value));
+}
+
 function hasValidTags(tags) {
     return Array.isArray(tags) && tags.every(isNonEmptyString);
 }
@@ -94,11 +98,21 @@ function parseMessage(raw) {
         return { ok: false, error: 'invalid-message' };
     }
 
-    if (!isNonEmptyString(message.type) || !COMMAND_TYPES.has(message.type)) {
-        return { ok: false, error: 'unknown-type' };
+    if (hasOwn(message, 'requestId') && !isValidRequestId(message.requestId)) {
+        return { ok: false, error: 'invalid-requestId' };
     }
 
-    return validateMessage(message);
+    const requestId = hasOwn(message, 'requestId') ? message.requestId : undefined;
+
+    if (!isNonEmptyString(message.type) || !COMMAND_TYPES.has(message.type)) {
+        return { ok: false, error: 'unknown-type', requestId };
+    }
+
+    const result = validateMessage(message);
+    if (!result.ok) {
+        return { ...result, requestId };
+    }
+    return result;
 }
 
 function validateMessage(message) {

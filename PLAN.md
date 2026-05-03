@@ -3,7 +3,8 @@
 ## Status
 - **Slice 1 — Persistent Memory Graph**: implemented and tested (10 dedicated tests).
 - **Slice 2 — Search**: implemented and tested (6 dedicated tests; 4 unit + 2 integration).
-- Total suite: 26/26 passing.
+- **Slice 3 — Request IDs**: implemented and tested (4 integration tests).
+- Total suite: 30/30 passing.
 
 ---
 
@@ -94,5 +95,38 @@ Add a `search` WebSocket command so agents can discover memories without knowing
 
 ---
 
-## Out of Scope (Both Slices)
-Request IDs, token auth, embeddings, dashboards, TTL/expiry, full-text ranking, saved searches.
+## Slice 3 — Request IDs
+
+### Summary
+Add optional client-supplied `requestId` correlation across the WebSocket protocol. Pure transport-layer concern: stores and registries are unchanged. Direct responses and validation errors echo the `requestId`; subscriber and cross-agent broadcasts never carry one. Backward compatible — clients that never send a `requestId` observe identical wire output as before.
+
+### Wire Contract
+- **Inbound**: every command accepts an optional `requestId: string | number` (any string including `''`; any finite number including `0`, negatives, decimals).
+- **Outbound (direct)**: every ack/result/error sent in response to a single command echoes the `requestId` verbatim. Covers `registered`, `ok`, `result`, `subscribed`, `unsubscribed`, `linked` (ack with `target`), `unlinked`, `list`, `related`, `unrelated`, `deleted`, `map-result`, `search-result`, and `error` payloads from validation or per-handler failures (e.g. `missing-node`, `duplicate-agent`, `self-relation-not-allowed`).
+- **Outbound (broadcasts)**: server-initiated and cross-agent messages never carry `requestId`. Covers `update` (subscriber notifications, including the initial replay after `subscribe`), `relation-update` (cross-edge subscribers), the cross-agent `linked` broadcast (`{ from, payload }` shape), and `welcome`.
+- **Pre-parse errors** (`invalid-json`, `invalid-message`, `invalid-requestId`) carry no `requestId` since none can be safely recovered.
+
+### Validation Errors
+- `invalid-requestId` — `null`, booleans, `NaN`, `±Infinity`, objects, and arrays are rejected. The bad value itself is **not** echoed in the error response.
+
+### Implementation Notes
+- `src/protocol.js` — adds `isValidRequestId` helper. `parseMessage` validates `requestId` immediately after the `isPlainObject` check, captures it once, and spreads it onto every failure return (`unknown-type` and any `validateMessage` failure via `{ ...result, requestId }`). On success the requestId rides along on `parsed.message` and the server reads it directly.
+- `src/server.js` — captures `const requestId = data.requestId;` once per message and adds the field to every direct `safeSend` ack/result/error site. Notification helpers (`notifyKeyUpdate`, `notifyRelationUpdate`, `notifyLinkedAgents`) are unchanged. The initial `update` after `subscribe` intentionally does **not** carry a requestId so the `update` envelope shape stays uniform across initial and subsequent updates.
+- Stores and registries (`src/memory-store.js`, `src/agent-registry.js`, `src/delivery.js`) are untouched — request IDs are purely a transport concern.
+
+### Test Plan
+- 4 integration tests in `test/server.test.js`:
+  - `requestId echoes on success acks across every command type` — exercises every direct ack/result handler with a distinct string requestId.
+  - `requestId preserves type and value, including 0 and empty string` — uses `assert.strictEqual` so `0` round-trips as number `0`, not string `'0'`.
+  - `errors echo the requestId, but invalid-requestId omits it` — covers a `validateMessage` failure, `unknown-type`, and the `invalid-requestId` rejection where the bad value is not echoed.
+  - `broadcasts (update, relation-update, cross-agent linked) carry no requestId` — two-agent setup; confirms subscriber `update`, cross-edge `relation-update`, and the cross-agent `linked` broadcast all omit `requestId` while the originator's own ack still carries it.
+
+### Assumptions
+- Purely additive on the wire: `JSON.stringify` drops `undefined`, so clients that never send a `requestId` see identical bytes as before.
+- After the protocol layer, the server trusts `data.requestId` to be `string | number | undefined`.
+- Server-generated correlation IDs, monotonic sequence numbers, idempotency keys, and per-message timeouts remain out of scope.
+
+---
+
+## Out of Scope (All Slices)
+Token auth, embeddings, dashboards, TTL/expiry, full-text ranking, saved searches, server-generated correlation IDs, idempotency keys.
