@@ -300,6 +300,112 @@ test('search requires ALL provided tags (AND semantics)', () => {
     assert.deepEqual(result.results.map((r) => r.key), ['both']);
 });
 
+test('ttl and expiresAt hide expired entries from read APIs without pruning', () => {
+    let currentTime = 1000;
+    const memory = createMemoryStore({ clock: () => currentTime });
+
+    memory.set('temporary', 'temp', 'agentA', { summary: 'temp', ttlMs: 100 });
+    memory.set('stable', 'stable', 'agentA', { summary: 'stable', tags: ['visible'], importance: 5 });
+    assert.equal(memory.get('temporary').expiresAt, 1100);
+
+    currentTime = 1200;
+    assert.equal(memory.get('temporary'), null);
+    assert.deepEqual(memory.keys(), ['stable']);
+    assert.equal(memory.count(), 1);
+    assert.equal(memory.expiredCount(), 1);
+
+    const searchResult = memory.search({ query: 'temp' });
+    assert.equal(searchResult.total, 0);
+    assert.equal(memory.exportState().entries.temporary.value, 'temp');
+});
+
+test('map skips expired nodes and phantom edges touching them', () => {
+    let currentTime = 1000;
+    const memory = createMemoryStore({ clock: () => currentTime });
+
+    memory.set('root', 'root', 'agentA', { summary: 'root' });
+    memory.set('expired', 'expired', 'agentA', { summary: 'expired', expiresAt: 1100 });
+    memory.set('visible', 'visible', 'agentA', { summary: 'visible' });
+    memory.relate('root', 'expired', 'related_to', 'agentA');
+    memory.relate('root', 'visible', 'related_to', 'agentA');
+
+    currentTime = 1200;
+    const graph = memory.map('root', { depth: 1, limit: 10 });
+    assert.deepEqual(graph.nodes.map((node) => node.key), ['root', 'visible']);
+    assert.deepEqual(graph.edges.map((edge) => edge.to), ['visible']);
+    assert.equal(memory.map('expired', { depth: 1, limit: 10 }), null);
+});
+
+test('relate rejects expired endpoints as missing nodes', () => {
+    let currentTime = 1000;
+    const memory = createMemoryStore({ clock: () => currentTime });
+
+    memory.set('active', 'active', 'agentA');
+    memory.set('expired', 'expired', 'agentA', { ttlMs: 50 });
+    currentTime = 1100;
+
+    assert.deepEqual(memory.relate('active', 'expired', 'related_to', 'agentA'), {
+        ok: false,
+        error: 'missing-node',
+    });
+});
+
+test('touch extends expiry and clears expiry when no expiry fields are provided', () => {
+    let currentTime = 1000;
+    const memory = createMemoryStore({ clock: () => currentTime });
+
+    memory.set('session', 'work', 'agentA', { ttlMs: 100 });
+    assert.equal(memory.get('session').expiresAt, 1100);
+
+    currentTime = 1050;
+    const touched = memory.touch('session', 'agentA', { ttlMs: 500 });
+    assert.equal(touched.ok, true);
+    assert.equal(memory.get('session').expiresAt, 1550);
+
+    memory.touch('session', 'agentA');
+    assert.equal(memory.get('session').expiresAt, null);
+
+    currentTime = 10000;
+    assert.notEqual(memory.get('session'), null);
+});
+
+test('pruneExpired removes expired nodes and cascades edges', () => {
+    let currentTime = 1000;
+    const memory = createMemoryStore({ clock: () => currentTime });
+
+    memory.set('expired', 'expired', 'agentA', { ttlMs: 10 });
+    memory.set('neighbor', 'neighbor', 'agentA');
+    memory.set('active', 'active', 'agentA');
+    memory.relate('expired', 'neighbor', 'supports', 'agentA');
+    memory.relate('neighbor', 'active', 'supports', 'agentA');
+
+    currentTime = 2000;
+    const result = memory.pruneExpired();
+    assert.deepEqual(result.keys, ['expired']);
+    assert.equal(result.count, 1);
+    assert.deepEqual(result.removedEdges.map((edge) => edge.from), ['expired']);
+    assert.deepEqual(memory.keys().sort(), ['active', 'neighbor']);
+    assert.equal(memory.relationCount(), 1);
+    assert.equal(memory.expiryStatus().lastPrunedAt, 2000);
+});
+
+test('persistence saves and reloads expiresAt', async () => {
+    const file = tempPath('memory.json');
+    const memory = createMemoryStore({
+        clock: () => 1000,
+        persistence: { file },
+    });
+
+    memory.set('temporary', 'temp', 'agentA', { expiresAt: 5000 });
+    await memory.flush();
+
+    const restored = createMemoryStore({
+        clock: () => 2000,
+        persistence: { file },
+    });
+    assert.equal(restored.get('temporary').expiresAt, 5000);
+});
+
 function createTimedStoreWithPersistence(file) {
     let time = 100;
     return createMemoryStore({

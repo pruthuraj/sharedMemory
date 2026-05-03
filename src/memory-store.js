@@ -5,6 +5,7 @@ const DEFAULT_IMPORTANCE = 0;
 const DEFAULT_MAP_DEPTH = 1;
 const DEFAULT_MAP_LIMIT = 10;
 const DEFAULT_PERSISTENCE_DEBOUNCE_MS = 500;
+const DEFAULT_PRUNE_INTERVAL_MS = 600000;
 const FALLBACK_SUMMARY_LIMIT = 120;
 const RELATION_TYPES = new Set([
     'related_to',
@@ -83,6 +84,10 @@ function isValidWeight(value) {
     return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1;
 }
 
+function isPositiveInteger(value) {
+    return Number.isInteger(value) && value > 0;
+}
+
 function atomicTempFile(file) {
     return path.join(
         path.dirname(file),
@@ -135,7 +140,7 @@ function atomicWriteJsonSync(file, state) {
 }
 
 function createMemoryStore(options = {}) {
-    const now = options.now || Date.now;
+    const now = options.clock || options.now || Date.now;
     const entries = new Map();
     const edges = new Map();
     const persistenceOptions = options.persistence || null;
@@ -164,14 +169,46 @@ function createMemoryStore(options = {}) {
     let lastLoadedAt = null;
     let lastFlushedAt = null;
     let lastFlushError = null;
+    let lastPrunedAt = null;
+
+    function normalizeExpiry(metadata = {}) {
+        if (isPositiveInteger(metadata.ttlMs)) {
+            return now() + metadata.ttlMs;
+        }
+
+        if (isPositiveInteger(metadata.expiresAt)) {
+            return metadata.expiresAt;
+        }
+
+        return null;
+    }
+
+    function isExpiredEntry(entry) {
+        return Boolean(entry && isPositiveInteger(entry.expiresAt) && entry.expiresAt <= now());
+    }
+
+    function isExpired(key) {
+        return isExpiredEntry(entries.get(key));
+    }
+
+    function visibleEntry(key) {
+        const entry = entries.get(key);
+        return entry && !isExpiredEntry(entry) ? entry : null;
+    }
 
     function incidentEdges(key) {
         return Array.from(edges.values()).filter((edge) => edge.from === key || edge.to === key);
     }
 
+    function visibleKeys() {
+        return Array.from(entries.entries())
+            .filter(([, entry]) => !isExpiredEntry(entry))
+            .map(([key]) => key);
+    }
+
     function sortedIncidentEdges(key) {
         return incidentEdges(key)
-            .filter((edge) => entries.has(edge.from) && entries.has(edge.to))
+            .filter((edge) => visibleEntry(edge.from) && visibleEntry(edge.to))
             .sort((a, b) => {
                 const aNeighborKey = a.from === key ? a.to : a.from;
                 const bNeighborKey = b.from === key ? b.to : b.from;
@@ -190,7 +227,7 @@ function createMemoryStore(options = {}) {
     }
 
     function map(key, options = {}) {
-        if (!entries.has(key)) {
+        if (!visibleEntry(key)) {
             return null;
         }
 
@@ -208,7 +245,7 @@ function createMemoryStore(options = {}) {
                 edgeIds.add(edge.id);
 
                 const nextKey = edge.from === current.key ? edge.to : edge.from;
-                if (!entries.has(nextKey) || visited.has(nextKey)) continue;
+                if (!visibleEntry(nextKey) || visited.has(nextKey)) continue;
 
                 visited.add(nextKey);
                 queue.push({ key: nextKey, depth: current.depth + 1 });
@@ -226,7 +263,13 @@ function createMemoryStore(options = {}) {
         const selectedKeySet = new Set(selectedKeys);
         const selectedEdges = Array.from(edgeIds)
             .map((id) => edges.get(id))
-            .filter((edge) => edge && selectedKeySet.has(edge.from) && selectedKeySet.has(edge.to))
+            .filter((edge) => (
+                edge
+                && selectedKeySet.has(edge.from)
+                && selectedKeySet.has(edge.to)
+                && visibleEntry(edge.from)
+                && visibleEntry(edge.to)
+            ))
             .sort((a, b) => {
                 const byFrom = a.from.localeCompare(b.from);
                 if (byFrom !== 0) return byFrom;
@@ -251,6 +294,7 @@ function createMemoryStore(options = {}) {
                 summary: entry.summary,
                 tags: entry.tags.slice(),
                 importance: entry.importance,
+                expiresAt: entry.expiresAt ?? null,
                 updatedAt: entry.updatedAt,
                 updatedBy: entry.updatedBy,
             };
@@ -287,6 +331,7 @@ function createMemoryStore(options = {}) {
                 summary: isNonEmptyString(entry.summary) ? entry.summary : safeSummary(entry.value),
                 tags: normalizeTags(entry.tags),
                 importance: isValidImportance(entry.importance) ? entry.importance : DEFAULT_IMPORTANCE,
+                expiresAt: isPositiveInteger(entry.expiresAt) ? entry.expiresAt : null,
                 updatedAt: typeof entry.updatedAt === 'number' && Number.isFinite(entry.updatedAt)
                     ? entry.updatedAt
                     : now(),
@@ -344,6 +389,14 @@ function createMemoryStore(options = {}) {
             lastLoadedAt,
             lastFlushedAt,
             lastFlushError,
+        };
+    }
+
+    function expiryStatus() {
+        return {
+            expiredMemoryCount: expiredCount(),
+            pruneIntervalMs: options.pruneIntervalMs ?? DEFAULT_PRUNE_INTERVAL_MS,
+            lastPrunedAt,
         };
     }
 
@@ -418,6 +471,53 @@ function createMemoryStore(options = {}) {
         scheduleFlush();
     }
 
+    function deleteEntry(key) {
+        const removed = entries.delete(key);
+        const removedEdges = [];
+
+        for (const [id, edge] of edges.entries()) {
+            if (edge.from === key || edge.to === key) {
+                removedEdges.push(edge);
+                edges.delete(id);
+            }
+        }
+
+        return { removed, removedEdges };
+    }
+
+    function expiredCount() {
+        let count = 0;
+        for (const entry of entries.values()) {
+            if (isExpiredEntry(entry)) count += 1;
+        }
+        return count;
+    }
+
+    function pruneExpired() {
+        const keys = [];
+        const removedEdges = [];
+
+        for (const [key, entry] of Array.from(entries.entries())) {
+            if (!isExpiredEntry(entry)) continue;
+            const result = deleteEntry(key);
+            if (result.removed) keys.push(key);
+            removedEdges.push(...result.removedEdges);
+        }
+
+        if (keys.length > 0 || removedEdges.length > 0) {
+            lastPrunedAt = now();
+            markDirty();
+        } else {
+            lastPrunedAt = now();
+        }
+
+        return {
+            keys,
+            count: keys.length,
+            removedEdges,
+        };
+    }
+
     loadPersistedState();
 
     return {
@@ -427,6 +527,7 @@ function createMemoryStore(options = {}) {
                 summary: metadata.summary || safeSummary(value),
                 tags: normalizeTags(metadata.tags),
                 importance: metadata.importance ?? DEFAULT_IMPORTANCE,
+                expiresAt: normalizeExpiry(metadata),
                 updatedAt: now(),
                 updatedBy,
             };
@@ -436,19 +537,11 @@ function createMemoryStore(options = {}) {
         },
 
         get(key) {
-            return entries.has(key) ? entries.get(key) : null;
+            return visibleEntry(key);
         },
 
         delete(key) {
-            const removed = entries.delete(key);
-            const removedEdges = [];
-
-            for (const [id, edge] of edges.entries()) {
-                if (edge.from === key || edge.to === key) {
-                    removedEdges.push(edge);
-                    edges.delete(id);
-                }
-            }
+            const { removed, removedEdges } = deleteEntry(key);
 
             if (removed || removedEdges.length > 0) {
                 markDirty();
@@ -457,15 +550,15 @@ function createMemoryStore(options = {}) {
         },
 
         keys() {
-            return Array.from(entries.keys());
+            return visibleKeys();
         },
 
         count() {
-            return entries.size;
+            return visibleKeys().length;
         },
 
         relationCount() {
-            return edges.size;
+            return Array.from(edges.values()).filter((edge) => visibleEntry(edge.from) && visibleEntry(edge.to)).length;
         },
 
         relate(from, to, relation, updatedBy, metadata = {}) {
@@ -473,7 +566,7 @@ function createMemoryStore(options = {}) {
                 return { ok: false, error: 'self-relation-not-allowed' };
             }
 
-            if (!entries.has(from) || !entries.has(to)) {
+            if (!visibleEntry(from) || !visibleEntry(to)) {
                 return { ok: false, error: 'missing-node' };
             }
 
@@ -515,6 +608,26 @@ function createMemoryStore(options = {}) {
 
         map,
 
+        touch(key, updatedBy, metadata = {}) {
+            const entry = entries.get(key);
+            if (!entry) return { ok: false, error: 'missing-node' };
+
+            entry.expiresAt = normalizeExpiry(metadata);
+            entry.updatedAt = now();
+            entry.updatedBy = updatedBy;
+            entries.set(key, entry);
+            markDirty();
+            return { ok: true, key, entry };
+        },
+
+        pruneExpired,
+
+        isExpired,
+
+        expiredCount,
+
+        expiryStatus,
+
         search(filters = {}) {
             const rawQuery = typeof filters.query === 'string' ? filters.query.trim().toLowerCase() : '';
             const query = rawQuery.length > 0 ? rawQuery : null;
@@ -529,6 +642,7 @@ function createMemoryStore(options = {}) {
 
             const matched = [];
             for (const [key, entry] of entries.entries()) {
+                if (isExpiredEntry(entry)) continue;
                 if (minImportance !== null && entry.importance < minImportance) continue;
 
                 if (tags) {

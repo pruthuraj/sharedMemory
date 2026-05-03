@@ -1,164 +1,166 @@
 # Memory Graph Implementation Plan
 
 ## Status
-- **Slice 1 — Persistent Memory Graph**: implemented and tested (10 dedicated tests).
-- **Slice 2 — Search**: implemented and tested (6 dedicated tests; 4 unit + 2 integration).
-- **Slice 3 — Request IDs**: implemented and tested (4 integration tests).
-- **Slice 4 — Optional Token Auth**: implemented and tested (4 integration tests).
-- Total suite: 34/34 passing.
+- **Slice 1 - Persistent Memory Graph**: implemented and tested.
+- **Slice 2 - Search**: implemented and tested.
+- **Slice 3 - Request IDs**: implemented and tested.
+- **Slice 4 - Optional Token Auth**: implemented and tested.
+- **Slice 5 - TTL Expiry And Prune**: implemented and tested.
+- Current verification target: `node --check` for runtime/test files and `npm test`.
 
 ---
 
-## Slice 1 — Persistent Memory Graph
+## Slice 1 - Persistent Memory Graph
 
 ### Summary
 Implement optional JSON persistence for the memory graph. Runtime operations stay RAM-first, while debounced atomic flushes make entries and relationships durable when `MEMORY_FILE` is configured.
 
-### Key Changes
-- Add optional persistence via `createMemoryStore({ persistence })` and `MEMORY_FILE`.
-- Load existing state at startup; missing files start empty and invalid JSON fails clearly.
-- Persist `entries` and graph `edges` in a deterministic JSON shape.
-- Drop dangling loaded edges so graph integrity is restored at boot.
-- Mark state dirty after `set`, `relate`, `unrelate`, and `delete`.
-- Flush dirty state with debounced atomic writes: temp file next to target, then rename.
-- Add `flush()`, `flushSync()`, `persistenceStatus()`, and export/import helpers to the store.
-- Extend `/status` with `persistence`.
-- Force final flush on `appServer.close()`, `SIGINT`, and `SIGTERM`.
+### Key Behavior
+- `createMemoryStore({ persistence })` and `MEMORY_FILE` enable local JSON persistence.
+- Missing persistence files start empty; invalid JSON fails startup clearly.
+- Loaded dangling edges are dropped to preserve graph integrity.
+- Dirty state is flushed with debounced atomic writes: temp file beside target, then rename.
+- `flush()` is async for normal operation; `flushSync()` is reserved for shutdown paths.
+- `/status.persistence` exposes enabled state, dirty state, load/flush timestamps, and last flush error.
 
-### Persistence Behavior
-- RAM remains the source of truth while the server is running.
-- Flush failures are caught inside timer callbacks, recorded in `lastFlushError`, and leave `dirty: true`.
-- Async flush is used for normal operation; sync flush is reserved for shutdown paths.
-- Persistence is optional and disabled unless a file path is provided.
-- Request IDs, search, auth, embeddings, and dashboards stay out of this slice.
-
-### Test Plan
-- Existing graph and protocol tests continue passing.
-- Add persistence coverage for:
-  - Missing files, invalid JSON, defensive dangling-edge load, restart recovery, cascade delete persistence, debounced scheduling, flush failure state, sync flush, `/status.persistence`, and close-time flushing.
-- Verify with:
-  - `node --check server.js`
-  - `node --check example_agent.js`
-  - `node --check src/*.js`
-  - `node --check test/*.js`
-  - `npm test`
-
-### Assumptions
-- Persistence is local JSON only.
-- Runtime operations stay RAM-first and non-blocking.
-- Request IDs, auth, embeddings, and dashboards remain out of scope.
-- Synchronous file writes are used only for shutdown/final-flush paths.
+### Tests
+- Missing file startup.
+- Invalid JSON startup failure.
+- Entries and edges persist and reload.
+- Dangling edges are dropped on load.
+- Cascade delete persists removed edges.
+- Debounced scheduler keeps one active timer.
+- Flush failures keep `dirty: true`.
+- `flushSync()` writes a valid snapshot.
+- `/status.persistence` and close-time flushing.
 
 ---
 
-## Slice 2 — Search
+## Slice 2 - Search
 
 ### Summary
-Add a `search` WebSocket command so agents can discover memories without knowing exact keys. Search is a pure read: no notifications, no persistence side effects, no subscriptions. Filters compose with AND semantics; results are metadata-only and sorted by the same `(importance desc, updatedAt desc, key asc)` order `map` already uses.
+Add a metadata-only `search` command so agents can discover memories without knowing exact keys or loading full values into context.
 
-### Filter Shape
-- `query` — optional non-empty string. Case-insensitive substring match against key, summary, and any tag.
-- `tags` — optional non-empty array of non-empty strings. Entry must contain every requested tag (case-insensitive).
-- `minImportance` — optional integer 0–10. Matches entries with `importance >= minImportance`.
-- `limit` — optional integer 1–100, default 20. Applied after sort.
-- At least one of `query` / non-empty `tags` / `minImportance` is required, else `missing-filter`.
+### Key Behavior
+- `query` matches key, summary, and tags case-insensitively.
+- `tags` uses AND semantics: every requested tag must be present.
+- `minImportance` filters by agent-supplied importance.
+- `limit` bounds returned results, while `total` reports the pre-limit match count.
+- Results are metadata-only; clients use `get` for full `value`.
+- Sorting matches `map`: importance descending, `updatedAt` descending, key ascending.
 
-### Response Shape
-- `{ type: 'search-result', results: [...metadata], total }`.
-- `results` are `nodeMetadata`-shaped (`key`, `summary`, `tags`, `importance`, `updatedAt`, `updatedBy`) — no `value`. Agents call `get` to retrieve full values, mirroring `map`.
-- `total` is the **pre-limit** match count, so callers can detect truncation and widen `limit` if needed.
-
-### Validation Errors
-- `invalid-query`, `invalid-tags`, `invalid-importance`, `invalid-limit`, `missing-filter`.
-- Whitespace-only `query` is rejected by the existing `isNonEmptyString` helper as `invalid-query`.
-- `tags: []` is treated as absent for the missing-filter check (no friction for clients passing optional empty arrays); each element of a non-empty `tags` array must still pass `isNonEmptyString`.
-
-### Implementation Notes
-- Logic lives in `src/memory-store.js` as a `search(filters)` method on the returned object, slotted between `map` and `exportState`. Reuses `sortNodeRecords` and `nodeMetadata` so ordering and result shape stay consistent across `map` and `search`.
-- Validation lives in `src/protocol.js`: `'search'` added to `COMMAND_TYPES`, plus a `case 'search':` after the `'map'` case in `validateMessage`.
-- Routing lives in `src/server.js`: a `case 'search':` after `'map'` that calls `memory.search(...)` and `safeSend`s the `search-result` envelope. No `notify*` calls, no agent-registry interaction.
-
-### Test Plan
-- 4 unit tests in `test/memory-store.test.js`:
-  - Metadata-only matches sorted by importance/recency/key.
-  - Limit applied but pre-limit `total` reported.
-  - Case-insensitive matching across key, summary, and tags.
-  - AND-semantics for multi-tag filters.
-- 2 integration tests in `test/server.test.js`:
-  - End-to-end filtered search via WebSocket; `value` absent from results.
-  - Validation rejects missing filters, whitespace-only query, and out-of-range importance.
-
-### Assumptions
-- Substring matching is enough; full-text indexing, ranking, and embeddings stay out of scope.
-- Search is stateless — no saved searches, no subscriptions for "matches changed" events.
-- Results are bounded by `limit`; clients widen via `total` rather than streaming pagination.
-- Empty store legitimately returns `{ results: [], total: 0 }`; not an error.
+### Tests
+- Metadata-only result shape.
+- Pre-limit `total`.
+- Case-insensitive matching.
+- Multi-tag AND filtering.
+- WebSocket search route.
+- Search validation errors.
 
 ---
 
-## Slice 3 — Request IDs
+## Slice 3 - Request IDs
 
 ### Summary
-Add optional client-supplied `requestId` correlation across the WebSocket protocol. Pure transport-layer concern: stores and registries are unchanged. Direct responses and validation errors echo the `requestId`; subscriber and cross-agent broadcasts never carry one. Backward compatible — clients that never send a `requestId` observe identical wire output as before.
+Add optional client-supplied `requestId` correlation across direct WebSocket responses while keeping broadcasts unchanged.
 
-### Wire Contract
-- **Inbound**: every command accepts an optional `requestId: string | number` (any string including `''`; any finite number including `0`, negatives, decimals).
-- **Outbound (direct)**: every ack/result/error sent in response to a single command echoes the `requestId` verbatim. Covers `registered`, `ok`, `result`, `subscribed`, `unsubscribed`, `linked` (ack with `target`), `unlinked`, `list`, `related`, `unrelated`, `deleted`, `map-result`, `search-result`, and `error` payloads from validation or per-handler failures (e.g. `missing-node`, `duplicate-agent`, `self-relation-not-allowed`).
-- **Outbound (broadcasts)**: server-initiated and cross-agent messages never carry `requestId`. Covers `update` (subscriber notifications, including the initial replay after `subscribe`), `relation-update` (cross-edge subscribers), the cross-agent `linked` broadcast (`{ from, payload }` shape), and `welcome`.
-- **Pre-parse errors** (`invalid-json`, `invalid-message`, `invalid-requestId`) carry no `requestId` since none can be safely recovered.
+### Key Behavior
+- Every inbound command accepts optional `requestId: string | number`.
+- Direct responses and direct errors echo the exact value.
+- Broadcasts never include `requestId`: `update`, `relation-update`, cross-agent `linked`, and `welcome`.
+- Invalid request IDs return `invalid-requestId` without echoing the invalid value.
 
-### Validation Errors
-- `invalid-requestId` — `null`, booleans, `NaN`, `±Infinity`, objects, and arrays are rejected. The bad value itself is **not** echoed in the error response.
-
-### Implementation Notes
-- `src/protocol.js` — adds `isValidRequestId` helper. `parseMessage` validates `requestId` immediately after the `isPlainObject` check, captures it once, and spreads it onto every failure return (`unknown-type` and any `validateMessage` failure via `{ ...result, requestId }`). On success the requestId rides along on `parsed.message` and the server reads it directly.
-- `src/server.js` — captures `const requestId = data.requestId;` once per message and adds the field to every direct `safeSend` ack/result/error site. Notification helpers (`notifyKeyUpdate`, `notifyRelationUpdate`, `notifyLinkedAgents`) are unchanged. The initial `update` after `subscribe` intentionally does **not** carry a requestId so the `update` envelope shape stays uniform across initial and subsequent updates.
-- Stores and registries (`src/memory-store.js`, `src/agent-registry.js`, `src/delivery.js`) are untouched — request IDs are purely a transport concern.
-
-### Test Plan
-- 4 integration tests in `test/server.test.js`:
-  - `requestId echoes on success acks across every command type` — exercises every direct ack/result handler with a distinct string requestId.
-  - `requestId preserves type and value, including 0 and empty string` — uses `assert.strictEqual` so `0` round-trips as number `0`, not string `'0'`.
-  - `errors echo the requestId, but invalid-requestId omits it` — covers a `validateMessage` failure, `unknown-type`, and the `invalid-requestId` rejection where the bad value is not echoed.
-  - `broadcasts (update, relation-update, cross-agent linked) carry no requestId` — two-agent setup; confirms subscriber `update`, cross-edge `relation-update`, and the cross-agent `linked` broadcast all omit `requestId` while the originator's own ack still carries it.
-
-### Assumptions
-- Purely additive on the wire: `JSON.stringify` drops `undefined`, so clients that never send a `requestId` see identical bytes as before.
-- After the protocol layer, the server trusts `data.requestId` to be `string | number | undefined`.
-- Server-generated correlation IDs, monotonic sequence numbers, idempotency keys, and per-message timeouts remain out of scope.
+### Tests
+- Success acks echo request IDs across command types.
+- String, number, `0`, and empty-string IDs round trip exactly.
+- Validation errors echo valid request IDs.
+- Broadcasts omit request IDs.
 
 ---
 
-## Out of Scope (All Slices)
-Embeddings, dashboards, TTL/expiry, full-text ranking, saved searches, server-generated correlation IDs, idempotency keys, multi-user auth, JWTs, roles.
-
----
-
-## Slice 4 — Optional Token Auth
+## Slice 4 - Optional Token Auth
 
 ### Summary
-Add optional single-token authentication for the WebSocket protocol and `/status`. Auth is disabled by default and enabled only with `MEMORY_TOKEN` or `createSharedMemoryServer({ authToken })`.
+Add optional single-token authentication for WebSocket commands and `/status`. Auth is disabled by default and enabled only through `MEMORY_TOKEN` or `createSharedMemoryServer({ authToken })`.
 
-### Wire Contract
-- `auth`: `{ type: 'auth', token: 'secret', requestId }`.
-- Success: `{ type: 'authenticated', requestId }`.
-- Failure: `{ type: 'error', message: 'unauthorized', requestId }`.
-- When auth is enabled, all commands except `auth` return `unauthorized` until the socket authenticates.
-- When auth is disabled, sockets behave as authenticated and `auth` is accepted as a no-op success.
+### Key Behavior
+- `auth` command accepts `{ type: "auth", token, requestId }`.
+- Valid auth returns `{ type: "authenticated", requestId }`.
+- Invalid or missing tokens return `{ type: "error", message: "unauthorized", requestId }`.
+- When auth is enabled, only `auth` is allowed before authentication.
+- Unauthorized commands keep the socket open so clients can recover.
+- `/status` requires `Authorization: Bearer <token>` only when auth is enabled.
 
-### HTTP Status Auth
-- When auth is enabled, `/status` requires `Authorization: Bearer <token>`.
-- Missing or wrong bearer token returns HTTP `401` with `{ error: 'unauthorized' }`.
-- When auth is disabled, `/status` remains open.
+### Tests
+- Auth disabled flow remains backward compatible.
+- Protected commands are blocked before auth.
+- Valid auth unlocks the same socket.
+- Invalid and missing tokens preserve request ID behavior.
+- `/status` returns `401` for missing/wrong bearer tokens and normal status for valid bearer tokens.
 
-### Implementation Notes
-- Auth state is per WebSocket connection in `src/server.js`.
-- The token is exact string equality and is never stored in the memory graph.
-- `src/protocol.js` recognizes `auth`; token validation happens in the router so bad/missing tokens produce `unauthorized`.
-- Request ID semantics remain unchanged: direct auth responses/errors echo it, broadcasts omit it.
+---
 
-### Test Plan
-- Auth disabled flow remains compatible.
-- Auth enabled blocks protected commands until valid auth.
-- Invalid and missing tokens return `unauthorized` without closing the socket.
-- `/status` enforces bearer auth only when enabled.
+## Slice 5 - TTL Expiry And Prune
+
+### Summary
+Add deterministic time-based lifecycle management for temporary memories. Reads stay side-effect-free; expired entries are hidden during reads and removed only by explicit `prune` or the background sweep.
+
+### Key Behavior
+- Entries include optional `expiresAt`.
+- `set` accepts `ttlMs` or `expiresAt`, but not both.
+- `ttlMs` is converted to `expiresAt = clock() + ttlMs`.
+- `touch` updates expiry and `updatedAt` without changing `value`.
+- `touch` with no expiry fields clears existing expiry.
+- `prune` removes all expired entries and cascades inbound/outbound edges.
+- `get`, `keys`, `count`, `map`, and `search` ignore expired entries.
+- `map` skips edges touching expired nodes.
+- `relate` treats expired endpoints as `missing-node`.
+- Background pruning runs every `pruneIntervalMs` milliseconds by default; `0` disables it.
+- Time is injectable with `clock` or `now` for deterministic tests.
+
+### Notifications
+- Pruned keys emit `update` with `entry: null` and `action: "expired"`.
+- Edges removed by expiry emit `relation-update` with `action: "cascade-deleted"`.
+- Background prune and explicit `prune` share the same notification path.
+
+### Status Fields
+- `expiredMemoryCount`
+- `pruneIntervalMs`
+- `lastPrunedAt`
+
+### Tests
+- `set` with `ttlMs` and `expiresAt`.
+- Expired entries hidden from `get`, `keys`, `count`, `map`, and `search`.
+- Map skips phantom edges touching expired nodes.
+- `relate` rejects expired endpoints.
+- `touch` extends expiry and clears expiry.
+- `pruneExpired()` removes expired nodes and cascades edges.
+- Persistence saves and reloads `expiresAt`.
+- WebSocket `touch` and `prune` request/response shapes.
+- Validation rejects invalid expiry fields.
+- Prune notifications and background prune through injected scheduler/clock.
+- `/status` includes expiry/prune fields.
+
+---
+
+## Next Candidate Slice - Snapshots / Export / Import
+
+### Summary
+Add operational safety tools before more advanced retrieval. Snapshots let developers inspect, back up, and restore graph state after agent mistakes without introducing a database.
+
+### Candidate Behavior
+- Export the full graph snapshot as JSON.
+- Import a snapshot with the same defensive validation used by persistence loading.
+- Reject or drop dangling edges deterministically.
+- Optionally support dry-run import validation.
+- Keep auth checks in the transport layer.
+
+---
+
+## Out Of Scope
+- Official MCP protocol conversion.
+- Embeddings and vector databases.
+- Full-text indexing or fuzzy ranking.
+- Multi-user auth, JWTs, roles, or hashed token storage.
+- Archival history, soft delete, or audit log.
+- Dashboard UI.

@@ -71,6 +71,9 @@ npm test
   "memoryKeys": ["greeting"],
   "memoryCount": 1,
   "relationCount": 0,
+  "expiredMemoryCount": 0,
+  "pruneIntervalMs": 600000,
+  "lastPrunedAt": null,
   "persistence": {
     "enabled": true,
     "file": "D:\\Pruthu\\cv projects\\test\\sharedMemory\\data\\memory.json",
@@ -84,9 +87,12 @@ npm test
 
 - `agents`: all known agent IDs, including offline placeholders.
 - `connectedAgents`: agent IDs with a live WebSocket.
-- `memoryKeys`: keys currently stored in memory.
-- `memoryCount`: number of memory entries.
-- `relationCount`: number of memory graph edges.
+- `memoryKeys`: non-expired keys currently stored in memory.
+- `memoryCount`: number of non-expired memory entries.
+- `relationCount`: number of graph edges whose endpoints are non-expired.
+- `expiredMemoryCount`: expired entries still waiting for prune.
+- `pruneIntervalMs`: background prune interval in milliseconds. `0` means disabled.
+- `lastPrunedAt`: timestamp of the last explicit or background prune, or `null`.
 - `persistence`: durability status. When `MEMORY_FILE` is unset, `enabled` is `false`.
 
 When `MEMORY_TOKEN` is set, `/status` requires:
@@ -111,7 +117,7 @@ MEMORY_FILE=data/memory.json npm start
 
 The server loads the file on startup. Missing files start with an empty graph. Invalid JSON fails startup clearly. Edges that reference missing memory entries are dropped during load to preserve graph integrity.
 
-Runtime mutations stay RAM-first. `set`, `relate`, `unrelate`, and `delete` mark the store dirty and schedule a debounced flush. The flush writes JSON atomically by writing a temp file next to the target and renaming it over the target. `close()`, `SIGINT`, and `SIGTERM` force a final flush.
+Runtime mutations stay RAM-first. `set`, `touch`, `relate`, `unrelate`, `delete`, and `prune` mark the store dirty when they change state and schedule a debounced flush. The flush writes JSON atomically by writing a temp file next to the target and renaming it over the target. `close()`, `SIGINT`, and `SIGTERM` force a final flush.
 
 Persisted JSON shape:
 
@@ -123,6 +129,7 @@ Persisted JSON shape:
       "summary": "Server is split into focused modules.",
       "tags": ["architecture", "server"],
       "importance": 8,
+      "expiresAt": null,
       "updatedAt": 1714694400000,
       "updatedBy": "agentA"
     }
@@ -235,6 +242,20 @@ Optional graph metadata can be included for low-token recall:
 }
 ```
 
+Temporary memories can expire by passing either `ttlMs` or `expiresAt`, but not both:
+
+```json
+{
+  "type": "set",
+  "key": "session.note",
+  "value": "Temporary task context",
+  "summary": "Temporary task context",
+  "ttlMs": 600000
+}
+```
+
+`ttlMs` is converted to an absolute `expiresAt` timestamp by the server clock. `expiresAt` must be a positive integer timestamp in milliseconds. Missing expiry means the entry does not expire.
+
 Response:
 
 ```json
@@ -249,12 +270,15 @@ The stored entry has this shape:
   "summary": "hello from agentA",
   "tags": [],
   "importance": 0,
+  "expiresAt": null,
   "updatedAt": 1714694400000,
   "updatedBy": "agentA"
 }
 ```
 
 If `summary` is omitted, the server generates a compact fallback by stringifying the value, collapsing whitespace, and capping length. `importance` must be an integer from `0` to `10`.
+
+Expired entries are hidden from `get`, `list`, `map`, and `search` without deleting or flushing them. Expired entries are removed only by `prune` or the background prune interval.
 
 ### `get`
 
@@ -275,13 +299,43 @@ Response:
     "summary": "hello from agentA",
     "tags": [],
     "importance": 0,
+    "expiresAt": null,
     "updatedAt": 1714694400000,
     "updatedBy": "agentA"
   }
 }
 ```
 
-If the key does not exist, `entry` is `null`.
+If the key does not exist or is expired, `entry` is `null`.
+
+### `touch`
+
+Updates expiry and metadata timestamps without changing the stored value.
+
+```json
+{ "type": "touch", "key": "session.note", "ttlMs": 600000, "requestId": "touch-1" }
+```
+
+Response:
+
+```json
+{
+  "type": "touched",
+  "key": "session.note",
+  "entry": {
+    "value": "Temporary task context",
+    "summary": "Temporary task context",
+    "tags": [],
+    "importance": 0,
+    "expiresAt": 1714695000000,
+    "updatedAt": 1714694400000,
+    "updatedBy": "agentA"
+  },
+  "requestId": "touch-1"
+}
+```
+
+`touch` accepts either `ttlMs` or `expiresAt`, but not both. If both expiry fields are omitted, the existing expiry is cleared and the memory becomes non-expiring.
 
 ### `subscribe`
 
@@ -411,6 +465,38 @@ Response:
 
 Deleting a missing key is safe and returns `removed: false`.
 
+### `prune`
+
+Removes all expired memory entries and cascades their inbound and outbound graph edges.
+
+```json
+{ "type": "prune", "requestId": "prune-1" }
+```
+
+Response:
+
+```json
+{
+  "type": "pruned",
+  "keys": ["session.note"],
+  "count": 1,
+  "requestId": "prune-1"
+}
+```
+
+Subscribers to pruned keys receive:
+
+```json
+{
+  "type": "update",
+  "key": "session.note",
+  "entry": null,
+  "action": "expired"
+}
+```
+
+Incident edges removed by expiry emit `relation-update` with `action: "cascade-deleted"`.
+
 ### `map`
 
 Returns a deterministic metadata-only graph neighborhood for low-token recall.
@@ -439,7 +525,7 @@ Response:
 }
 ```
 
-`map` uses bidirectional breadth-first search with a visited set, so cycles cannot duplicate nodes or loop forever. Returned edges preserve original `from`, `to`, and `relation`. The root key is included first; the remaining nodes are sorted by importance descending, `updatedAt` descending, then key ascending before applying `limit`.
+`map` uses bidirectional breadth-first search with a visited set, so cycles cannot duplicate nodes or loop forever. Returned edges preserve original `from`, `to`, and `relation`. The root key is included first; the remaining nodes are sorted by importance descending, `updatedAt` descending, then key ascending before applying `limit`. Expired nodes and edges touching expired nodes are skipped.
 
 ### `search`
 
@@ -483,7 +569,7 @@ Response:
 }
 ```
 
-`results` are metadata-only. Use `get` to retrieve full `value`. `total` is the pre-limit match count.
+`results` are metadata-only. Use `get` to retrieve full `value`. `total` is the pre-limit match count. Expired entries are not searched.
 
 ### `relation-update`
 
@@ -574,6 +660,8 @@ Response:
 }
 ```
 
+Expired keys are omitted from `memoryKeys`.
+
 ## Validation
 
 The server returns `{ "type": "error", "message": "..." }` for invalid input.
@@ -589,7 +677,7 @@ The server returns `{ "type": "error", "message": "..." }` for invalid input.
 - Missing or blank `to`: `missing-to`
 - Blank `agentId`: `missing-agentId`
 - Duplicate live agent ID: `duplicate-agent`
-- Invalid metadata: `invalid-summary`, `invalid-tags`, `invalid-importance`
+- Invalid metadata: `invalid-summary`, `invalid-tags`, `invalid-importance`, `invalid-expiry`
 - Invalid graph request: `invalid-relation`, `invalid-reason`, `invalid-weight`, `invalid-depth`, `invalid-limit`
 - Invalid search request: `invalid-query`, `missing-filter`
 - Relation endpoint does not exist: `missing-node`

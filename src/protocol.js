@@ -5,6 +5,7 @@ const COMMAND_TYPES = new Set([
     'get',
     'subscribe',
     'unsubscribe',
+    'touch',
     'link',
     'unlink',
     'list',
@@ -13,6 +14,7 @@ const COMMAND_TYPES = new Set([
     'delete',
     'map',
     'search',
+    'prune',
 ]);
 
 const RELATION_TYPES = new Set([
@@ -45,6 +47,10 @@ function isNumberInRange(value, min, max) {
     return typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max;
 }
 
+function isPositiveInteger(value) {
+    return Number.isInteger(value) && value > 0;
+}
+
 function isValidRequestId(value) {
     return typeof value === 'string' || (typeof value === 'number' && Number.isFinite(value));
 }
@@ -54,6 +60,18 @@ function hasValidTags(tags) {
 }
 
 function validateSetMetadata(message) {
+    if (hasOwn(message, 'ttlMs') && hasOwn(message, 'expiresAt')) {
+        return { ok: false, error: 'invalid-expiry' };
+    }
+
+    if (hasOwn(message, 'ttlMs') && !isPositiveInteger(message.ttlMs)) {
+        return { ok: false, error: 'invalid-expiry' };
+    }
+
+    if (hasOwn(message, 'expiresAt') && !isPositiveInteger(message.expiresAt)) {
+        return { ok: false, error: 'invalid-expiry' };
+    }
+
     if (hasOwn(message, 'summary') && !isNonEmptyString(message.summary)) {
         return { ok: false, error: 'invalid-summary' };
     }
@@ -137,8 +155,12 @@ function validateMessage(message) {
         case 'subscribe':
         case 'unsubscribe':
         case 'delete':
+        case 'touch':
             if (!isNonEmptyString(message.key)) {
                 return { ok: false, error: 'missing-key' };
+            }
+            if (message.type === 'touch') {
+                return validateSetMetadata(message) || { ok: true, message };
             }
             return { ok: true, message };
 
@@ -150,6 +172,7 @@ function validateMessage(message) {
             return { ok: true, message };
 
         case 'list':
+        case 'prune':
             return { ok: true, message };
 
         case 'relate': {

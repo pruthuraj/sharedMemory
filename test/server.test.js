@@ -120,6 +120,9 @@ test('register, set, get, list, and status remain compatible', async () => {
             memoryKeys: ['greeting'],
             memoryCount: 1,
             relationCount: 0,
+            expiredMemoryCount: 0,
+            pruneIntervalMs: 600000,
+            lastPrunedAt: null,
             persistence: {
                 enabled: false,
                 file: null,
@@ -710,6 +713,203 @@ test('search validates filters and rejects invalid input', async () => {
     }
 });
 
+test('touch and expiry validation use requestId-aware response shapes', async () => {
+    let currentTime = 1000;
+    const { appServer, wsUrl } = await startServer({
+        clock: () => currentTime,
+        pruneIntervalMs: 0,
+    });
+
+    try {
+        const client = await connectClient(wsUrl);
+        await client.waitFor((message) => message.type === 'welcome');
+        client.send({ type: 'register', agentId: 'agentA' });
+        await client.waitFor((message) => message.type === 'registered');
+
+        client.send({ type: 'set', key: 'bad', value: true, ttlMs: 0, requestId: 'bad-ttl' });
+        assert.deepEqual(await client.waitFor((message) => message.requestId === 'bad-ttl'), {
+            type: 'error',
+            message: 'invalid-expiry',
+            requestId: 'bad-ttl',
+        });
+
+        client.send({
+            type: 'set',
+            key: 'bad2',
+            value: true,
+            ttlMs: 100,
+            expiresAt: 2000,
+            requestId: 'both',
+        });
+        assert.deepEqual(await client.waitFor((message) => message.requestId === 'both'), {
+            type: 'error',
+            message: 'invalid-expiry',
+            requestId: 'both',
+        });
+
+        client.send({ type: 'set', key: 'session', value: 'work', ttlMs: 100, requestId: 'set-session' });
+        await client.waitFor((message) => message.type === 'ok' && message.requestId === 'set-session');
+
+        currentTime = 1050;
+        client.send({ type: 'touch', key: 'session', ttlMs: 500, requestId: 'touch-extend' });
+        const touched = await client.waitFor((message) => message.type === 'touched');
+        assert.equal(touched.requestId, 'touch-extend');
+        assert.equal(touched.entry.expiresAt, 1550);
+
+        client.send({ type: 'touch', key: 'session', requestId: 'touch-clear' });
+        const cleared = await client.waitFor((message) => message.requestId === 'touch-clear');
+        assert.equal(cleared.entry.expiresAt, null);
+    } finally {
+        await appServer.close();
+    }
+});
+
+test('prune expires nodes and emits expired plus cascade notifications', async () => {
+    let currentTime = 1000;
+    const { appServer, wsUrl } = await startServer({
+        clock: () => currentTime,
+        pruneIntervalMs: 0,
+    });
+
+    try {
+        const client = await connectClient(wsUrl);
+        await client.waitFor((message) => message.type === 'welcome');
+        client.send({ type: 'register', agentId: 'agentA' });
+        await client.waitFor((message) => message.type === 'registered');
+
+        client.send({ type: 'set', key: 'expiring', value: 'gone', ttlMs: 100 });
+        await client.waitFor((message) => message.type === 'ok' && message.key === 'expiring');
+        client.send({ type: 'set', key: 'neighbor', value: 'stay' });
+        await client.waitFor((message) => message.type === 'ok' && message.key === 'neighbor');
+        client.send({ type: 'relate', from: 'expiring', to: 'neighbor', relation: 'related_to' });
+        await client.waitFor((message) => message.type === 'related');
+
+        client.send({ type: 'subscribe', key: 'expiring' });
+        await client.waitFor((message) => message.type === 'subscribed' && message.key === 'expiring');
+        await client.waitFor((message) => message.type === 'update' && message.key === 'expiring');
+        client.send({ type: 'subscribe', key: 'neighbor' });
+        await client.waitFor((message) => message.type === 'subscribed' && message.key === 'neighbor');
+        await client.waitFor((message) => message.type === 'update' && message.key === 'neighbor');
+
+        currentTime = 1200;
+        client.send({ type: 'prune', requestId: 'prune-1' });
+        assert.deepEqual(await client.waitFor((message) => message.type === 'pruned'), {
+            type: 'pruned',
+            keys: ['expiring'],
+            count: 1,
+            requestId: 'prune-1',
+        });
+
+        const expiredUpdate = await client.waitFor(
+            (message) => message.type === 'update' && message.key === 'expiring' && message.action === 'expired',
+        );
+        assert.equal(expiredUpdate.entry, null);
+
+        const cascade = await client.waitFor(
+            (message) => message.type === 'relation-update' && message.action === 'cascade-deleted',
+        );
+        assert.equal(cascade.edge.from, 'expiring');
+        assert.equal(cascade.edge.to, 'neighbor');
+    } finally {
+        await appServer.close();
+    }
+});
+
+test('background prune runs through injected scheduler and status exposes expiry fields', async () => {
+    let currentTime = 1000;
+    const scheduled = new Map();
+    let nextId = 1;
+    const pruneScheduler = {
+        setInterval(fn) {
+            const id = nextId;
+            nextId += 1;
+            scheduled.set(id, fn);
+            return id;
+        },
+        clearInterval(id) {
+            scheduled.delete(id);
+        },
+    };
+    const { appServer, httpUrl, wsUrl } = await startServer({
+        clock: () => currentTime,
+        pruneIntervalMs: 250,
+        pruneScheduler,
+    });
+
+    try {
+        assert.equal(scheduled.size, 1);
+
+        const client = await connectClient(wsUrl);
+        await client.waitFor((message) => message.type === 'welcome');
+        client.send({ type: 'register', agentId: 'agentA' });
+        await client.waitFor((message) => message.type === 'registered');
+        client.send({ type: 'set', key: 'expiring', value: 'gone', ttlMs: 100 });
+        await client.waitFor((message) => message.type === 'ok' && message.key === 'expiring');
+        client.send({ type: 'subscribe', key: 'expiring' });
+        await client.waitFor((message) => message.type === 'subscribed' && message.key === 'expiring');
+        await client.waitFor((message) => message.type === 'update' && message.key === 'expiring');
+
+        currentTime = 1200;
+        const pendingPrune = Array.from(scheduled.values())[0];
+        pendingPrune();
+
+        await client.waitFor(
+            (message) => message.type === 'update' && message.key === 'expiring' && message.action === 'expired',
+        );
+
+        const status = await fetch(`${httpUrl}/status`).then((response) => response.json());
+        assert.equal(status.expiredMemoryCount, 0);
+        assert.equal(status.pruneIntervalMs, 250);
+        assert.equal(status.lastPrunedAt, 1200);
+    } finally {
+        await appServer.close();
+    }
+    assert.equal(scheduled.size, 0);
+});
+
+test('expired entries are hidden from get, map, and search over websocket', async () => {
+    let currentTime = 1000;
+    const { appServer, wsUrl } = await startServer({
+        clock: () => currentTime,
+        pruneIntervalMs: 0,
+    });
+
+    try {
+        const client = await connectClient(wsUrl);
+        await client.waitFor((message) => message.type === 'welcome');
+        client.send({ type: 'register', agentId: 'agentA' });
+        await client.waitFor((message) => message.type === 'registered');
+
+        client.send({ type: 'set', key: 'root', value: 'root', summary: 'root' });
+        await client.waitFor((message) => message.type === 'ok' && message.key === 'root');
+        client.send({ type: 'set', key: 'old', value: 'old', summary: 'old memory', ttlMs: 100 });
+        await client.waitFor((message) => message.type === 'ok' && message.key === 'old');
+        client.send({ type: 'relate', from: 'root', to: 'old', relation: 'related_to' });
+        await client.waitFor((message) => message.type === 'related');
+
+        currentTime = 1200;
+        client.send({ type: 'get', key: 'old', requestId: 'get-old' });
+        assert.deepEqual(await client.waitFor((message) => message.requestId === 'get-old'), {
+            type: 'result',
+            key: 'old',
+            entry: null,
+            requestId: 'get-old',
+        });
+
+        client.send({ type: 'map', key: 'root', depth: 1, limit: 10, requestId: 'map-root' });
+        const graph = await client.waitFor((message) => message.requestId === 'map-root');
+        assert.deepEqual(graph.nodes.map((node) => node.key), ['root']);
+        assert.deepEqual(graph.edges, []);
+
+        client.send({ type: 'search', query: 'old', requestId: 'search-old' });
+        const search = await client.waitFor((message) => message.requestId === 'search-old');
+        assert.equal(search.total, 0);
+        assert.deepEqual(search.results, []);
+    } finally {
+        await appServer.close();
+    }
+});
+
 test('requestId echoes on success acks across every command type', async () => {
     const { appServer, wsUrl } = await startServer();
 
@@ -727,6 +927,10 @@ test('requestId echoes on success acks across every command type', async () => {
 
         client.send({ type: 'set', key: 'k2', value: 'v2', requestId: 'r-set-2' });
         await client.waitFor((message) => message.type === 'ok' && message.key === 'k2');
+
+        client.send({ type: 'touch', key: 'k1', ttlMs: 1000, requestId: 'r-touch' });
+        const touchAck = await client.waitFor((message) => message.type === 'touched' && message.key === 'k1');
+        assert.equal(touchAck.requestId, 'r-touch');
 
         client.send({ type: 'get', key: 'k1', requestId: 'r-get' });
         const getResult = await client.waitFor((message) => message.type === 'result' && message.key === 'k1');
@@ -767,6 +971,10 @@ test('requestId echoes on success acks across every command type', async () => {
         client.send({ type: 'search', query: 'k', requestId: 'r-search' });
         const searchResult = await client.waitFor((message) => message.type === 'search-result');
         assert.equal(searchResult.requestId, 'r-search');
+
+        client.send({ type: 'prune', requestId: 'r-prune' });
+        const pruneResult = await client.waitFor((message) => message.type === 'pruned');
+        assert.equal(pruneResult.requestId, 'r-prune');
 
         client.send({
             type: 'unrelate', from: 'k1', to: 'k2', relation: 'related_to', requestId: 'r-unrelate',

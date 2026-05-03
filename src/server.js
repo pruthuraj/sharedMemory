@@ -12,6 +12,8 @@ const {
 const { createMemoryStore } = require('./memory-store');
 const { parseMessage } = require('./protocol');
 
+const DEFAULT_PRUNE_INTERVAL_MS = 600000;
+
 function hasOwn(object, key) {
     return Object.prototype.hasOwnProperty.call(object, key);
 }
@@ -24,14 +26,22 @@ function createSharedMemoryServer(options = {}) {
     const authToken = typeof configuredAuthToken === 'string' && configuredAuthToken.length > 0
         ? configuredAuthToken
         : null;
+    const pruneIntervalMs = options.pruneIntervalMs ?? DEFAULT_PRUNE_INTERVAL_MS;
+    const pruneScheduler = options.pruneScheduler || {
+        setInterval,
+        clearInterval,
+    };
     const persistence = options.persistence || (
         process.env.MEMORY_FILE ? { file: process.env.MEMORY_FILE } : null
     );
     const memory = options.memoryStore || createMemoryStore({
+        clock: options.clock,
         now: options.now,
         persistence,
+        pruneIntervalMs,
     });
     const agents = options.agentRegistry || createAgentRegistry({ genId: options.genId });
+    let pruneTimer = null;
 
     app.get('/status', (req, res) => {
         if (authToken && req.get('authorization') !== `Bearer ${authToken}`) {
@@ -45,6 +55,7 @@ function createSharedMemoryServer(options = {}) {
             memoryKeys: memory.keys(),
             memoryCount: memory.count(),
             relationCount: memory.relationCount(),
+            ...memory.expiryStatus(),
             persistence: memory.persistenceStatus(),
         });
     });
@@ -53,6 +64,28 @@ function createSharedMemoryServer(options = {}) {
         if (!edge) return edge;
         const { id, ...rest } = edge;
         return rest;
+    }
+
+    function notifyPruned(result) {
+        for (const key of result.keys) {
+            notifyKeyUpdate(agents, key, null, { action: 'expired' });
+        }
+
+        for (const removedEdge of result.removedEdges) {
+            notifyRelationUpdate(agents, 'cascade-deleted', publicEdge(removedEdge));
+        }
+    }
+
+    if (pruneIntervalMs > 0) {
+        pruneTimer = pruneScheduler.setInterval(() => {
+            const result = memory.pruneExpired();
+            if (result.count > 0 || result.removedEdges.length > 0) {
+                notifyPruned(result);
+            }
+        }, pruneIntervalMs);
+        if (pruneTimer && typeof pruneTimer.unref === 'function') {
+            pruneTimer.unref();
+        }
     }
 
     wss.on('connection', (ws) => {
@@ -103,6 +136,8 @@ function createSharedMemoryServer(options = {}) {
                         summary: data.summary,
                         tags: data.tags,
                         importance: data.importance,
+                        ttlMs: data.ttlMs,
+                        expiresAt: data.expiresAt,
                     });
                     safeSend(ws, { type: 'ok', action: 'set', key: data.key, requestId });
                     notifyKeyUpdate(agents, data.key, entry);
@@ -129,6 +164,22 @@ function createSharedMemoryServer(options = {}) {
                 case 'unsubscribe': {
                     agents.unsubscribe(agentId, data.key);
                     safeSend(ws, { type: 'unsubscribed', key: data.key, requestId });
+                    break;
+                }
+
+                case 'touch': {
+                    const result = memory.touch(data.key, agentId, {
+                        ttlMs: data.ttlMs,
+                        expiresAt: data.expiresAt,
+                    });
+
+                    if (!result.ok) {
+                        safeSend(ws, { type: 'error', message: result.error, requestId });
+                        break;
+                    }
+
+                    safeSend(ws, { type: 'touched', key: data.key, entry: result.entry, requestId });
+                    notifyKeyUpdate(agents, data.key, result.entry);
                     break;
                 }
 
@@ -221,6 +272,13 @@ function createSharedMemoryServer(options = {}) {
                     break;
                 }
 
+                case 'prune': {
+                    const result = memory.pruneExpired();
+                    safeSend(ws, { type: 'pruned', keys: result.keys, count: result.count, requestId });
+                    notifyPruned(result);
+                    break;
+                }
+
                 default:
                     safeSend(ws, { type: 'error', message: 'unknown-type', requestId });
             }
@@ -243,6 +301,11 @@ function createSharedMemoryServer(options = {}) {
         },
 
         async close() {
+            if (pruneTimer) {
+                pruneScheduler.clearInterval(pruneTimer);
+                pruneTimer = null;
+            }
+
             await memory.flush();
 
             for (const client of wss.clients) {
