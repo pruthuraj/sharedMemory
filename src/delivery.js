@@ -11,12 +11,34 @@ function safeSend(ws, obj) {
     }
 }
 
-function notifyKeyUpdate(agents, key, entry) {
+function notifyKeyUpdate(agents, key, entry, options = {}) {
     for (const agentId of agents.ids()) {
         const info = agents.get(agentId);
         if (info && info.subscriptions.has(key)) {
-            safeSend(info.ws, { type: 'update', key, entry });
+            safeSend(info.ws, { type: 'update', key, entry, ...options });
         }
+    }
+}
+
+function notifyRelationUpdate(agents, action, edge) {
+    const targets = new Set();
+
+    for (const agentId of agents.ids()) {
+        const info = agents.get(agentId);
+        if (!info) continue;
+
+        if (info.subscriptions.has(edge.from) || info.subscriptions.has(edge.to)) {
+            targets.add(info.ws);
+        }
+    }
+
+    for (const ws of targets) {
+        safeSend(ws, {
+            type: 'relation-update',
+            action,
+            keys: [edge.from, edge.to],
+            edge,
+        });
     }
 }
 
@@ -35,5 +57,6 @@ function notifyLinkedAgents(agents, fromAgentId, payload) {
 module.exports = {
     notifyKeyUpdate,
     notifyLinkedAgents,
+    notifyRelationUpdate,
     safeSend,
 };

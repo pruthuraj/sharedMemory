@@ -2,17 +2,18 @@
 
 This project is a small local WebSocket server for sharing memory between agent-like clients. It is "MCP-like" in purpose, but it does not implement the official Model Context Protocol.
 
-Agents can register an ID, set and get shared keys, subscribe to updates, and link to other agent IDs for forwarded activity notifications. State is in memory only.
+Agents can register an ID, set and get shared keys, subscribe to updates, relate memories through a deterministic graph, and link to other agent IDs for forwarded activity notifications. State is in memory by default, with optional JSON persistence.
 
 ## Files
 - `server.js`: startup wrapper for `npm start`.
 - `src/server.js`: Express, HTTP, WebSocket setup, and lifecycle helpers.
 - `src/protocol.js`: JSON message parsing and validation.
-- `src/memory-store.js`: in-memory key/value store.
+- `src/memory-store.js`: in-memory key/value store and memory graph.
 - `src/agent-registry.js`: agent IDs, registrations, subscriptions, links, disconnects.
 - `src/delivery.js`: safe WebSocket delivery helpers.
 - `example_agent.js`: simple client that registers, subscribes, sets a key, and lists server state.
-- `test/server.test.js`: integration tests for the protocol and reliability behavior.
+- `test/server.test.js`: integration tests for the WebSocket protocol.
+- `test/memory-store.test.js`: focused graph traversal and sorting tests.
 
 ## Quick Start
 
@@ -26,6 +27,18 @@ Start the server:
 
 ```bash
 npm start
+```
+
+Start with persistent storage:
+
+```bash
+MEMORY_FILE=data/memory.json npm start
+```
+
+Start with token authentication:
+
+```bash
+MEMORY_TOKEN=secret npm start
 ```
 
 Run example agents in separate terminals:
@@ -55,13 +68,78 @@ npm test
 {
   "agents": ["agentA"],
   "connectedAgents": ["agentA"],
-  "memoryKeys": ["greeting"]
+  "memoryKeys": ["greeting"],
+  "memoryCount": 1,
+  "relationCount": 0,
+  "persistence": {
+    "enabled": true,
+    "file": "D:\\Pruthu\\cv projects\\test\\sharedMemory\\data\\memory.json",
+    "dirty": false,
+    "lastLoadedAt": 1714694400000,
+    "lastFlushedAt": 1714694400500,
+    "lastFlushError": null
+  }
 }
 ```
 
 - `agents`: all known agent IDs, including offline placeholders.
 - `connectedAgents`: agent IDs with a live WebSocket.
 - `memoryKeys`: keys currently stored in memory.
+- `memoryCount`: number of memory entries.
+- `relationCount`: number of memory graph edges.
+- `persistence`: durability status. When `MEMORY_FILE` is unset, `enabled` is `false`.
+
+When `MEMORY_TOKEN` is set, `/status` requires:
+
+```http
+Authorization: Bearer secret
+```
+
+Missing or invalid bearer tokens return HTTP `401`:
+
+```json
+{ "error": "unauthorized" }
+```
+
+## Persistence
+
+Persistence is optional and controlled by `MEMORY_FILE`.
+
+```bash
+MEMORY_FILE=data/memory.json npm start
+```
+
+The server loads the file on startup. Missing files start with an empty graph. Invalid JSON fails startup clearly. Edges that reference missing memory entries are dropped during load to preserve graph integrity.
+
+Runtime mutations stay RAM-first. `set`, `relate`, `unrelate`, and `delete` mark the store dirty and schedule a debounced flush. The flush writes JSON atomically by writing a temp file next to the target and renaming it over the target. `close()`, `SIGINT`, and `SIGTERM` force a final flush.
+
+Persisted JSON shape:
+
+```json
+{
+  "entries": {
+    "project.architecture": {
+      "value": "Full details...",
+      "summary": "Server is split into focused modules.",
+      "tags": ["architecture", "server"],
+      "importance": 8,
+      "updatedAt": 1714694400000,
+      "updatedBy": "agentA"
+    }
+  },
+  "edges": [
+    {
+      "from": "project.database",
+      "to": "project.architecture",
+      "relation": "depends_on",
+      "reason": "Database choices affect architecture.",
+      "weight": 0.8,
+      "updatedAt": 1714694400100,
+      "updatedBy": "agentA"
+    }
+  ]
+}
+```
 
 ## WebSocket Protocol
 
@@ -72,6 +150,47 @@ ws://localhost:3000
 ```
 
 All messages are JSON objects with a `type` field.
+
+Every command accepts an optional `requestId` string or finite number. Direct responses and direct errors echo the exact value. Broadcasts such as `update`, `relation-update`, cross-agent `linked`, and `welcome` do not include `requestId`.
+
+Example:
+
+```json
+{ "type": "get", "key": "greeting", "requestId": "get-1" }
+```
+
+Response:
+
+```json
+{
+  "type": "result",
+  "key": "greeting",
+  "entry": null,
+  "requestId": "get-1"
+}
+```
+
+### `auth`
+
+Authenticates a WebSocket connection when `MEMORY_TOKEN` is configured.
+
+```json
+{ "type": "auth", "token": "secret", "requestId": "auth-1" }
+```
+
+Success:
+
+```json
+{ "type": "authenticated", "requestId": "auth-1" }
+```
+
+Failure:
+
+```json
+{ "type": "error", "message": "unauthorized", "requestId": "auth-1" }
+```
+
+When auth is enabled, only `auth` is allowed before successful authentication. Protected commands return `unauthorized` and the socket remains open so clients can authenticate and retry. When auth is disabled, sockets behave as authenticated and `auth` is accepted as a no-op success.
 
 ### `register`
 
@@ -103,6 +222,19 @@ Stores a memory value.
 { "type": "set", "key": "greeting", "value": "hello from agentA" }
 ```
 
+Optional graph metadata can be included for low-token recall:
+
+```json
+{
+  "type": "set",
+  "key": "project.architecture",
+  "value": "Full details...",
+  "summary": "Server is split into focused modules.",
+  "tags": ["architecture", "server"],
+  "importance": 8
+}
+```
+
 Response:
 
 ```json
@@ -114,10 +246,15 @@ The stored entry has this shape:
 ```json
 {
   "value": "hello from agentA",
+  "summary": "hello from agentA",
+  "tags": [],
+  "importance": 0,
   "updatedAt": 1714694400000,
   "updatedBy": "agentA"
 }
 ```
+
+If `summary` is omitted, the server generates a compact fallback by stringifying the value, collapsing whitespace, and capping length. `importance` must be an integer from `0` to `10`.
 
 ### `get`
 
@@ -135,6 +272,9 @@ Response:
   "key": "greeting",
   "entry": {
     "value": "hello from agentA",
+    "summary": "hello from agentA",
+    "tags": [],
+    "importance": 0,
     "updatedAt": 1714694400000,
     "updatedBy": "agentA"
   }
@@ -171,6 +311,17 @@ If the key already has a value, the server immediately sends an `update`. Future
 }
 ```
 
+If a subscribed key is deleted, subscribers receive:
+
+```json
+{
+  "type": "update",
+  "key": "greeting",
+  "entry": null,
+  "action": "deleted"
+}
+```
+
 ### `unsubscribe`
 
 Stops updates for a key.
@@ -184,6 +335,178 @@ Response:
 ```json
 { "type": "unsubscribed", "key": "greeting" }
 ```
+
+### `relate`
+
+Creates or updates a typed edge between two existing memory keys.
+
+```json
+{
+  "type": "relate",
+  "from": "project.database",
+  "to": "project.architecture",
+  "relation": "depends_on",
+  "reason": "Database choices affect architecture.",
+  "weight": 0.8
+}
+```
+
+Response:
+
+```json
+{
+  "type": "related",
+  "action": "created",
+  "edge": {
+    "from": "project.database",
+    "to": "project.architecture",
+    "relation": "depends_on",
+    "reason": "Database choices affect architecture.",
+    "weight": 0.8,
+    "updatedAt": 1714694400000,
+    "updatedBy": "agentA"
+  }
+}
+```
+
+Supported relations are `related_to`, `depends_on`, `supports`, `contradicts`, `mentions`, `derived_from`, and `next_step`. Duplicate `from + relation + to` edges update the existing edge and return `action: "updated"`.
+
+### `unrelate`
+
+Removes a typed edge. This is idempotent.
+
+```json
+{
+  "type": "unrelate",
+  "from": "project.database",
+  "to": "project.architecture",
+  "relation": "depends_on"
+}
+```
+
+Response:
+
+```json
+{
+  "type": "unrelated",
+  "from": "project.database",
+  "to": "project.architecture",
+  "relation": "depends_on"
+}
+```
+
+### `delete`
+
+Deletes a memory key and cascades all inbound and outbound graph edges.
+
+```json
+{ "type": "delete", "key": "project.architecture" }
+```
+
+Response:
+
+```json
+{ "type": "deleted", "key": "project.architecture", "removed": true }
+```
+
+Deleting a missing key is safe and returns `removed: false`.
+
+### `map`
+
+Returns a deterministic metadata-only graph neighborhood for low-token recall.
+
+```json
+{ "type": "map", "key": "project.architecture", "depth": 1, "limit": 10 }
+```
+
+Response:
+
+```json
+{
+  "type": "map-result",
+  "key": "project.architecture",
+  "nodes": [
+    {
+      "key": "project.architecture",
+      "summary": "Server is split into focused modules.",
+      "tags": ["architecture", "server"],
+      "importance": 8,
+      "updatedAt": 1714694400000,
+      "updatedBy": "agentA"
+    }
+  ],
+  "edges": []
+}
+```
+
+`map` uses bidirectional breadth-first search with a visited set, so cycles cannot duplicate nodes or loop forever. Returned edges preserve original `from`, `to`, and `relation`. The root key is included first; the remaining nodes are sorted by importance descending, `updatedAt` descending, then key ascending before applying `limit`.
+
+### `search`
+
+Searches memory metadata without returning full values.
+
+```json
+{
+  "type": "search",
+  "query": "architecture",
+  "tags": ["server"],
+  "minImportance": 5,
+  "limit": 10
+}
+```
+
+Filters compose with AND semantics:
+
+- `query`: optional non-empty string matched case-insensitively against key, summary, and tags.
+- `tags`: optional array of non-empty strings; every requested tag must be present.
+- `minImportance`: optional integer `0` to `10`.
+- `limit`: optional integer `1` to `100`, default `20`.
+
+At least one of `query`, non-empty `tags`, or `minImportance` is required.
+
+Response:
+
+```json
+{
+  "type": "search-result",
+  "results": [
+    {
+      "key": "project.architecture",
+      "summary": "Server is split into focused modules.",
+      "tags": ["architecture", "server"],
+      "importance": 8,
+      "updatedAt": 1714694400000,
+      "updatedBy": "agentA"
+    }
+  ],
+  "total": 1
+}
+```
+
+`results` are metadata-only. Use `get` to retrieve full `value`. `total` is the pre-limit match count.
+
+### `relation-update`
+
+Subscribers receive relation notifications when an edge touches a subscribed key.
+
+```json
+{
+  "type": "relation-update",
+  "action": "created",
+  "keys": ["project.database", "project.architecture"],
+  "edge": {
+    "from": "project.database",
+    "to": "project.architecture",
+    "relation": "depends_on",
+    "reason": "Database choices affect architecture.",
+    "weight": 0.8,
+    "updatedAt": 1714694400000,
+    "updatedBy": "agentA"
+  }
+}
+```
+
+Actions are `created`, `updated`, `deleted`, and `cascade-deleted`. If a client subscribes to both endpoints, it receives exactly one relation notification.
 
 ### `link`
 
@@ -257,15 +580,24 @@ The server returns `{ "type": "error", "message": "..." }` for invalid input.
 
 - Invalid JSON: `invalid-json`
 - JSON that is not an object: `invalid-message`
+- Invalid request ID: `invalid-requestId`
 - Unknown or missing command type: `unknown-type`
+- Unauthorized command or auth failure: `unauthorized`
 - Missing or blank `key`: `missing-key`
 - Missing or blank `target`: `missing-target`
+- Missing or blank `from`: `missing-from`
+- Missing or blank `to`: `missing-to`
 - Blank `agentId`: `missing-agentId`
 - Duplicate live agent ID: `duplicate-agent`
+- Invalid metadata: `invalid-summary`, `invalid-tags`, `invalid-importance`
+- Invalid graph request: `invalid-relation`, `invalid-reason`, `invalid-weight`, `invalid-depth`, `invalid-limit`
+- Invalid search request: `invalid-query`, `missing-filter`
+- Relation endpoint does not exist: `missing-node`
+- Self-relation: `self-relation-not-allowed`
 
 ## Limitations
 
-- State is in memory only and is lost on restart.
-- There is no authentication or authorization.
+- State is lost on restart unless `MEMORY_FILE` is configured.
+- Authentication is a single static token when `MEMORY_TOKEN` is configured; it is not a multi-user identity system.
 - This is not a real MCP server implementation.
 - Concurrent writes are last-write-wins.
