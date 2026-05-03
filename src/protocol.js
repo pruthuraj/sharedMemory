@@ -1,4 +1,5 @@
 const COMMAND_TYPES = new Set([
+    'auth',
     'register',
     'set',
     'get',
@@ -117,6 +118,9 @@ function parseMessage(raw) {
 
 function validateMessage(message) {
     switch (message.type) {
+        case 'auth':
+            return { ok: true, message };
+
         case 'register':
             if (Object.prototype.hasOwnProperty.call(message, 'agentId') && !isNonEmptyString(message.agentId)) {
                 return { ok: false, error: 'missing-agentId' };

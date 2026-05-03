@@ -12,10 +12,18 @@ const {
 const { createMemoryStore } = require('./memory-store');
 const { parseMessage } = require('./protocol');
 
+function hasOwn(object, key) {
+    return Object.prototype.hasOwnProperty.call(object, key);
+}
+
 function createSharedMemoryServer(options = {}) {
     const app = express();
     const server = http.createServer(app);
     const wss = new WebSocket.Server({ server });
+    const configuredAuthToken = hasOwn(options, 'authToken') ? options.authToken : process.env.MEMORY_TOKEN;
+    const authToken = typeof configuredAuthToken === 'string' && configuredAuthToken.length > 0
+        ? configuredAuthToken
+        : null;
     const persistence = options.persistence || (
         process.env.MEMORY_FILE ? { file: process.env.MEMORY_FILE } : null
     );
@@ -26,6 +34,11 @@ function createSharedMemoryServer(options = {}) {
     const agents = options.agentRegistry || createAgentRegistry({ genId: options.genId });
 
     app.get('/status', (req, res) => {
+        if (authToken && req.get('authorization') !== `Bearer ${authToken}`) {
+            res.status(401).json({ error: 'unauthorized' });
+            return;
+        }
+
         res.json({
             agents: agents.ids(),
             connectedAgents: agents.connectedIds(),
@@ -44,6 +57,7 @@ function createSharedMemoryServer(options = {}) {
 
     wss.on('connection', (ws) => {
         let agentId = agents.createTemporary(ws);
+        let isAuthenticated = !authToken;
         safeSend(ws, { type: 'welcome', agentId });
 
         ws.on('message', (raw) => {
@@ -55,6 +69,21 @@ function createSharedMemoryServer(options = {}) {
 
             const data = parsed.message;
             const requestId = data.requestId;
+
+            if (data.type === 'auth') {
+                if (!authToken || data.token === authToken) {
+                    isAuthenticated = true;
+                    safeSend(ws, { type: 'authenticated', requestId });
+                } else {
+                    safeSend(ws, { type: 'error', message: 'unauthorized', requestId });
+                }
+                return;
+            }
+
+            if (!isAuthenticated) {
+                safeSend(ws, { type: 'error', message: 'unauthorized', requestId });
+                return;
+            }
 
             switch (data.type) {
                 case 'register': {

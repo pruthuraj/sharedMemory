@@ -4,7 +4,8 @@
 - **Slice 1 — Persistent Memory Graph**: implemented and tested (10 dedicated tests).
 - **Slice 2 — Search**: implemented and tested (6 dedicated tests; 4 unit + 2 integration).
 - **Slice 3 — Request IDs**: implemented and tested (4 integration tests).
-- Total suite: 30/30 passing.
+- **Slice 4 — Optional Token Auth**: implemented and tested (4 integration tests).
+- Total suite: 34/34 passing.
 
 ---
 
@@ -129,4 +130,35 @@ Add optional client-supplied `requestId` correlation across the WebSocket protoc
 ---
 
 ## Out of Scope (All Slices)
-Token auth, embeddings, dashboards, TTL/expiry, full-text ranking, saved searches, server-generated correlation IDs, idempotency keys.
+Embeddings, dashboards, TTL/expiry, full-text ranking, saved searches, server-generated correlation IDs, idempotency keys, multi-user auth, JWTs, roles.
+
+---
+
+## Slice 4 — Optional Token Auth
+
+### Summary
+Add optional single-token authentication for the WebSocket protocol and `/status`. Auth is disabled by default and enabled only with `MEMORY_TOKEN` or `createSharedMemoryServer({ authToken })`.
+
+### Wire Contract
+- `auth`: `{ type: 'auth', token: 'secret', requestId }`.
+- Success: `{ type: 'authenticated', requestId }`.
+- Failure: `{ type: 'error', message: 'unauthorized', requestId }`.
+- When auth is enabled, all commands except `auth` return `unauthorized` until the socket authenticates.
+- When auth is disabled, sockets behave as authenticated and `auth` is accepted as a no-op success.
+
+### HTTP Status Auth
+- When auth is enabled, `/status` requires `Authorization: Bearer <token>`.
+- Missing or wrong bearer token returns HTTP `401` with `{ error: 'unauthorized' }`.
+- When auth is disabled, `/status` remains open.
+
+### Implementation Notes
+- Auth state is per WebSocket connection in `src/server.js`.
+- The token is exact string equality and is never stored in the memory graph.
+- `src/protocol.js` recognizes `auth`; token validation happens in the router so bad/missing tokens produce `unauthorized`.
+- Request ID semantics remain unchanged: direct auth responses/errors echo it, broadcasts omit it.
+
+### Test Plan
+- Auth disabled flow remains compatible.
+- Auth enabled blocks protected commands until valid auth.
+- Invalid and missing tokens return `unauthorized` without closing the socket.
+- `/status` enforces bearer auth only when enabled.

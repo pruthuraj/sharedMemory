@@ -162,6 +162,141 @@ test('status reports enabled persistence and close flushes pending state', async
     assert.equal(persisted.entries.durable.summary, 'Saved memory');
 });
 
+test('auth disabled keeps existing flow open and accepts auth as no-op', async () => {
+    const { appServer, wsUrl } = await startServer();
+
+    try {
+        const client = await connectClient(wsUrl);
+        await client.waitFor((message) => message.type === 'welcome');
+
+        client.send({ type: 'auth', requestId: 'auth-disabled' });
+        assert.deepEqual(await client.waitFor((message) => message.type === 'authenticated'), {
+            type: 'authenticated',
+            requestId: 'auth-disabled',
+        });
+
+        client.send({ type: 'register', agentId: 'agentA' });
+        assert.deepEqual(await client.waitFor((message) => message.type === 'registered'), {
+            type: 'registered',
+            agentId: 'agentA',
+        });
+    } finally {
+        await appServer.close();
+    }
+});
+
+test('auth enabled blocks protected commands until valid auth unlocks the socket', async () => {
+    const { appServer, wsUrl } = await startServer({ authToken: 'secret' });
+
+    try {
+        const client = await connectClient(wsUrl);
+        await client.waitFor((message) => message.type === 'welcome');
+
+        client.send({ type: 'set', key: 'blocked', value: true, requestId: 'blocked-1' });
+        assert.deepEqual(await client.waitFor((message) => message.message === 'unauthorized'), {
+            type: 'error',
+            message: 'unauthorized',
+            requestId: 'blocked-1',
+        });
+
+        client.send({ type: 'auth', token: 'secret', requestId: 'auth-ok' });
+        assert.deepEqual(await client.waitFor((message) => message.type === 'authenticated'), {
+            type: 'authenticated',
+            requestId: 'auth-ok',
+        });
+
+        client.send({ type: 'set', key: 'allowed', value: true, requestId: 'allowed-1' });
+        assert.deepEqual(await client.waitFor((message) => message.type === 'ok'), {
+            type: 'ok',
+            action: 'set',
+            key: 'allowed',
+            requestId: 'allowed-1',
+        });
+    } finally {
+        await appServer.close();
+    }
+});
+
+test('invalid or missing auth token returns unauthorized but allows later recovery', async () => {
+    const { appServer, wsUrl } = await startServer({ authToken: 'secret' });
+
+    try {
+        const client = await connectClient(wsUrl);
+        await client.waitFor((message) => message.type === 'welcome');
+
+        client.send({ type: 'auth', requestId: 'missing-token' });
+        assert.deepEqual(await client.waitFor((message) => message.requestId === 'missing-token'), {
+            type: 'error',
+            message: 'unauthorized',
+            requestId: 'missing-token',
+        });
+
+        client.send({ type: 'auth', token: 123, requestId: 'bad-token-type' });
+        assert.deepEqual(await client.waitFor((message) => message.requestId === 'bad-token-type'), {
+            type: 'error',
+            message: 'unauthorized',
+            requestId: 'bad-token-type',
+        });
+
+        client.send({ type: 'auth', token: 'wrong', requestId: 'wrong-token' });
+        assert.deepEqual(await client.waitFor((message) => message.requestId === 'wrong-token'), {
+            type: 'error',
+            message: 'unauthorized',
+            requestId: 'wrong-token',
+        });
+
+        client.send({ type: 'auth', token: 'secret', requestId: 'recovered' });
+        assert.deepEqual(await client.waitFor((message) => message.type === 'authenticated'), {
+            type: 'authenticated',
+            requestId: 'recovered',
+        });
+
+        client.send({ type: 'register', agentId: 'agentA', requestId: 'register-after-auth' });
+        assert.deepEqual(await client.waitFor((message) => message.type === 'registered'), {
+            type: 'registered',
+            agentId: 'agentA',
+            requestId: 'register-after-auth',
+        });
+    } finally {
+        await appServer.close();
+    }
+});
+
+test('status endpoint requires bearer token only when auth is enabled', async () => {
+    const openServer = await startServer();
+
+    try {
+        const openStatus = await fetch(`${openServer.httpUrl}/status`);
+        assert.equal(openStatus.status, 200);
+    } finally {
+        await openServer.appServer.close();
+    }
+
+    const lockedServer = await startServer({ authToken: 'secret' });
+
+    try {
+        const noHeader = await fetch(`${lockedServer.httpUrl}/status`);
+        assert.equal(noHeader.status, 401);
+        assert.deepEqual(await noHeader.json(), { error: 'unauthorized' });
+
+        const wrongHeader = await fetch(`${lockedServer.httpUrl}/status`, {
+            headers: { Authorization: 'Bearer wrong' },
+        });
+        assert.equal(wrongHeader.status, 401);
+        assert.deepEqual(await wrongHeader.json(), { error: 'unauthorized' });
+
+        const goodHeader = await fetch(`${lockedServer.httpUrl}/status`, {
+            headers: { Authorization: 'Bearer secret' },
+        });
+        assert.equal(goodHeader.status, 200);
+        const body = await goodHeader.json();
+        assert.deepEqual(body.memoryKeys, []);
+        assert.equal(body.persistence.enabled, false);
+    } finally {
+        await lockedServer.appServer.close();
+    }
+});
+
 test('set supports metadata and fallback summaries', async () => {
     const { appServer, wsUrl } = await startServer();
 

@@ -35,6 +35,12 @@ Start with persistent storage:
 MEMORY_FILE=data/memory.json npm start
 ```
 
+Start with token authentication:
+
+```bash
+MEMORY_TOKEN=secret npm start
+```
+
 Run example agents in separate terminals:
 
 ```bash
@@ -82,6 +88,18 @@ npm test
 - `memoryCount`: number of memory entries.
 - `relationCount`: number of memory graph edges.
 - `persistence`: durability status. When `MEMORY_FILE` is unset, `enabled` is `false`.
+
+When `MEMORY_TOKEN` is set, `/status` requires:
+
+```http
+Authorization: Bearer secret
+```
+
+Missing or invalid bearer tokens return HTTP `401`:
+
+```json
+{ "error": "unauthorized" }
+```
 
 ## Persistence
 
@@ -132,6 +150,47 @@ ws://localhost:3000
 ```
 
 All messages are JSON objects with a `type` field.
+
+Every command accepts an optional `requestId` string or finite number. Direct responses and direct errors echo the exact value. Broadcasts such as `update`, `relation-update`, cross-agent `linked`, and `welcome` do not include `requestId`.
+
+Example:
+
+```json
+{ "type": "get", "key": "greeting", "requestId": "get-1" }
+```
+
+Response:
+
+```json
+{
+  "type": "result",
+  "key": "greeting",
+  "entry": null,
+  "requestId": "get-1"
+}
+```
+
+### `auth`
+
+Authenticates a WebSocket connection when `MEMORY_TOKEN` is configured.
+
+```json
+{ "type": "auth", "token": "secret", "requestId": "auth-1" }
+```
+
+Success:
+
+```json
+{ "type": "authenticated", "requestId": "auth-1" }
+```
+
+Failure:
+
+```json
+{ "type": "error", "message": "unauthorized", "requestId": "auth-1" }
+```
+
+When auth is enabled, only `auth` is allowed before successful authentication. Protected commands return `unauthorized` and the socket remains open so clients can authenticate and retry. When auth is disabled, sockets behave as authenticated and `auth` is accepted as a no-op success.
 
 ### `register`
 
@@ -382,6 +441,50 @@ Response:
 
 `map` uses bidirectional breadth-first search with a visited set, so cycles cannot duplicate nodes or loop forever. Returned edges preserve original `from`, `to`, and `relation`. The root key is included first; the remaining nodes are sorted by importance descending, `updatedAt` descending, then key ascending before applying `limit`.
 
+### `search`
+
+Searches memory metadata without returning full values.
+
+```json
+{
+  "type": "search",
+  "query": "architecture",
+  "tags": ["server"],
+  "minImportance": 5,
+  "limit": 10
+}
+```
+
+Filters compose with AND semantics:
+
+- `query`: optional non-empty string matched case-insensitively against key, summary, and tags.
+- `tags`: optional array of non-empty strings; every requested tag must be present.
+- `minImportance`: optional integer `0` to `10`.
+- `limit`: optional integer `1` to `100`, default `20`.
+
+At least one of `query`, non-empty `tags`, or `minImportance` is required.
+
+Response:
+
+```json
+{
+  "type": "search-result",
+  "results": [
+    {
+      "key": "project.architecture",
+      "summary": "Server is split into focused modules.",
+      "tags": ["architecture", "server"],
+      "importance": 8,
+      "updatedAt": 1714694400000,
+      "updatedBy": "agentA"
+    }
+  ],
+  "total": 1
+}
+```
+
+`results` are metadata-only. Use `get` to retrieve full `value`. `total` is the pre-limit match count.
+
 ### `relation-update`
 
 Subscribers receive relation notifications when an edge touches a subscribed key.
@@ -477,7 +580,9 @@ The server returns `{ "type": "error", "message": "..." }` for invalid input.
 
 - Invalid JSON: `invalid-json`
 - JSON that is not an object: `invalid-message`
+- Invalid request ID: `invalid-requestId`
 - Unknown or missing command type: `unknown-type`
+- Unauthorized command or auth failure: `unauthorized`
 - Missing or blank `key`: `missing-key`
 - Missing or blank `target`: `missing-target`
 - Missing or blank `from`: `missing-from`
@@ -486,12 +591,13 @@ The server returns `{ "type": "error", "message": "..." }` for invalid input.
 - Duplicate live agent ID: `duplicate-agent`
 - Invalid metadata: `invalid-summary`, `invalid-tags`, `invalid-importance`
 - Invalid graph request: `invalid-relation`, `invalid-reason`, `invalid-weight`, `invalid-depth`, `invalid-limit`
+- Invalid search request: `invalid-query`, `missing-filter`
 - Relation endpoint does not exist: `missing-node`
 - Self-relation: `self-relation-not-allowed`
 
 ## Limitations
 
 - State is lost on restart unless `MEMORY_FILE` is configured.
-- There is no authentication or authorization.
+- Authentication is a single static token when `MEMORY_TOKEN` is configured; it is not a multi-user identity system.
 - This is not a real MCP server implementation.
 - Concurrent writes are last-write-wins.
