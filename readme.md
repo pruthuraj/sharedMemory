@@ -1,20 +1,26 @@
 # MCP Shared Memory Server
 
-This project is a small local WebSocket server for sharing memory between agent-like clients. It is "MCP-like" in purpose, but it does not implement the official Model Context Protocol.
+This project is a small local shared-memory service for agent-like clients. It exposes the original WebSocket protocol and an official stdio MCP adapter for direct MCP tool calls.
 
-Agents can register an ID, set and get shared keys, subscribe to updates, relate memories through a deterministic graph, and link to other agent IDs for forwarded activity notifications. State is in memory by default, with optional JSON persistence.
+Agents can register an ID, set and get shared keys, subscribe to updates, relate memories through a deterministic graph, request semantic suggestions, and link to other agent IDs for forwarded activity notifications. State uses an in-process SQLite database by default, with optional file-backed SQLite persistence.
 
 ## Files
 - `server.js`: startup wrapper for `npm start`.
 - `src/server.js`: Express, HTTP, WebSocket setup, and lifecycle helpers.
 - `src/protocol.js`: JSON message parsing and validation.
-- `src/memory-store.js`: in-memory key/value store and memory graph.
+- `src/memory-store.js`: SQLite-backed key/value store, metadata search, TTL, and memory graph.
 - `src/suggestion-engine.js`: semantic memory suggestion queue, ranking, and index orchestration.
+- `src/mcp-tools.js`: transport-independent handlers for official MCP tools.
 - `src/agent-registry.js`: agent IDs, registrations, subscriptions, links, disconnects.
 - `src/delivery.js`: safe WebSocket delivery helpers.
+- `mcp-server.mjs`: official stdio MCP adapter.
+- `scripts/smoke-suggest.js`: manual real-model suggestion smoke client.
 - `example_agent.js`: simple client that registers, subscribes, sets a key, and lists server state.
 - `test/server.test.js`: integration tests for the WebSocket protocol.
 - `test/memory-store.test.js`: focused graph traversal and sorting tests.
+- `test/suggestion-engine.test.js`: semantic suggestion queue, ranking, and index tests.
+- `test/mcp-tools.test.js`: transport-independent MCP tool handler tests.
+- `test/mcp-stdio.test.js`: real stdio MCP protocol integration tests.
 
 ## Quick Start
 
@@ -23,6 +29,8 @@ Install dependencies:
 ```bash
 npm install
 ```
+
+Use Node.js 24 or newer. Persistence uses Node's built-in `node:sqlite` module, which currently prints an experimental warning.
 
 Start the server:
 
@@ -40,6 +48,12 @@ Start with token authentication:
 
 ```bash
 MEMORY_TOKEN=secret npm start
+```
+
+Start with semantic suggestions enabled:
+
+```bash
+MEMORY_SUGGEST_ENABLED=true npm start
 ```
 
 Run example agents in separate terminals:
@@ -61,6 +75,19 @@ Run tests:
 npm test
 ```
 
+Run the official stdio MCP adapter:
+
+```bash
+npm run mcp
+```
+
+Run the manual real-model suggestion smoke test in a second terminal after starting the server with suggestions enabled:
+
+```bash
+MEMORY_SUGGEST_ENABLED=true npm start
+npm run smoke:suggest
+```
+
 ## HTTP Status
 
 `GET /status` returns:
@@ -77,20 +104,26 @@ npm test
   "lastPrunedAt": null,
   "persistence": {
     "enabled": true,
-    "file": "D:\\Pruthu\\cv projects\\test\\sharedMemory\\data\\memory.json",
+    "file": "D:\\Pruthu\\cv projects\\test\\sharedMemory\\data\\memory.db",
     "dirty": false,
     "lastLoadedAt": 1714694400000,
     "lastFlushedAt": 1714694400500,
     "lastFlushError": null
   },
   "suggestions": {
-    "enabled": true,
+    "enabled": false,
     "modelId": "onnx-community/all-MiniLM-L6-v2-ONNX",
-    "activeIndexedCount": 12,
+    "modelLoaded": false,
+    "activeIndexedCount": 0,
     "queuedUpdateCount": 0,
     "processing": false,
-    "lastIndexedAt": 1714694400500,
+    "lastIndexedAt": null,
     "lastIndexError": null
+  },
+  "snapshot": {
+    "lastExportedAt": null,
+    "lastImportedAt": null,
+    "lastImportStats": null
   }
 }
 ```
@@ -104,7 +137,8 @@ npm test
 - `pruneIntervalMs`: background prune interval in milliseconds. `0` means disabled.
 - `lastPrunedAt`: timestamp of the last explicit or background prune, or `null`.
 - `persistence`: durability status. When `MEMORY_FILE` is unset, `enabled` is `false`.
-- `suggestions`: semantic suggestion status, including active index size and queued embedding work.
+- `suggestions`: semantic suggestion status, including active index size and queued embedding work. Suggestions are disabled unless explicitly enabled.
+- `snapshot`: last WebSocket snapshot export/import timestamps and import stats.
 
 When `MEMORY_TOKEN` is set, `/status` requires:
 
@@ -128,7 +162,7 @@ MEMORY_FILE=data/memory.db npm start
 
 The server opens (or creates) a SQLite database at the given path. A missing file starts with an empty graph. An invalid or corrupt file fails startup with a clear error message. Edges that reference missing memory entries are dropped during `importState` to preserve graph integrity.
 
-Every write (`set`, `touch`, `relate`, `unrelate`, `delete`, `prune`) is immediately durable — SQLite writes are committed synchronously to WAL before the command response is sent. The dirty flag and debounced flush still exist as a semantic acknowledgment layer; `close()`, `SIGINT`, and `SIGTERM` clear the dirty flag before the process exits.
+Every write (`set`, `touch`, `relate`, `unrelate`, `delete`, `prune`) is immediately durable; SQLite writes are committed synchronously to WAL before the command response is sent. The dirty flag and debounced flush still exist as a semantic acknowledgment layer; `close()`, `SIGINT`, and `SIGTERM` clear the dirty flag before the process exits.
 
 ## WebSocket Protocol
 
@@ -586,7 +620,88 @@ Response:
 }
 ```
 
-`context` must be a non-empty string, `limit` must be `1` to `20`, and `tags` uses AND semantics. The semantic index is eventually consistent: `set`, `touch`, `delete`, and `prune` enqueue index updates instead of blocking the write path.
+`context` must be a non-empty string, `limit` must be `1` to `20`, and `tags` uses AND semantics. Suggestions are disabled by default; disabled servers return `suggest-result` with an empty `suggestions` array and do not load the embedding model. Enable them with `MEMORY_SUGGEST_ENABLED=true` or `createSharedMemoryServer({ suggestions: { enabled: true } })`. When enabled, the semantic index is eventually consistent: `set`, `touch`, `delete`, and `prune` enqueue index updates instead of blocking the write path. `/status.suggestions.modelLoaded` becomes `true` after the embedder has loaded.
+
+### Snapshots
+
+Snapshots export and restore the full graph, including memory values. Public import is strict and replace-only: invalid snapshots are rejected before the store mutates.
+
+Export:
+
+```json
+{ "type": "export", "requestId": "export-1" }
+```
+
+Response:
+
+```json
+{
+  "type": "export-result",
+  "snapshot": {
+    "entries": {
+      "project.database": {
+        "value": { "engine": "sqlite" },
+        "summary": "Database summary",
+        "tags": ["database"],
+        "importance": 8,
+        "expiresAt": null,
+        "updatedAt": 1714694400000,
+        "updatedBy": "agentA"
+      }
+    },
+    "edges": []
+  },
+  "stats": { "entryCount": 1, "edgeCount": 0 },
+  "requestId": "export-1"
+}
+```
+
+Dry-run validation:
+
+```json
+{ "type": "validate-import", "snapshot": { "entries": {}, "edges": [] }, "requestId": "validate-1" }
+```
+
+Successful import:
+
+```json
+{ "type": "import", "snapshot": { "entries": {}, "edges": [] }, "requestId": "import-1" }
+```
+
+```json
+{
+  "type": "import-result",
+  "ok": true,
+  "mode": "replace",
+  "stats": { "entryCount": 0, "edgeCount": 0 },
+  "requestId": "import-1"
+}
+```
+
+Invalid import returns `ok: false`, `error: "invalid-snapshot"`, and an `errors` array. Successful imports broadcast `{ "type": "snapshot-update", "action": "imported", "mode": "replace", "stats": { ... } }` without `requestId`.
+
+## Official MCP Adapter
+
+The project also ships an official stdio MCP adapter:
+
+```bash
+npm run mcp
+```
+
+The adapter uses the same store modules directly; it does not require the WebSocket server to be running. It honors `MEMORY_FILE` for SQLite persistence. `MEMORY_TOKEN` is not used for stdio because the MCP process is local to the client that spawns it.
+
+Exposed tools:
+
+- `memory_set`: store a JSON value plus optional `summary`, `tags`, `importance`, `ttlMs`, and `expiresAt`.
+- `memory_get`: load the full entry for a key.
+- `memory_search`: return metadata-only search results and `total`.
+- `memory_suggest`: return semantic suggestions; disabled suggestions return an empty list without loading the model.
+- `memory_map`: return a metadata-only graph neighborhood.
+- `memory_export`: export the full snapshot with values.
+- `memory_validate_import`: validate a snapshot without mutating.
+- `memory_import`: strictly validate and replace the current graph.
+
+MCP tool responses are JSON text payloads with stable envelopes: `{ "ok": true, ... }` for success and `{ "ok": false, "error": "..." }` for domain failures.
 
 ### `relation-update`
 
@@ -698,6 +813,7 @@ The server returns `{ "type": "error", "message": "..." }` for invalid input.
 - Invalid graph request: `invalid-relation`, `invalid-reason`, `invalid-weight`, `invalid-depth`, `invalid-limit`
 - Invalid search request: `invalid-query`, `missing-filter`
 - Invalid suggest request: `missing-context`, `invalid-context`
+- Invalid snapshot request: `missing-snapshot`, `invalid-snapshot`
 - Relation endpoint does not exist: `missing-node`
 - Self-relation: `self-relation-not-allowed`
 
@@ -705,6 +821,6 @@ The server returns `{ "type": "error", "message": "..." }` for invalid input.
 
 - State is lost on restart unless `MEMORY_FILE` is configured (SQLite file path).
 - Authentication is a single static token when `MEMORY_TOKEN` is configured; it is not a multi-user identity system.
-- This is not a real MCP server implementation.
+- The WebSocket protocol is project-specific; official MCP access is available through `npm run mcp`.
 - Concurrent writes are last-write-wins.
-- The FTS5 search index uses trigram tokenization — queries shorter than 3 characters will return no results.
+- The FTS5 search index uses trigram tokenization; queries shorter than 3 characters will return no results.

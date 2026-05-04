@@ -18,6 +18,9 @@ const COMMAND_TYPES = new Set([
     'search',
     'suggest',
     'prune',
+    'export',
+    'validate-import',
+    'import',
 ]);
 
 const RELATION_TYPES = new Set([
@@ -183,6 +186,14 @@ function validateMessage(message) {
 
         case 'list':
         case 'prune':
+        case 'export':
+            return { ok: true, message };
+
+        case 'validate-import':
+        case 'import':
+            if (!hasOwn(message, 'snapshot')) {
+                return { ok: false, error: 'missing-snapshot' };
+            }
             return { ok: true, message };
 
         case 'relate': {

@@ -1,37 +1,37 @@
 # Memory Graph Implementation Plan
 
 ## Status
-- **Slice 1 - Persistent Memory Graph**: implemented and tested.
+- **Slice 1 - SQLite Persistent Memory Graph**: implemented and tested.
 - **Slice 2 - Search**: implemented and tested.
 - **Slice 3 - Request IDs**: implemented and tested.
 - **Slice 4 - Optional Token Auth**: implemented and tested.
 - **Slice 5 - TTL Expiry And Prune**: implemented and tested.
+- **Slice 6 - Safe Integration And Fault Report**: implemented in this pass.
+- **Slice 7 - Official MCP Adapter And Real Suggestion Smoke**: implemented in this pass.
+- **Slice 8 - Snapshots / Export / Import**: implemented in this pass.
 - Current verification target: `node --check` for runtime/test files and `npm test`.
 
 ---
 
-## Slice 1 - Persistent Memory Graph
+## Slice 1 - SQLite Persistent Memory Graph
 
 ### Summary
-Implement optional JSON persistence for the memory graph. Runtime operations stay RAM-first, while debounced atomic flushes make entries and relationships durable when `MEMORY_FILE` is configured.
+Use SQLite as the single backing store for memory entries, tags, relations, TTL metadata, and indexed search. File-backed persistence is enabled when `MEMORY_FILE` is provided; otherwise the server uses an in-process SQLite database.
 
 ### Key Behavior
-- `createMemoryStore({ persistence })` and `MEMORY_FILE` enable local JSON persistence.
-- Missing persistence files start empty; invalid JSON fails startup clearly.
-- Loaded dangling edges are dropped to preserve graph integrity.
-- Dirty state is flushed with debounced atomic writes: temp file beside target, then rename.
-- `flush()` is async for normal operation; `flushSync()` is reserved for shutdown paths.
-- `/status.persistence` exposes enabled state, dirty state, load/flush timestamps, and last flush error.
+- `createMemoryStore({ persistence: { file } })` and `MEMORY_FILE` enable local SQLite file persistence.
+- The implementation uses Node 24's built-in `node:sqlite` module with WAL mode and foreign keys enabled.
+- Writes are committed before the command response; `flush()` and `flushSync()` clear dirty status for observability and shutdown paths.
+- Dangling edges are dropped by `importState()` to preserve graph integrity.
+- `/status.persistence` exposes enabled state, file path, dirty state, load/flush timestamps, and last flush error.
 
 ### Tests
 - Missing file startup.
-- Invalid JSON startup failure.
+- Inaccessible or corrupt SQLite path startup failure.
 - Entries and edges persist and reload.
-- Dangling edges are dropped on load.
+- Dangling imported edges are dropped.
 - Cascade delete persists removed edges.
-- Debounced scheduler keeps one active timer.
-- Flush failures keep `dirty: true`.
-- `flushSync()` writes a valid snapshot.
+- Dirty state is acknowledged by debounced and sync flush paths.
 - `/status.persistence` and close-time flushing.
 
 ---
@@ -42,7 +42,7 @@ Implement optional JSON persistence for the memory graph. Runtime operations sta
 Add a metadata-only `search` command so agents can discover memories without knowing exact keys or loading full values into context.
 
 ### Key Behavior
-- `query` matches key, summary, and tags case-insensitively.
+- `query` matches key, summary, and tags through SQLite FTS5 trigram indexing.
 - `tags` uses AND semantics: every requested tag must be present.
 - `minImportance` filters by agent-supplied importance.
 - `limit` bounds returned results, while `total` reports the pre-limit match count.
@@ -123,44 +123,86 @@ Add deterministic time-based lifecycle management for temporary memories. Reads 
 - Edges removed by expiry emit `relation-update` with `action: "cascade-deleted"`.
 - Background prune and explicit `prune` share the same notification path.
 
-### Status Fields
-- `expiredMemoryCount`
-- `pruneIntervalMs`
-- `lastPrunedAt`
+---
+
+## Slice 6 - Safe Integration And Fault Report
+
+### Summary
+Document the current integration map, fix unsafe suggestion defaults, and align docs with the SQLite implementation.
+
+### Key Behavior
+- `docs/report.md` is the canonical integration/fault report.
+- Semantic suggestions are opt-in by default through `MEMORY_SUGGEST_ENABLED=true` or explicit server options.
+- Disabled suggestions return `suggest-result` with an empty array and do not enqueue embedding work.
+- Node `>=24` is documented and declared because the store uses `node:sqlite`.
+- Root shutdown flushes memory synchronously first, then closes server resources through the shared close path.
 
 ### Tests
-- `set` with `ttlMs` and `expiresAt`.
-- Expired entries hidden from `get`, `keys`, `count`, `map`, and `search`.
-- Map skips phantom edges touching expired nodes.
-- `relate` rejects expired endpoints.
-- `touch` extends expiry and clears expiry.
-- `pruneExpired()` removes expired nodes and cascades edges.
-- Persistence saves and reloads `expiresAt`.
-- WebSocket `touch` and `prune` request/response shapes.
-- Validation rejects invalid expiry fields.
-- Prune notifications and background prune through injected scheduler/clock.
-- `/status` includes expiry/prune fields.
+- Default server keeps suggestions disabled without queueing embeddings.
+- Explicitly enabled suggestions still index memory and return metadata-only suggestions.
+- Suggestion engine unit tests cover disabled default and enabled queue behavior.
 
 ---
 
-## Next Candidate Slice - Snapshots / Export / Import
+## Slice 7 - Official MCP Adapter And Real Suggestion Smoke
 
 ### Summary
-Add operational safety tools before more advanced retrieval. Snapshots let developers inspect, back up, and restore graph state after agent mistakes without introducing a database.
+Add an official stdio MCP adapter and a manual real-model smoke path for semantic suggestions.
+
+### Key Behavior
+- `npm run mcp` starts `mcp-server.mjs` over stdio using the official MCP server SDK.
+- The MCP adapter uses the store modules directly and honors `MEMORY_FILE`.
+- MCP tools are `memory_set`, `memory_get`, `memory_search`, `memory_suggest`, and `memory_map`.
+- Tool outputs use stable JSON envelopes: `{ ok: true, ... }` and `{ ok: false, error }`.
+- `memory_suggest` refreshes visible memory into the local suggestion index before ranking.
+- `npm run smoke:suggest` runs a manual WebSocket smoke client against a server started with `MEMORY_SUGGEST_ENABLED=true`.
+- `/status.suggestions.modelLoaded` shows whether the embedder has actually loaded.
+
+### Tests
+- MCP tool handlers cover set/get/search/map, validation, disabled suggestions, enabled suggestion refresh, and JSON result envelopes.
+- MCP stdio integration covers initialize, initialized notification, tool discovery, core tool calls, disabled suggestions, and domain failures through real JSON-RPC.
+- Server status covers `modelLoaded`.
+- Real-model smoke is manual and opt-in, not part of `npm test`.
+
+---
+
+## Slice 8 - Snapshots / Export / Import
+
+### Summary
+Add operational safety tools before more advanced retrieval. Snapshots let developers inspect, back up, validate, restore, and migrate graph state after agent mistakes without introducing a separate database service.
+
+### Key Behavior
+- WebSocket commands `export`, `validate-import`, and `import` expose the full graph snapshot surface.
+- MCP tools `memory_export`, `memory_validate_import`, and `memory_import` expose the same capability over stdio MCP.
+- Snapshots contain full entry values, metadata, expiry timestamps, and relation edges.
+- Public import is strict and replace-only. Validation must pass before the store mutates.
+- Strict validation rejects malformed entries, missing values, invalid metadata, self-edges, duplicate edges, invalid relation types, invalid weights, and dangling endpoints.
+- Low-level `importState()` remains forgiving for internal/test recovery paths.
+- Successful WebSocket imports broadcast one compact `snapshot-update` event without `requestId`.
+- `/status.snapshot` records last export/import timestamps and import stats.
+
+### Tests
+- Store coverage for export shape, strict validation, replace-mode import, and failed-import atomicity.
+- WebSocket coverage for export, validate-import, import, invalid import, auth gating, suggestion-index refresh, and `snapshot-update` broadcasts.
+- MCP handler and stdio integration coverage for snapshot tool discovery and import/export roundtrips.
+
+---
+
+## Next Candidate Slice - Client SDK / CLI
+
+### Summary
+Wrap the stable WebSocket and MCP surfaces in developer tools so agents and humans stop hand-writing protocol envelopes.
 
 ### Candidate Behavior
-- Export the full graph snapshot as JSON.
-- Import a snapshot with the same defensive validation used by persistence loading.
-- Reject or drop dangling edges deterministically.
-- Optionally support dry-run import validation.
-- Keep auth checks in the transport layer.
+- Add a small JavaScript client SDK for WebSocket commands with request ID correlation.
+- Add CLI commands for `set`, `get`, `search`, `map`, `export`, `validate-import`, and `import`.
+- Support `MEMORY_TOKEN`, `MEMORY_FILE`, and server URL configuration through environment variables and flags.
+- Keep CLI import/export JSON-first so snapshots remain easy to inspect and version.
 
 ---
 
 ## Out Of Scope
-- Official MCP protocol conversion.
-- Embeddings and vector databases.
-- Full-text indexing or fuzzy ranking.
+- External vector databases.
 - Multi-user auth, JWTs, roles, or hashed token storage.
 - Archival history, soft delete, or audit log.
 - Dashboard UI.

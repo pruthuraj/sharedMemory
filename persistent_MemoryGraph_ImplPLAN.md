@@ -1,5 +1,7 @@
 # Persistent Memory Graph Implementation Plan
 
+> Historical note: this plan describes the earlier JSON persistence design. The current implementation uses SQLite through Node's built-in `node:sqlite` module. See `PLAN.md` and `docs/report.md` for the current integration state.
+
 ## Summary
 Implement persistence inside-out, starting with `src/memory-store.js`. The store remains the runtime source of truth, while optional JSON persistence uses debounced atomic async flushing during normal operation and synchronous atomic flushing during shutdown.
 

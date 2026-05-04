@@ -2,7 +2,7 @@
 
 const OPEN = 1;
 
-// Returns false silently if the socket is closed or serialization fails — callers don't need to check.
+// Returns false silently if the socket is closed or serialization fails; callers don't need to check.
 function safeSend(ws, obj) {
     if (!ws || ws.readyState !== OPEN) return false;
 

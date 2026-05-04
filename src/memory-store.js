@@ -75,6 +75,10 @@ function isPlainObject(value) {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+function hasOwn(object, key) {
+    return Object.prototype.hasOwnProperty.call(object, key);
+}
+
 function isNonEmptyString(value) {
     return typeof value === 'string' && value.trim().length > 0;
 }
@@ -89,6 +93,222 @@ function isValidWeight(value) {
 
 function isPositiveInteger(value) {
     return Number.isInteger(value) && value > 0;
+}
+
+function isNonNegativeInteger(value) {
+    return Number.isInteger(value) && value >= 0;
+}
+
+function isNullableString(value) {
+    return value === null || typeof value === 'string';
+}
+
+function canSerializeJsonValue(value) {
+    try {
+        return JSON.stringify(value) !== undefined;
+    } catch (error) {
+        return false;
+    }
+}
+
+function snapshotStats(snapshot) {
+    return {
+        entryCount: Object.keys(snapshot.entries).length,
+        edgeCount: snapshot.edges.length,
+    };
+}
+
+function snapshotError(pathValue, message) {
+    return { path: pathValue, message };
+}
+
+function validateSnapshotEntry(key, entry, errors) {
+    const pathPrefix = `entries.${key}`;
+    const initialErrorCount = errors.length;
+    if (!isNonEmptyString(key)) {
+        errors.push(snapshotError(pathPrefix, 'invalid-key'));
+        return null;
+    }
+
+    if (!isPlainObject(entry)) {
+        errors.push(snapshotError(pathPrefix, 'invalid-entry'));
+        return null;
+    }
+
+    if (!hasOwn(entry, 'value') || !canSerializeJsonValue(entry.value)) {
+        errors.push(snapshotError(`${pathPrefix}.value`, 'missing-value'));
+    }
+
+    if (!hasOwn(entry, 'summary') || !isNonEmptyString(entry.summary)) {
+        errors.push(snapshotError(`${pathPrefix}.summary`, 'invalid-summary'));
+    }
+
+    if (!hasOwn(entry, 'tags') || !Array.isArray(entry.tags) || !entry.tags.every(isNonEmptyString)) {
+        errors.push(snapshotError(`${pathPrefix}.tags`, 'invalid-tags'));
+    }
+
+    if (!hasOwn(entry, 'importance') || !isValidImportance(entry.importance)) {
+        errors.push(snapshotError(`${pathPrefix}.importance`, 'invalid-importance'));
+    }
+
+    if (!hasOwn(entry, 'expiresAt') || !(entry.expiresAt === null || isPositiveInteger(entry.expiresAt))) {
+        errors.push(snapshotError(`${pathPrefix}.expiresAt`, 'invalid-expiresAt'));
+    }
+
+    if (!hasOwn(entry, 'updatedAt') || !isNonNegativeInteger(entry.updatedAt)) {
+        errors.push(snapshotError(`${pathPrefix}.updatedAt`, 'invalid-updatedAt'));
+    }
+
+    if (!hasOwn(entry, 'updatedBy') || !isNullableString(entry.updatedBy)) {
+        errors.push(snapshotError(`${pathPrefix}.updatedBy`, 'invalid-updatedBy'));
+    }
+
+    if (errors.length > initialErrorCount) return null;
+
+    return {
+        value: entry.value,
+        summary: entry.summary,
+        tags: entry.tags.slice(),
+        importance: entry.importance,
+        expiresAt: entry.expiresAt,
+        updatedAt: entry.updatedAt,
+        updatedBy: entry.updatedBy,
+    };
+}
+
+function validateSnapshotEdge(edge, index, validKeys, seenEdges, errors) {
+    const pathPrefix = `edges.${index}`;
+    const initialErrorCount = errors.length;
+    if (!isPlainObject(edge)) {
+        errors.push(snapshotError(pathPrefix, 'invalid-edge'));
+        return null;
+    }
+
+    if (!isNonEmptyString(edge.from)) {
+        errors.push(snapshotError(`${pathPrefix}.from`, 'missing-from'));
+    }
+
+    if (!isNonEmptyString(edge.to)) {
+        errors.push(snapshotError(`${pathPrefix}.to`, 'missing-to'));
+    }
+
+    if (edge.from === edge.to && isNonEmptyString(edge.from)) {
+        errors.push(snapshotError(pathPrefix, 'self-relation-not-allowed'));
+    }
+
+    if (!isNonEmptyString(edge.relation) || !RELATION_TYPES.has(edge.relation)) {
+        errors.push(snapshotError(`${pathPrefix}.relation`, 'invalid-relation'));
+    }
+
+    if (isNonEmptyString(edge.from) && !validKeys.has(edge.from)) {
+        errors.push(snapshotError(`${pathPrefix}.from`, 'dangling-edge'));
+    }
+
+    if (isNonEmptyString(edge.to) && !validKeys.has(edge.to)) {
+        errors.push(snapshotError(`${pathPrefix}.to`, 'dangling-edge'));
+    }
+
+    const id = isNonEmptyString(edge.from) && isNonEmptyString(edge.to) && isNonEmptyString(edge.relation)
+        ? edgeId(edge.from, edge.relation, edge.to)
+        : null;
+    if (id && seenEdges.has(id)) {
+        errors.push(snapshotError(pathPrefix, 'duplicate-edge'));
+    } else if (id) {
+        seenEdges.add(id);
+    }
+
+    if (!hasOwn(edge, 'reason') || typeof edge.reason !== 'string') {
+        errors.push(snapshotError(`${pathPrefix}.reason`, 'invalid-reason'));
+    }
+
+    if (!hasOwn(edge, 'weight') || !isValidWeight(edge.weight)) {
+        errors.push(snapshotError(`${pathPrefix}.weight`, 'invalid-weight'));
+    }
+
+    if (!hasOwn(edge, 'updatedAt') || !isNonNegativeInteger(edge.updatedAt)) {
+        errors.push(snapshotError(`${pathPrefix}.updatedAt`, 'invalid-updatedAt'));
+    }
+
+    if (!hasOwn(edge, 'updatedBy') || !isNullableString(edge.updatedBy)) {
+        errors.push(snapshotError(`${pathPrefix}.updatedBy`, 'invalid-updatedBy'));
+    }
+
+    if (errors.length > initialErrorCount) return null;
+
+    return {
+        from: edge.from,
+        to: edge.to,
+        relation: edge.relation,
+        reason: edge.reason,
+        weight: edge.weight,
+        updatedAt: edge.updatedAt,
+        updatedBy: edge.updatedBy,
+    };
+}
+
+function validateSnapshot(snapshot) {
+    const errors = [];
+
+    if (!isPlainObject(snapshot)) {
+        return {
+            ok: false,
+            errors: [snapshotError('snapshot', 'invalid-snapshot')],
+            stats: null,
+        };
+    }
+
+    if (!isPlainObject(snapshot.entries)) {
+        errors.push(snapshotError('entries', 'invalid-entries'));
+    }
+
+    if (!Array.isArray(snapshot.edges)) {
+        errors.push(snapshotError('edges', 'invalid-edges'));
+    }
+
+    if (errors.length > 0) {
+        return { ok: false, errors, stats: null };
+    }
+
+    const normalizedEntries = {};
+    const validKeys = new Set();
+    for (const key of Object.keys(snapshot.entries).sort()) {
+        const normalized = validateSnapshotEntry(key, snapshot.entries[key], errors);
+        if (normalized) {
+            normalizedEntries[key] = normalized;
+            validKeys.add(key);
+        }
+    }
+
+    const normalizedEdges = [];
+    const seenEdges = new Set();
+    snapshot.edges.forEach((edge, index) => {
+        const normalized = validateSnapshotEdge(edge, index, validKeys, seenEdges, errors);
+        if (normalized) normalizedEdges.push(normalized);
+    });
+
+    if (errors.length > 0) {
+        return { ok: false, errors, stats: null };
+    }
+
+    normalizedEdges.sort((a, b) => {
+        const byFrom = a.from.localeCompare(b.from);
+        if (byFrom !== 0) return byFrom;
+        const byRelation = a.relation.localeCompare(b.relation);
+        if (byRelation !== 0) return byRelation;
+        return a.to.localeCompare(b.to);
+    });
+
+    const normalizedSnapshot = {
+        entries: normalizedEntries,
+        edges: normalizedEdges,
+    };
+
+    return {
+        ok: true,
+        errors: [],
+        stats: snapshotStats(normalizedSnapshot),
+        snapshot: normalizedSnapshot,
+    };
 }
 
 function initSchema(db) {
@@ -209,7 +429,7 @@ function createMemoryStore(options = {}) {
     let lastFlushError = null;
     let lastPrunedAt = null;
 
-    // Prepared statements — compiled once, reused for every call.
+    // Prepared statements compiled once and reused for every call.
     const stmts = {
         // ON CONFLICT DO UPDATE avoids triggering ON DELETE CASCADE on the old row.
         upsertEntry: db.prepare(`
@@ -484,9 +704,12 @@ function createMemoryStore(options = {}) {
             if (!tagsByKey[row.key]) tagsByKey[row.key] = [];
             tagsByKey[row.key].push(row.tag);
         }
+        for (const tags of Object.values(tagsByKey)) {
+            tags.sort();
+        }
 
         const exportedEntries = {};
-        for (const row of entryRows) {
+        for (const row of entryRows.sort((a, b) => a.key.localeCompare(b.key))) {
             exportedEntries[row.key] = {
                 value: JSON.parse(row.value_json),
                 summary: row.summary,
@@ -609,7 +832,7 @@ function createMemoryStore(options = {}) {
         return { key, nodes, edges: selectedEdges };
     }
 
-    // query matches key, summary, and tags (case-insensitive substring).
+    // query matches key, summary, and tags through SQLite FTS5 trigram search.
     // tags is an AND filter. Returns { results, total } where total is the pre-limit match count.
     function search(filters = {}) {
         const rawQuery = typeof filters.query === 'string' ? filters.query.trim() : '';
@@ -664,7 +887,7 @@ function createMemoryStore(options = {}) {
     }
 
     return {
-        // metadata fields: summary, tags, importance (0–10), ttlMs (ms from now), expiresAt (absolute ms).
+        // metadata fields: summary, tags, importance (0-10), ttlMs (ms from now), expiresAt (absolute ms).
         set(key, value, updatedBy, metadata = {}) {
             const summary = metadata.summary || safeSummary(value);
             const tags = normalizeTags(metadata.tags);
@@ -733,7 +956,7 @@ function createMemoryStore(options = {}) {
             return { ok: true, action, edge };
         },
 
-        // Returns the edge descriptor even when the edge did not exist (synthesizes a default).
+        // Idempotently removes an edge and reports whether the graph actually changed.
         unrelate(from, to, relation) {
             const id = edgeId(from, relation, to);
             const existing = stmts.getEdge.get(id);
@@ -753,7 +976,7 @@ function createMemoryStore(options = {}) {
                 markDirty();
             }
 
-            return edge;
+            return { removed: Boolean(existing), edge };
         },
 
         map,
@@ -803,6 +1026,20 @@ function createMemoryStore(options = {}) {
 
         exportState,
 
+        validateSnapshot,
+
+        importSnapshot(snapshot) {
+            const validation = validateSnapshot(snapshot);
+            if (!validation.ok) return validation;
+            doImport(validation.snapshot);
+            markDirty();
+            return {
+                ok: true,
+                errors: [],
+                stats: validation.stats,
+            };
+        },
+
         importState(state) {
             doImport(state);
         },
@@ -820,4 +1057,5 @@ function createMemoryStore(options = {}) {
 module.exports = {
     createMemoryStore,
     safeSummary,
+    validateSnapshot,
 };

@@ -42,7 +42,7 @@ function createTransformersEmbedder(options = {}) {
             return Array.from(output.data);
         },
 
-        // Returns { modelId, loaded } — loaded is false until the first embed() call completes.
+        // Returns { modelId, loaded }; loaded is false until the first embed() call completes.
         status() {
             return {
                 modelId,

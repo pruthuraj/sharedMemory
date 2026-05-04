@@ -13,8 +13,8 @@ const { createLinearVectorIndex } = require('./vector-index');
 const DEFAULT_SUGGEST_LIMIT = 5;
 const DEFAULT_QUEUE_DEBOUNCE_MS = 500;
 
-function isDisabledByEnv() {
-    return String(process.env.MEMORY_SUGGEST_ENABLED || '').toLowerCase() === 'false';
+function isEnabledByEnv() {
+    return String(process.env.MEMORY_SUGGEST_ENABLED || '').toLowerCase() === 'true';
 }
 
 // Coerce a raw memory entry into a canonical shape with safe defaults for all fields.
@@ -34,7 +34,7 @@ function normalizeMetadata(key, metadata = {}, now = Date.now()) {
     };
 }
 
-// Build the plain-text string that gets embedded for a memory entry: "key summary tag1 tag2 …".
+// Build the plain-text string that gets embedded for a memory entry: "key summary tag1 tag2 ...".
 function memoryText(memory) {
     return [
         memory.key,
@@ -62,7 +62,7 @@ async function embedText(embedder, text) {
  * redundant embedding calls. Inactive or expired memories are evicted from the index on flush.
  *
  * @param {object} [options]
- * @param {boolean} [options.enabled] - Explicitly enable/disable; defaults to !MEMORY_SUGGEST_ENABLED=false env var.
+ * @param {boolean} [options.enabled] - Explicitly enable/disable; defaults to MEMORY_SUGGEST_ENABLED=true env var.
  * @param {string} [options.modelId] - Embedding model ID; falls back to MEMORY_EMBED_MODEL env var.
  * @param {object} [options.embedder] - Pre-built embedder instance (for testing).
  * @param {object} [options.index] - Pre-built vector index instance (for testing).
@@ -77,7 +77,7 @@ function createSuggestionEngine(options = {}) {
     const now = options.clock || options.now || Date.now;
     const enabled = Object.prototype.hasOwnProperty.call(options, 'enabled')
         ? options.enabled !== false
-        : !isDisabledByEnv();
+        : isEnabledByEnv();
     const modelId = options.modelId || process.env.MEMORY_EMBED_MODEL || DEFAULT_EMBED_MODEL;
     const embedder = options.embedder || createTransformersEmbedder({
         modelId,
@@ -200,7 +200,7 @@ function createSuggestionEngine(options = {}) {
         /**
          * Return ranked suggestions for a context string.
          *
-         * Embeds context, scores every active indexed entry by cosine similarity × time decay +
+         * Embeds context, scores every active indexed entry by cosine similarity * time decay +
          * importance/recency bonuses, then returns the top-limit results sorted by score descending.
          *
          * @param {{ context: string, tags?: string[], limit?: number, agentId?: string }} options
@@ -259,6 +259,7 @@ function createSuggestionEngine(options = {}) {
             return {
                 enabled,
                 modelId: embedderStatus.modelId || modelId || embedder.modelId || null,
+                modelLoaded: Boolean(embedderStatus.loaded),
                 activeIndexedCount: index.size(),
                 queuedUpdateCount: pendingUpdates.size,
                 processing,

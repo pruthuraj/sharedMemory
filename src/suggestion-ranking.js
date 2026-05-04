@@ -3,8 +3,8 @@
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_STALE_AFTER_MS = 30 * DAY_MS;
 
-// decayLambda: exponential half-life ≈ 35 days. importanceWeight and recencyBoost are additive
-// score bonuses applied on top of the similarity×decay base score.
+// decayLambda: exponential half-life is about 35 days. importanceWeight and recencyBoost are additive
+// score bonuses applied on top of the similarity * decay base score.
 const DEFAULT_RANKING_CONFIG = {
     minActiveImportance: 4,    // importance floor for a memory to stay in the active index
     staleAfterMs: DEFAULT_STALE_AFTER_MS, // time after which low-importance memories are archived
@@ -94,7 +94,7 @@ function hasAllTags(memory, requiredTags = []) {
 /**
  * Compute a composite relevance score for a memory entry.
  *
- * score = (similarity × timeDecay) + (importance × importanceWeight) + recencyBoost
+ * score = (similarity * timeDecay) + (importance * importanceWeight) + recencyBoost
  *
  * @param {{ similarity: number, memory: object, now: number, config?: object }} params
  * @returns {{ score: number, reasons: string[] }} reasons lists which bonuses fired.

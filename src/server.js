@@ -66,7 +66,12 @@ function createSharedMemoryServer(options = {}) {
         now: suggestionOptions.now || options.now,
         logger: suggestionOptions.logger || options.logger,
     });
+    const now = options.clock || options.now || Date.now;
     let pruneTimer = null;
+    let lastExportedAt = null;
+    let lastImportedAt = null;
+    let lastImportStats = null;
+    const authenticatedSockets = new WeakSet();
 
     app.get('/status', (req, res) => {
         if (authToken && req.get('authorization') !== `Bearer ${authToken}`) {
@@ -83,6 +88,7 @@ function createSharedMemoryServer(options = {}) {
             ...memory.expiryStatus(),
             persistence: memory.persistenceStatus(),
             suggestions: suggestionStatus(),
+            snapshot: snapshotStatus(),
         });
     });
 
@@ -119,11 +125,27 @@ function createSharedMemoryServer(options = {}) {
         return {
             enabled: false,
             modelId: null,
+            modelLoaded: false,
             activeIndexedCount: 0,
             queuedUpdateCount: 0,
             processing: false,
             lastIndexedAt: null,
             lastIndexError: null,
+        };
+    }
+
+    function snapshotStatus() {
+        return {
+            lastExportedAt,
+            lastImportedAt,
+            lastImportStats,
+        };
+    }
+
+    function snapshotStats(snapshot) {
+        return {
+            entryCount: Object.keys(snapshot.entries).length,
+            edgeCount: snapshot.edges.length,
         };
     }
 
@@ -137,6 +159,34 @@ function createSharedMemoryServer(options = {}) {
         if (!suggestionEngine || typeof suggestionEngine.removeMemory !== 'function') return;
         Promise.resolve(suggestionEngine.removeMemory(key))
             .catch((error) => logSuggestionError('remove', key, error));
+    }
+
+    function refreshSuggestionsAfterImport(previousKeys) {
+        const visibleKeys = new Set(memory.keys());
+        for (const key of previousKeys) {
+            if (!visibleKeys.has(key)) {
+                removeSuggestionMemory(key);
+            }
+        }
+
+        for (const key of visibleKeys) {
+            const entry = memory.get(key);
+            if (entry) {
+                upsertSuggestionMemory(key, entry);
+            }
+        }
+    }
+
+    function notifySnapshotImported(stats) {
+        for (const client of wss.clients) {
+            if (authToken && !authenticatedSockets.has(client)) continue;
+            safeSend(client, {
+                type: 'snapshot-update',
+                action: 'imported',
+                mode: 'replace',
+                stats,
+            });
+        }
     }
 
     for (const key of memory.keys()) {
@@ -161,6 +211,9 @@ function createSharedMemoryServer(options = {}) {
     wss.on('connection', (ws) => {
         let agentId = agents.createTemporary(ws);
         let isAuthenticated = !authToken;
+        if (isAuthenticated) {
+            authenticatedSockets.add(ws);
+        }
         safeSend(ws, { type: 'welcome', agentId });
 
         ws.on('message', async (raw) => {
@@ -176,6 +229,7 @@ function createSharedMemoryServer(options = {}) {
             if (data.type === 'auth') {
                 if (!authToken || data.token === authToken) {
                     isAuthenticated = true;
+                    authenticatedSockets.add(ws);
                     safeSend(ws, { type: 'authenticated', requestId });
                 } else {
                     safeSend(ws, { type: 'error', message: 'unauthorized', requestId });
@@ -295,7 +349,8 @@ function createSharedMemoryServer(options = {}) {
                 }
 
                 case 'unrelate': {
-                    const edge = publicEdge(memory.unrelate(data.from, data.to, data.relation));
+                    const result = memory.unrelate(data.from, data.to, data.relation);
+                    const edge = publicEdge(result.edge);
                     safeSend(ws, {
                         type: 'unrelated',
                         from: data.from,
@@ -303,15 +358,19 @@ function createSharedMemoryServer(options = {}) {
                         relation: data.relation,
                         requestId,
                     });
-                    notifyRelationUpdate(agents, 'deleted', edge);
+                    if (result.removed) {
+                        notifyRelationUpdate(agents, 'deleted', edge);
+                    }
                     break;
                 }
 
                 case 'delete': {
                     const result = memory.delete(data.key);
                     safeSend(ws, { type: 'deleted', key: data.key, removed: result.removed, requestId });
-                    removeSuggestionMemory(data.key);
-                    notifyKeyUpdate(agents, data.key, null, { action: 'deleted' });
+                    if (result.removed) {
+                        removeSuggestionMemory(data.key);
+                        notifyKeyUpdate(agents, data.key, null, { action: 'deleted' });
+                    }
 
                     for (const removedEdge of result.removedEdges) {
                         notifyRelationUpdate(agents, 'cascade-deleted', publicEdge(removedEdge));
@@ -365,6 +424,54 @@ function createSharedMemoryServer(options = {}) {
                     const result = memory.pruneExpired();
                     safeSend(ws, { type: 'pruned', keys: result.keys, count: result.count, requestId });
                     notifyPruned(result);
+                    break;
+                }
+
+                case 'export': {
+                    const snapshot = memory.exportState();
+                    const stats = snapshotStats(snapshot);
+                    lastExportedAt = now();
+                    safeSend(ws, { type: 'export-result', snapshot, stats, requestId });
+                    break;
+                }
+
+                case 'validate-import': {
+                    const result = memory.validateSnapshot(data.snapshot);
+                    safeSend(ws, {
+                        type: 'import-validation',
+                        ok: result.ok,
+                        errors: result.errors,
+                        stats: result.stats,
+                        requestId,
+                    });
+                    break;
+                }
+
+                case 'import': {
+                    const previousKeys = new Set(Object.keys(memory.exportState().entries));
+                    const result = memory.importSnapshot(data.snapshot);
+                    if (!result.ok) {
+                        safeSend(ws, {
+                            type: 'import-result',
+                            ok: false,
+                            error: 'invalid-snapshot',
+                            errors: result.errors,
+                            requestId,
+                        });
+                        break;
+                    }
+
+                    lastImportedAt = now();
+                    lastImportStats = result.stats;
+                    refreshSuggestionsAfterImport(previousKeys);
+                    safeSend(ws, {
+                        type: 'import-result',
+                        ok: true,
+                        mode: 'replace',
+                        stats: result.stats,
+                        requestId,
+                    });
+                    notifySnapshotImported(result.stats);
                     break;
                 }
 

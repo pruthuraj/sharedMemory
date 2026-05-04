@@ -68,7 +68,7 @@ test('map orders nodes deterministically before applying the limit', () => {
 });
 
 test('persistence starts empty when file is missing', () => {
-    const file = tempPath('memory.json');
+    const file = tempPath('memory.db');
     const memory = createMemoryStore({ persistence: { file } });
 
     assert.deepEqual(memory.keys(), []);
@@ -83,8 +83,8 @@ test('persistence starts empty when file is missing', () => {
     assert.equal(typeof memory.persistenceStatus().lastLoadedAt, 'number');
 });
 
-test('persistence rejects invalid JSON at startup', () => {
-    const file = tempPath('memory.json');
+test('persistence rejects corrupt SQLite file at startup', () => {
+    const file = tempPath('memory.db');
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, '{bad json', 'utf8');
 
@@ -95,7 +95,7 @@ test('persistence rejects invalid JSON at startup', () => {
 });
 
 test('flush persists entries and edges, and restart reloads them', async () => {
-    const file = tempPath('memory.json');
+    const file = tempPath('memory.db');
     const memory = createTimedStoreWithPersistence(file);
 
     memory.set('project.architecture', 'Architecture details', 'agentA', {
@@ -143,8 +143,163 @@ test('persistence drops dangling edges during load', () => {
     assert.deepEqual(memory.map('nodeA', { depth: 1, limit: 10 }).edges, []);
 });
 
+test('snapshot export includes full entries and strict validation accepts it', () => {
+    const memory = createTimedStore();
+
+    memory.set('project.architecture', { body: 'Architecture details' }, 'agentA', {
+        summary: 'Architecture summary',
+        tags: ['architecture', 'plan'],
+        importance: 8,
+        expiresAt: 5000,
+    });
+    memory.set('project.database', { body: 'Database details' }, 'agentA', {
+        summary: 'Database summary',
+        tags: ['database'],
+        importance: 7,
+    });
+    memory.relate('project.database', 'project.architecture', 'depends_on', 'agentA', {
+        reason: '',
+        weight: 0.75,
+    });
+
+    const snapshot = memory.exportState();
+    assert.deepEqual(Object.keys(snapshot.entries), ['project.architecture', 'project.database']);
+    assert.deepEqual(snapshot.entries['project.architecture'].value, { body: 'Architecture details' });
+    assert.deepEqual(snapshot.entries['project.architecture'].tags, ['architecture', 'plan']);
+    assert.equal(snapshot.entries['project.architecture'].expiresAt, 5000);
+    assert.deepEqual(snapshot.edges.map((edge) => edge.relation), ['depends_on']);
+    assert.equal(snapshot.edges[0].reason, '');
+
+    assert.deepEqual(memory.validateSnapshot(snapshot), {
+        ok: true,
+        errors: [],
+        stats: { entryCount: 2, edgeCount: 1 },
+        snapshot,
+    });
+});
+
+test('strict snapshot validation rejects malformed entries and edges', () => {
+    const memory = createTimedStore();
+    const result = memory.validateSnapshot({
+        entries: {
+            good: {
+                value: 'good',
+                summary: 'Good entry',
+                tags: ['ok'],
+                importance: 5,
+                expiresAt: null,
+                updatedAt: 100,
+                updatedBy: 'agentA',
+            },
+            bad: {
+                summary: '',
+                tags: ['ok', ''],
+                importance: 99,
+                expiresAt: -1,
+                updatedAt: -1,
+                updatedBy: {},
+            },
+        },
+        edges: [
+            {
+                from: 'good',
+                to: 'missing',
+                relation: 'depends_on',
+                reason: 'dangling',
+                weight: 0.5,
+                updatedAt: 100,
+                updatedBy: 'agentA',
+            },
+            {
+                from: 'good',
+                to: 'good',
+                relation: 'related_to',
+                reason: '',
+                weight: 0.5,
+                updatedAt: 100,
+                updatedBy: 'agentA',
+            },
+            {
+                from: 'good',
+                to: 'good',
+                relation: 'bad_relation',
+                reason: '',
+                weight: 2,
+                updatedAt: 100,
+                updatedBy: 'agentA',
+            },
+            {
+                from: 'good',
+                to: 'missing',
+                relation: 'depends_on',
+                reason: 'duplicate identity with first',
+                weight: 0.5,
+                updatedAt: 100,
+                updatedBy: 'agentA',
+            },
+        ],
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.stats, null);
+    assert.ok(result.errors.some((error) => error.message === 'missing-value'));
+    assert.ok(result.errors.some((error) => error.message === 'invalid-importance'));
+    assert.ok(result.errors.some((error) => error.message === 'dangling-edge'));
+    assert.ok(result.errors.some((error) => error.message === 'self-relation-not-allowed'));
+    assert.ok(result.errors.some((error) => error.message === 'invalid-relation'));
+    assert.ok(result.errors.some((error) => error.message === 'invalid-weight'));
+    assert.ok(result.errors.some((error) => error.message === 'duplicate-edge'));
+});
+
+test('strict snapshot import replaces graph only after validation passes', () => {
+    const memory = createTimedStore();
+
+    memory.set('old', 'old value', 'agentA', { summary: 'Old memory' });
+    const invalid = {
+        entries: {
+            next: {
+                value: 'next value',
+                summary: 'Next memory',
+                tags: [],
+                importance: 5,
+                expiresAt: null,
+                updatedAt: 100,
+                updatedBy: 'agentB',
+            },
+        },
+        edges: [{ from: 'next', to: 'missing', relation: 'related_to', reason: '', weight: 1, updatedAt: 100, updatedBy: 'agentB' }],
+    };
+
+    const failed = memory.importSnapshot(invalid);
+    assert.equal(failed.ok, false);
+    assert.deepEqual(memory.keys(), ['old']);
+
+    const valid = {
+        entries: {
+            next: {
+                value: { restored: true },
+                summary: 'Next memory',
+                tags: ['restore'],
+                importance: 5,
+                expiresAt: null,
+                updatedAt: 100,
+                updatedBy: 'agentB',
+            },
+        },
+        edges: [],
+    };
+
+    assert.deepEqual(memory.importSnapshot(valid), {
+        ok: true,
+        errors: [],
+        stats: { entryCount: 1, edgeCount: 0 },
+    });
+    assert.deepEqual(memory.keys(), ['next']);
+    assert.deepEqual(memory.get('next').value, { restored: true });
+});
+
 test('cascade delete persists removed edges', async () => {
-    const file = tempPath('memory.json');
+    const file = tempPath('memory.db');
     const memory = createTimedStoreWithPersistence(file);
 
     memory.set('nodeA', 'A', 'agentA');
@@ -161,7 +316,7 @@ test('cascade delete persists removed edges', async () => {
 });
 
 test('debounce scheduler keeps one active timer for rapid mutations', async () => {
-    const file = tempPath('memory.json');
+    const file = tempPath('memory.db');
     const scheduled = new Map();
     let nextId = 1;
     const scheduler = {
@@ -365,7 +520,7 @@ test('pruneExpired removes expired nodes and cascades edges', () => {
 });
 
 test('persistence saves and reloads expiresAt', async () => {
-    const file = tempPath('memory.json');
+    const file = tempPath('memory.db');
     const memory = createMemoryStore({
         clock: () => 1000,
         persistence: { file },

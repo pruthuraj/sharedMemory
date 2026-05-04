@@ -47,7 +47,7 @@ function createKeywordEmbedder() {
             return [0, 0, 0];
         },
         status() {
-            return { modelId: 'fake-keyword-embedder', loaded: true };
+            return { modelId: 'fake-keyword-embedder', loaded: calls.length > 0 };
         },
         async dispose() {
             disposed = true;
@@ -63,6 +63,7 @@ test('suggestion queue debounces updates and coalesces by key', async () => {
     const embedder = createKeywordEmbedder();
     const { scheduler, scheduled, runNext } = createScheduler();
     const engine = createSuggestionEngine({
+        enabled: true,
         embedder,
         scheduler,
         clock: () => currentTime,
@@ -91,6 +92,7 @@ test('suggestion queue debounces updates and coalesces by key', async () => {
     assert.equal(embedder.calls[0].includes('latest database note'), true);
     assert.equal(engine.status().queuedUpdateCount, 0);
     assert.equal(engine.status().activeIndexedCount, 1);
+    assert.equal(engine.status().modelLoaded, true);
 
     const suggestions = await engine.suggest({ context: 'database task' });
     assert.deepEqual(suggestions.map((suggestion) => suggestion.key), ['memory.same']);
@@ -101,6 +103,7 @@ test('remove tombstones delete records from the active suggestion index', async 
     const embedder = createKeywordEmbedder();
     const { scheduler, runNext } = createScheduler();
     const engine = createSuggestionEngine({
+        enabled: true,
         embedder,
         scheduler,
         clock: () => 1000,
@@ -131,6 +134,7 @@ test('ranking uses semantic match, importance, recency decay, tags, and active a
     const embedder = createKeywordEmbedder();
     const { scheduler, runNext } = createScheduler();
     const engine = createSuggestionEngine({
+        enabled: true,
         embedder,
         scheduler,
         clock: () => currentTime,
@@ -190,6 +194,7 @@ test('close clears queued work and disposes the embedder', async () => {
     const embedder = createKeywordEmbedder();
     const { scheduler, scheduled } = createScheduler();
     const engine = createSuggestionEngine({
+        enabled: true,
         embedder,
         scheduler,
         clock: () => 1000,
@@ -207,4 +212,26 @@ test('close clears queued work and disposes the embedder', async () => {
     assert.equal(scheduled.size, 0);
     assert.equal(engine.status().queuedUpdateCount, 0);
     assert.equal(embedder.isDisposed(), true);
+});
+
+test('suggestions are disabled by default and do not enqueue embedding work', async () => {
+    const embedder = createKeywordEmbedder();
+    const { scheduler, scheduled } = createScheduler();
+    const engine = createSuggestionEngine({
+        embedder,
+        scheduler,
+        clock: () => 1000,
+    });
+
+    assert.equal(engine.status().enabled, false);
+    assert.equal(engine.status().modelLoaded, false);
+    assert.equal(await engine.upsertMemory('memory.default-disabled', {
+        summary: 'database note',
+        importance: 5,
+        updatedAt: 1000,
+    }), false);
+    assert.equal(scheduled.size, 0);
+    assert.equal(engine.status().queuedUpdateCount, 0);
+    assert.deepEqual(await engine.suggest({ context: 'database task' }), []);
+    assert.equal(embedder.calls.length, 0);
 });
