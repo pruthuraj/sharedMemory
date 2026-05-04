@@ -1,3 +1,5 @@
+// CLI smoke-test agent: connects to the server, registers an ID, sets a key, and subscribes.
+
 const WebSocket = require('ws');
 
 if (process.argv.length < 3) {

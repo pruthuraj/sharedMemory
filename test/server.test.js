@@ -6,6 +6,7 @@ const test = require('node:test');
 const WebSocket = require('ws');
 
 const { createSharedMemoryServer } = require('../src/server');
+const { createMemoryStore } = require('../src/memory-store');
 
 function tempPath(name) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'shared-memory-server-test-'));
@@ -13,7 +14,11 @@ function tempPath(name) {
 }
 
 async function startServer(options = {}) {
-    const appServer = createSharedMemoryServer(options);
+    const serverOptions = { ...options };
+    if (!serverOptions.suggestionEngine && !serverOptions.suggestions) {
+        serverOptions.suggestions = { enabled: false };
+    }
+    const appServer = createSharedMemoryServer(serverOptions);
 
     await new Promise((resolve) => {
         appServer.listen(0, '127.0.0.1', resolve);
@@ -79,6 +84,93 @@ async function connectClient(url) {
     };
 }
 
+function createFakeSuggestionEngine() {
+    const calls = {
+        upserts: [],
+        removes: [],
+        suggests: [],
+        closed: false,
+    };
+
+    return {
+        calls,
+        async upsertMemory(key, entry) {
+            calls.upserts.push({ key, entry });
+        },
+        async removeMemory(key) {
+            calls.removes.push(key);
+        },
+        async suggest(request) {
+            calls.suggests.push(request);
+            return [{
+                key: 'project.architecture',
+                summary: 'Architecture summary',
+                tags: ['architecture'],
+                importance: 8,
+                score: 0.87,
+                reasons: ['semantic-match', 'high-importance'],
+            }];
+        },
+        status() {
+            return {
+                enabled: true,
+                modelId: 'fake-suggestion-model',
+                activeIndexedCount: 1,
+                queuedUpdateCount: 0,
+                processing: false,
+                lastIndexedAt: 1234,
+                lastIndexError: null,
+            };
+        },
+        async close() {
+            calls.closed = true;
+        },
+    };
+}
+
+function createSuggestionScheduler() {
+    const scheduled = new Map();
+    let nextId = 1;
+
+    return {
+        scheduled,
+        scheduler: {
+            setTimeout(fn) {
+                const id = nextId;
+                nextId += 1;
+                scheduled.set(id, fn);
+                return id;
+            },
+            clearTimeout(id) {
+                scheduled.delete(id);
+            },
+        },
+        async runNext() {
+            const next = scheduled.entries().next().value;
+            assert.ok(next, 'expected a scheduled suggestion queue task');
+            const [id, fn] = next;
+            scheduled.delete(id);
+            return fn();
+        },
+    };
+}
+
+function createKeywordEmbedder() {
+    return {
+        modelId: 'fake-keyword-embedder',
+        async embed(text) {
+            const lower = text.toLowerCase();
+            if (lower.includes('database')) return [1, 0];
+            if (lower.includes('architecture')) return [0, 1];
+            return [0, 0];
+        },
+        status() {
+            return { modelId: 'fake-keyword-embedder', loaded: true };
+        },
+        async dispose() {},
+    };
+}
+
 test('register, set, get, list, and status remain compatible', async () => {
     const { appServer, httpUrl, wsUrl } = await startServer();
 
@@ -131,6 +223,15 @@ test('register, set, get, list, and status remain compatible', async () => {
                 lastFlushedAt: null,
                 lastFlushError: null,
             },
+            suggestions: {
+                enabled: false,
+                modelId: 'onnx-community/all-MiniLM-L6-v2-ONNX',
+                activeIndexedCount: 0,
+                queuedUpdateCount: 0,
+                processing: false,
+                lastIndexedAt: null,
+                lastIndexError: null,
+            },
         });
     } finally {
         await appServer.close();
@@ -161,8 +262,8 @@ test('status reports enabled persistence and close flushes pending state', async
         await appServer.close();
     }
 
-    const persisted = JSON.parse(fs.readFileSync(file, 'utf8'));
-    assert.equal(persisted.entries.durable.summary, 'Saved memory');
+    const restored = createMemoryStore({ persistence: { file } });
+    assert.equal(restored.get('durable').summary, 'Saved memory');
 });
 
 test('auth disabled keeps existing flow open and accepts auth as no-op', async () => {
@@ -1107,6 +1208,197 @@ test('broadcasts (update, relation-update, cross-agent linked) carry no requestI
             (message) => message.type === 'relation-update' && message.action === 'created',
         );
         assert.equal(Object.prototype.hasOwnProperty.call(relationUpdate, 'requestId'), false);
+    } finally {
+        await appServer.close();
+    }
+});
+
+test('suggest command uses injected engine and echoes requestId', async () => {
+    const suggestionEngine = createFakeSuggestionEngine();
+    const { appServer, httpUrl, wsUrl } = await startServer({ suggestionEngine });
+
+    try {
+        const client = await connectClient(wsUrl);
+        await client.waitFor((message) => message.type === 'welcome');
+        client.send({ type: 'register', agentId: 'agentA' });
+        await client.waitFor((message) => message.type === 'registered');
+
+        client.send({
+            type: 'set',
+            key: 'project.architecture',
+            value: 'details',
+            summary: 'Architecture summary',
+            tags: ['architecture'],
+            importance: 8,
+        });
+        await client.waitFor((message) => message.type === 'ok' && message.key === 'project.architecture');
+        assert.equal(suggestionEngine.calls.upserts.length, 1);
+        assert.equal(suggestionEngine.calls.upserts[0].key, 'project.architecture');
+        assert.equal(suggestionEngine.calls.upserts[0].entry.summary, 'Architecture summary');
+
+        client.send({
+            type: 'suggest',
+            context: 'architecture planning',
+            tags: ['architecture'],
+            limit: 3,
+            requestId: 'suggest-1',
+        });
+        assert.deepEqual(await client.waitFor((message) => message.type === 'suggest-result'), {
+            type: 'suggest-result',
+            suggestions: [{
+                key: 'project.architecture',
+                summary: 'Architecture summary',
+                tags: ['architecture'],
+                importance: 8,
+                score: 0.87,
+                reasons: ['semantic-match', 'high-importance'],
+            }],
+            requestId: 'suggest-1',
+        });
+        assert.deepEqual(suggestionEngine.calls.suggests[0], {
+            context: 'architecture planning',
+            tags: ['architecture'],
+            limit: 3,
+            agentId: 'agentA',
+        });
+
+        const status = await fetch(`${httpUrl}/status`).then((response) => response.json());
+        assert.deepEqual(status.suggestions, suggestionEngine.status());
+    } finally {
+        await appServer.close();
+    }
+
+    assert.equal(suggestionEngine.calls.closed, true);
+});
+
+test('suggest validates input and remains protected by auth', async () => {
+    const suggestionEngine = createFakeSuggestionEngine();
+    const { appServer, wsUrl } = await startServer({
+        authToken: 'secret',
+        suggestionEngine,
+    });
+
+    try {
+        const client = await connectClient(wsUrl);
+        await client.waitFor((message) => message.type === 'welcome');
+
+        client.send({ type: 'suggest', context: 'blocked', requestId: 'blocked-suggest' });
+        assert.deepEqual(await client.waitFor((message) => message.requestId === 'blocked-suggest'), {
+            type: 'error',
+            message: 'unauthorized',
+            requestId: 'blocked-suggest',
+        });
+
+        client.send({ type: 'auth', token: 'secret', requestId: 'auth-ok' });
+        await client.waitFor((message) => message.type === 'authenticated' && message.requestId === 'auth-ok');
+
+        client.send({ type: 'suggest', requestId: 'missing-context' });
+        assert.deepEqual(await client.waitFor((message) => message.requestId === 'missing-context'), {
+            type: 'error',
+            message: 'missing-context',
+            requestId: 'missing-context',
+        });
+
+        client.send({ type: 'suggest', context: '   ', requestId: 'blank-context' });
+        assert.deepEqual(await client.waitFor((message) => message.requestId === 'blank-context'), {
+            type: 'error',
+            message: 'invalid-context',
+            requestId: 'blank-context',
+        });
+
+        client.send({ type: 'suggest', context: 'x', limit: 21, requestId: 'bad-limit' });
+        assert.deepEqual(await client.waitFor((message) => message.requestId === 'bad-limit'), {
+            type: 'error',
+            message: 'invalid-limit',
+            requestId: 'bad-limit',
+        });
+
+        client.send({ type: 'suggest', context: 'x', tags: ['ok', ''], requestId: 'bad-tags' });
+        assert.deepEqual(await client.waitFor((message) => message.requestId === 'bad-tags'), {
+            type: 'error',
+            message: 'invalid-tags',
+            requestId: 'bad-tags',
+        });
+
+        assert.equal(suggestionEngine.calls.suggests.length, 0);
+    } finally {
+        await appServer.close();
+    }
+});
+
+test('real suggestion engine indexes memory through debounced queue and returns metadata only', async () => {
+    let currentTime = 1000;
+    const { scheduler, scheduled, runNext } = createSuggestionScheduler();
+    const { appServer, httpUrl, wsUrl } = await startServer({
+        clock: () => currentTime,
+        pruneIntervalMs: 0,
+        suggestions: {
+            embedder: createKeywordEmbedder(),
+            scheduler,
+            debounceMs: 500,
+            clock: () => currentTime,
+        },
+    });
+
+    try {
+        const client = await connectClient(wsUrl);
+        await client.waitFor((message) => message.type === 'welcome');
+        client.send({ type: 'register', agentId: 'agentA' });
+        await client.waitFor((message) => message.type === 'registered');
+
+        client.send({
+            type: 'set',
+            key: 'project.architecture',
+            value: 'secret-architecture-value',
+            summary: 'architecture decisions',
+            tags: ['architecture'],
+            importance: 8,
+        });
+        await client.waitFor((message) => message.type === 'ok' && message.key === 'project.architecture');
+        client.send({
+            type: 'set',
+            key: 'project.database',
+            value: 'secret-database-value',
+            summary: 'database migration',
+            tags: ['database'],
+            importance: 6,
+        });
+        await client.waitFor((message) => message.type === 'ok' && message.key === 'project.database');
+
+        let status = await fetch(`${httpUrl}/status`).then((response) => response.json());
+        assert.equal(status.suggestions.queuedUpdateCount, 2);
+        assert.equal(status.suggestions.activeIndexedCount, 0);
+        assert.equal(scheduled.size, 1);
+
+        await runNext();
+
+        status = await fetch(`${httpUrl}/status`).then((response) => response.json());
+        assert.equal(status.suggestions.queuedUpdateCount, 0);
+        assert.equal(status.suggestions.activeIndexedCount, 2);
+        assert.equal(status.suggestions.modelId, 'fake-keyword-embedder');
+
+        client.send({
+            type: 'suggest',
+            context: 'database task',
+            requestId: 'suggest-database',
+        });
+        const result = await client.waitFor((message) => message.requestId === 'suggest-database');
+        assert.equal(result.type, 'suggest-result');
+        assert.equal(result.suggestions[0].key, 'project.database');
+        assert.equal(Object.prototype.hasOwnProperty.call(result.suggestions[0], 'value'), false);
+
+        client.send({ type: 'delete', key: 'project.database', requestId: 'delete-database' });
+        await client.waitFor((message) => message.requestId === 'delete-database');
+        assert.equal(scheduled.size, 1);
+        await runNext();
+
+        client.send({
+            type: 'suggest',
+            context: 'database task',
+            requestId: 'suggest-after-delete',
+        });
+        const afterDelete = await client.waitFor((message) => message.requestId === 'suggest-after-delete');
+        assert.deepEqual(afterDelete.suggestions.map((suggestion) => suggestion.key), []);
     } finally {
         await appServer.close();
     }

@@ -1,5 +1,6 @@
 node_modules/
 data/
+response/*
 dist/
 .ghp-temp/
 .DS_Store
@@ -7,7 +8,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 /.claude
-agaent.md
+agent.md
 claude.md
 response.md
 persistent_MemoryGraph_ImplPLAN.md

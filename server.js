@@ -1,3 +1,5 @@
+// Entry point — starts createSharedMemoryServer on PORT and registers SIGINT/SIGTERM shutdown handlers.
+
 const { createSharedMemoryServer } = require('./src/server');
 
 if (require.main === module) {
@@ -15,7 +17,8 @@ if (require.main === module) {
 
         appServer.memory.flushSync();
         appServer.server.close(() => {
-            process.exit(signal === 'SIGINT' ? 130 : 143);
+            // 130 = 128+SIGINT(2), 143 = 128+SIGTERM(15) — standard shell exit-code convention.
+        process.exit(signal === 'SIGINT' ? 130 : 143);
         });
 
         setTimeout(() => {

@@ -1,3 +1,5 @@
+// WebSocket server wiring memory-store, agent-registry, protocol, and delivery into a single server.
+
 const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
@@ -11,6 +13,7 @@ const {
 } = require('./delivery');
 const { createMemoryStore } = require('./memory-store');
 const { parseMessage } = require('./protocol');
+const { createSuggestionEngine } = require('./suggestion-engine');
 
 const DEFAULT_PRUNE_INTERVAL_MS = 600000;
 
@@ -18,6 +21,21 @@ function hasOwn(object, key) {
     return Object.prototype.hasOwnProperty.call(object, key);
 }
 
+/**
+ * Create the shared memory HTTP+WebSocket server.
+ *
+ * @param {object} [options]
+ * @param {string} [options.authToken] - Bearer token for WS and /status; falls back to MEMORY_TOKEN env var.
+ * @param {number} [options.pruneIntervalMs=600000] - How often expired entries are swept automatically.
+ * @param {object} [options.pruneScheduler] - Injectable {setInterval, clearInterval} for testing.
+ * @param {object} [options.persistence] - Passed through to createMemoryStore; falls back to MEMORY_FILE env var.
+ * @param {object} [options.memoryStore] - Pre-built store instance (for testing).
+ * @param {object} [options.agentRegistry] - Pre-built registry instance (for testing).
+ * @param {object} [options.suggestionEngine] - Pre-built suggestion engine instance (for testing).
+ * @param {object} [options.suggestions] - Suggestion engine options.
+ * @param {Function} [options.genId] - ID generator injected into agentRegistry (for testing).
+ * @param {Function} [options.clock] - Clock function passed to createMemoryStore (for testing).
+ */
 function createSharedMemoryServer(options = {}) {
     const app = express();
     const server = http.createServer(app);
@@ -41,6 +59,13 @@ function createSharedMemoryServer(options = {}) {
         pruneIntervalMs,
     });
     const agents = options.agentRegistry || createAgentRegistry({ genId: options.genId });
+    const suggestionOptions = options.suggestions || {};
+    const suggestionEngine = options.suggestionEngine || createSuggestionEngine({
+        ...suggestionOptions,
+        clock: suggestionOptions.clock || options.clock,
+        now: suggestionOptions.now || options.now,
+        logger: suggestionOptions.logger || options.logger,
+    });
     let pruneTimer = null;
 
     app.get('/status', (req, res) => {
@@ -57,9 +82,11 @@ function createSharedMemoryServer(options = {}) {
             relationCount: memory.relationCount(),
             ...memory.expiryStatus(),
             persistence: memory.persistenceStatus(),
+            suggestions: suggestionStatus(),
         });
     });
 
+    // Strips the internal edge id before sending to clients; id is a server-side index key only.
     function publicEdge(edge) {
         if (!edge) return edge;
         const { id, ...rest } = edge;
@@ -69,10 +96,53 @@ function createSharedMemoryServer(options = {}) {
     function notifyPruned(result) {
         for (const key of result.keys) {
             notifyKeyUpdate(agents, key, null, { action: 'expired' });
+            removeSuggestionMemory(key);
         }
 
         for (const removedEdge of result.removedEdges) {
             notifyRelationUpdate(agents, 'cascade-deleted', publicEdge(removedEdge));
+        }
+    }
+
+    function logSuggestionError(action, key, error) {
+        const logger = options.logger || console;
+        if (logger && typeof logger.error === 'function') {
+            logger.error(`Failed to ${action} suggestion memory ${key}: ${error.message}`);
+        }
+    }
+
+    function suggestionStatus() {
+        if (suggestionEngine && typeof suggestionEngine.status === 'function') {
+            return suggestionEngine.status();
+        }
+
+        return {
+            enabled: false,
+            modelId: null,
+            activeIndexedCount: 0,
+            queuedUpdateCount: 0,
+            processing: false,
+            lastIndexedAt: null,
+            lastIndexError: null,
+        };
+    }
+
+    function upsertSuggestionMemory(key, entry) {
+        if (!suggestionEngine || typeof suggestionEngine.upsertMemory !== 'function') return;
+        Promise.resolve(suggestionEngine.upsertMemory(key, entry))
+            .catch((error) => logSuggestionError('upsert', key, error));
+    }
+
+    function removeSuggestionMemory(key) {
+        if (!suggestionEngine || typeof suggestionEngine.removeMemory !== 'function') return;
+        Promise.resolve(suggestionEngine.removeMemory(key))
+            .catch((error) => logSuggestionError('remove', key, error));
+    }
+
+    for (const key of memory.keys()) {
+        const entry = memory.get(key);
+        if (entry) {
+            upsertSuggestionMemory(key, entry);
         }
     }
 
@@ -93,7 +163,7 @@ function createSharedMemoryServer(options = {}) {
         let isAuthenticated = !authToken;
         safeSend(ws, { type: 'welcome', agentId });
 
-        ws.on('message', (raw) => {
+        ws.on('message', async (raw) => {
             const parsed = parseMessage(raw);
             if (!parsed.ok) {
                 safeSend(ws, { type: 'error', message: parsed.error, requestId: parsed.requestId });
@@ -140,6 +210,7 @@ function createSharedMemoryServer(options = {}) {
                         expiresAt: data.expiresAt,
                     });
                     safeSend(ws, { type: 'ok', action: 'set', key: data.key, requestId });
+                    upsertSuggestionMemory(data.key, entry);
                     notifyKeyUpdate(agents, data.key, entry);
                     notifyLinkedAgents(agents, agentId, { action: 'set', key: data.key, entry });
                     break;
@@ -179,6 +250,7 @@ function createSharedMemoryServer(options = {}) {
                     }
 
                     safeSend(ws, { type: 'touched', key: data.key, entry: result.entry, requestId });
+                    upsertSuggestionMemory(data.key, result.entry);
                     notifyKeyUpdate(agents, data.key, result.entry);
                     break;
                 }
@@ -238,6 +310,7 @@ function createSharedMemoryServer(options = {}) {
                 case 'delete': {
                     const result = memory.delete(data.key);
                     safeSend(ws, { type: 'deleted', key: data.key, removed: result.removed, requestId });
+                    removeSuggestionMemory(data.key);
                     notifyKeyUpdate(agents, data.key, null, { action: 'deleted' });
 
                     for (const removedEdge of result.removedEdges) {
@@ -272,6 +345,22 @@ function createSharedMemoryServer(options = {}) {
                     break;
                 }
 
+                case 'suggest': {
+                    try {
+                        const suggestions = await suggestionEngine.suggest({
+                            context: data.context,
+                            tags: data.tags,
+                            limit: data.limit,
+                            agentId,
+                        });
+                        safeSend(ws, { type: 'suggest-result', suggestions, requestId });
+                    } catch (error) {
+                        safeSend(ws, { type: 'error', message: 'suggest-failed', requestId });
+                        logSuggestionError('run', 'context', error);
+                    }
+                    break;
+                }
+
                 case 'prune': {
                     const result = memory.pruneExpired();
                     safeSend(ws, { type: 'pruned', keys: result.keys, count: result.count, requestId });
@@ -295,11 +384,14 @@ function createSharedMemoryServer(options = {}) {
         wss,
         agents,
         memory,
+        suggestionEngine,
 
         listen(...args) {
             return server.listen(...args);
         },
 
+        // Flushes memory, terminates all WS clients, then closes both WSS and HTTP server.
+        // ERR_SERVER_NOT_RUNNING is swallowed so double-close in tests doesn't throw.
         async close() {
             if (pruneTimer) {
                 pruneScheduler.clearInterval(pruneTimer);
@@ -307,6 +399,9 @@ function createSharedMemoryServer(options = {}) {
             }
 
             await memory.flush();
+            if (suggestionEngine && typeof suggestionEngine.close === 'function') {
+                await suggestionEngine.close();
+            }
 
             for (const client of wss.clients) {
                 client.terminate();

@@ -128,33 +128,17 @@ test('flush persists entries and edges, and restart reloads them', async () => {
 });
 
 test('persistence drops dangling edges during load', () => {
-    const file = tempPath('memory.json');
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify({
+    const memory = createTimedStore();
+
+    memory.importState({
         entries: {
-            nodeA: {
-                value: 'A',
-                summary: 'A',
-                tags: [],
-                importance: 1,
-                updatedAt: 100,
-                updatedBy: 'agentA',
-            },
+            nodeA: { value: 'A', summary: 'A', tags: [], importance: 1, updatedAt: 100, updatedBy: 'agentA' },
         },
         edges: [
-            {
-                from: 'nodeA',
-                to: 'missing',
-                relation: 'depends_on',
-                reason: 'dangling',
-                weight: 0.5,
-                updatedAt: 200,
-                updatedBy: 'agentA',
-            },
+            { from: 'nodeA', to: 'missing', relation: 'depends_on', reason: 'dangling', weight: 0.5, updatedAt: 200, updatedBy: 'agentA' },
         ],
-    }), 'utf8');
+    });
 
-    const memory = createMemoryStore({ persistence: { file } });
     assert.equal(memory.relationCount(), 0);
     assert.deepEqual(memory.map('nodeA', { depth: 1, limit: 10 }).edges, []);
 });
@@ -207,37 +191,28 @@ test('debounce scheduler keeps one active timer for rapid mutations', async () =
     assert.equal(fs.existsSync(file), true);
 });
 
-test('async flush failure keeps dirty state and records the error', async () => {
+test('createMemoryStore throws when SQLite file path is inaccessible', () => {
     const parentFile = tempPath('not-a-directory');
     fs.writeFileSync(parentFile, 'blocking parent directory creation', 'utf8');
-    const file = path.join(parentFile, 'memory.json');
-    const memory = createMemoryStore({ persistence: { file } });
-    const originalError = console.error;
-    console.error = () => {};
+    const file = path.join(parentFile, 'memory.db');
 
-    try {
-        memory.set('nodeA', 'A', 'agentA');
-        assert.equal(await memory.flush(), false);
-        const status = memory.persistenceStatus();
-        assert.equal(status.dirty, true);
-        assert.equal(typeof status.lastFlushError, 'string');
-        assert.notEqual(status.lastFlushError.length, 0);
-    } finally {
-        console.error = originalError;
-    }
+    assert.throws(
+        () => createMemoryStore({ persistence: { file } }),
+        /Failed to load memory persistence file/,
+    );
 });
 
-test('flushSync writes a valid atomic snapshot', () => {
-    const file = tempPath('memory.json');
+test('flushSync marks store as not dirty and data persists', () => {
+    const file = tempPath('memory.db');
     const memory = createMemoryStore({ persistence: { file } });
 
     memory.set('nodeA', 'A', 'agentA', { summary: 'Node A', importance: 4 });
     assert.equal(memory.flushSync(), true);
-
-    const persisted = JSON.parse(fs.readFileSync(file, 'utf8'));
-    assert.equal(persisted.entries.nodeA.summary, 'Node A');
-    assert.deepEqual(persisted.edges, []);
     assert.equal(memory.persistenceStatus().dirty, false);
+
+    const restored = createMemoryStore({ persistence: { file } });
+    assert.equal(restored.get('nodeA').summary, 'Node A');
+    assert.equal(restored.map('nodeA', { depth: 1, limit: 10 }).edges.length, 0);
 });
 
 test('search returns metadata-only matches sorted by importance, recency, then key', () => {

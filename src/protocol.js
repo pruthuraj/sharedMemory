@@ -1,3 +1,5 @@
+// WebSocket message parser and per-command field validator.
+
 const COMMAND_TYPES = new Set([
     'auth',
     'register',
@@ -14,6 +16,7 @@ const COMMAND_TYPES = new Set([
     'delete',
     'map',
     'search',
+    'suggest',
     'prune',
 ]);
 
@@ -59,6 +62,7 @@ function hasValidTags(tags) {
     return Array.isArray(tags) && tags.every(isNonEmptyString);
 }
 
+// Returns an error object on failure, or null on success (callers use `|| { ok: true, message }`).
 function validateSetMetadata(message) {
     if (hasOwn(message, 'ttlMs') && hasOwn(message, 'expiresAt')) {
         return { ok: false, error: 'invalid-expiry' };
@@ -103,6 +107,12 @@ function validateRelationFields(message) {
     return null;
 }
 
+/**
+ * Parse and validate a raw WebSocket message.
+ *
+ * requestId is extracted before type validation so it can be echoed on error responses.
+ * Returns { ok: true, message } or { ok: false, error, requestId? }.
+ */
 function parseMessage(raw) {
     let message;
 
@@ -211,6 +221,7 @@ function validateMessage(message) {
             return { ok: true, message };
 
         case 'search': {
+            // At least one of query/tags/minImportance is required; a bare search is rejected.
             if (hasOwn(message, 'query') && !isNonEmptyString(message.query)) {
                 return { ok: false, error: 'invalid-query' };
             }
@@ -236,6 +247,25 @@ function validateMessage(message) {
 
             return { ok: true, message };
         }
+
+        case 'suggest':
+            if (!hasOwn(message, 'context')) {
+                return { ok: false, error: 'missing-context' };
+            }
+
+            if (!isNonEmptyString(message.context)) {
+                return { ok: false, error: 'invalid-context' };
+            }
+
+            if (hasOwn(message, 'limit') && !isIntegerInRange(message.limit, 1, 20)) {
+                return { ok: false, error: 'invalid-limit' };
+            }
+
+            if (hasOwn(message, 'tags') && !hasValidTags(message.tags)) {
+                return { ok: false, error: 'invalid-tags' };
+            }
+
+            return { ok: true, message };
 
         default:
             return { ok: false, error: 'unknown-type' };

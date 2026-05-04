@@ -9,6 +9,7 @@ Agents can register an ID, set and get shared keys, subscribe to updates, relate
 - `src/server.js`: Express, HTTP, WebSocket setup, and lifecycle helpers.
 - `src/protocol.js`: JSON message parsing and validation.
 - `src/memory-store.js`: in-memory key/value store and memory graph.
+- `src/suggestion-engine.js`: semantic memory suggestion queue, ranking, and index orchestration.
 - `src/agent-registry.js`: agent IDs, registrations, subscriptions, links, disconnects.
 - `src/delivery.js`: safe WebSocket delivery helpers.
 - `example_agent.js`: simple client that registers, subscribes, sets a key, and lists server state.
@@ -32,7 +33,7 @@ npm start
 Start with persistent storage:
 
 ```bash
-MEMORY_FILE=data/memory.json npm start
+MEMORY_FILE=data/memory.db npm start
 ```
 
 Start with token authentication:
@@ -81,6 +82,15 @@ npm test
     "lastLoadedAt": 1714694400000,
     "lastFlushedAt": 1714694400500,
     "lastFlushError": null
+  },
+  "suggestions": {
+    "enabled": true,
+    "modelId": "onnx-community/all-MiniLM-L6-v2-ONNX",
+    "activeIndexedCount": 12,
+    "queuedUpdateCount": 0,
+    "processing": false,
+    "lastIndexedAt": 1714694400500,
+    "lastIndexError": null
   }
 }
 ```
@@ -94,6 +104,7 @@ npm test
 - `pruneIntervalMs`: background prune interval in milliseconds. `0` means disabled.
 - `lastPrunedAt`: timestamp of the last explicit or background prune, or `null`.
 - `persistence`: durability status. When `MEMORY_FILE` is unset, `enabled` is `false`.
+- `suggestions`: semantic suggestion status, including active index size and queued embedding work.
 
 When `MEMORY_TOKEN` is set, `/status` requires:
 
@@ -112,41 +123,12 @@ Missing or invalid bearer tokens return HTTP `401`:
 Persistence is optional and controlled by `MEMORY_FILE`.
 
 ```bash
-MEMORY_FILE=data/memory.json npm start
+MEMORY_FILE=data/memory.db npm start
 ```
 
-The server loads the file on startup. Missing files start with an empty graph. Invalid JSON fails startup clearly. Edges that reference missing memory entries are dropped during load to preserve graph integrity.
+The server opens (or creates) a SQLite database at the given path. A missing file starts with an empty graph. An invalid or corrupt file fails startup with a clear error message. Edges that reference missing memory entries are dropped during `importState` to preserve graph integrity.
 
-Runtime mutations stay RAM-first. `set`, `touch`, `relate`, `unrelate`, `delete`, and `prune` mark the store dirty when they change state and schedule a debounced flush. The flush writes JSON atomically by writing a temp file next to the target and renaming it over the target. `close()`, `SIGINT`, and `SIGTERM` force a final flush.
-
-Persisted JSON shape:
-
-```json
-{
-  "entries": {
-    "project.architecture": {
-      "value": "Full details...",
-      "summary": "Server is split into focused modules.",
-      "tags": ["architecture", "server"],
-      "importance": 8,
-      "expiresAt": null,
-      "updatedAt": 1714694400000,
-      "updatedBy": "agentA"
-    }
-  },
-  "edges": [
-    {
-      "from": "project.database",
-      "to": "project.architecture",
-      "relation": "depends_on",
-      "reason": "Database choices affect architecture.",
-      "weight": 0.8,
-      "updatedAt": 1714694400100,
-      "updatedBy": "agentA"
-    }
-  ]
-}
-```
+Every write (`set`, `touch`, `relate`, `unrelate`, `delete`, `prune`) is immediately durable — SQLite writes are committed synchronously to WAL before the command response is sent. The dirty flag and debounced flush still exist as a semantic acknowledgment layer; `close()`, `SIGINT`, and `SIGTERM` clear the dirty flag before the process exits.
 
 ## WebSocket Protocol
 
@@ -571,6 +553,41 @@ Response:
 
 `results` are metadata-only. Use `get` to retrieve full `value`. `total` is the pre-limit match count. Expired entries are not searched.
 
+### `suggest`
+
+Suggests relevant memory metadata for the agent's current task or prompt. Suggestions are semantic and metadata-only; use `get` to load full values for selected keys.
+
+```json
+{
+  "type": "suggest",
+  "context": "implement the database migration plan",
+  "tags": ["database"],
+  "limit": 5,
+  "requestId": "suggest-1"
+}
+```
+
+Response:
+
+```json
+{
+  "type": "suggest-result",
+  "suggestions": [
+    {
+      "key": "project.database",
+      "summary": "Database migration approach.",
+      "tags": ["database"],
+      "importance": 8,
+      "score": 0.87,
+      "reasons": ["semantic-match", "high-importance"]
+    }
+  ],
+  "requestId": "suggest-1"
+}
+```
+
+`context` must be a non-empty string, `limit` must be `1` to `20`, and `tags` uses AND semantics. The semantic index is eventually consistent: `set`, `touch`, `delete`, and `prune` enqueue index updates instead of blocking the write path.
+
 ### `relation-update`
 
 Subscribers receive relation notifications when an edge touches a subscribed key.
@@ -680,12 +697,14 @@ The server returns `{ "type": "error", "message": "..." }` for invalid input.
 - Invalid metadata: `invalid-summary`, `invalid-tags`, `invalid-importance`, `invalid-expiry`
 - Invalid graph request: `invalid-relation`, `invalid-reason`, `invalid-weight`, `invalid-depth`, `invalid-limit`
 - Invalid search request: `invalid-query`, `missing-filter`
+- Invalid suggest request: `missing-context`, `invalid-context`
 - Relation endpoint does not exist: `missing-node`
 - Self-relation: `self-relation-not-allowed`
 
 ## Limitations
 
-- State is lost on restart unless `MEMORY_FILE` is configured.
+- State is lost on restart unless `MEMORY_FILE` is configured (SQLite file path).
 - Authentication is a single static token when `MEMORY_TOKEN` is configured; it is not a multi-user identity system.
 - This is not a real MCP server implementation.
 - Concurrent writes are last-write-wins.
+- The FTS5 search index uses trigram tokenization — queries shorter than 3 characters will return no results.

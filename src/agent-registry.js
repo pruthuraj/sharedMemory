@@ -1,3 +1,5 @@
+// Connected agent tracker with stable IDs, subscriptions, and links that survive reconnects.
+
 const OPEN = 1;
 
 function genId() {
@@ -17,6 +19,7 @@ function mergeSets(...sets) {
     return merged;
 }
 
+// Merges subscriptions and links from up to two prior records so reconnects and renames don't lose state.
 function createRecord(ws, existing, fallback) {
     return {
         ws,
@@ -25,6 +28,12 @@ function createRecord(ws, existing, fallback) {
     };
 }
 
+/**
+ * Create an agent registry.
+ *
+ * @param {object} [options]
+ * @param {Function} [options.genId] - ID generator for temporary agent IDs (default: random base-36).
+ */
 function createAgentRegistry(options = {}) {
     const agents = new Map();
     const makeId = options.genId || genId;
@@ -50,6 +59,8 @@ function createAgentRegistry(options = {}) {
                 .map(([agentId]) => agentId);
         },
 
+        // Claim a stable ID; merges subscriptions/links from the temp record and any prior record at requestedId.
+        // Rejects with 'duplicate-agent' if a live socket already holds requestedId.
         register(currentId, requestedId, ws) {
             const nextId = requestedId || currentId;
             const current = agents.get(currentId) || createRecord(ws);
@@ -79,6 +90,7 @@ function createAgentRegistry(options = {}) {
             info.subscriptions.delete(key);
         },
 
+        // Creates a null-ws stub for target if it hasn't connected yet, so links to future agents are valid.
         link(agentId, target) {
             const info = agents.get(agentId) || createRecord(null);
             info.links.add(target);
@@ -95,6 +107,7 @@ function createAgentRegistry(options = {}) {
             info.links.delete(target);
         },
 
+        // Nulls the ws but keeps the record so subscriptions and links survive reconnect.
         disconnect(agentId, ws) {
             const info = agents.get(agentId);
             if (!info || info.ws !== ws) return;

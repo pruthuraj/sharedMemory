@@ -1,5 +1,8 @@
+// Fan-out helpers that push events to subscribed and linked agents.
+
 const OPEN = 1;
 
+// Returns false silently if the socket is closed or serialization fails — callers don't need to check.
 function safeSend(ws, obj) {
     if (!ws || ws.readyState !== OPEN) return false;
 
@@ -11,6 +14,7 @@ function safeSend(ws, obj) {
     }
 }
 
+// Sends an 'update' event to every agent subscribed to key; entry is null when the key was deleted/expired.
 function notifyKeyUpdate(agents, key, entry, options = {}) {
     for (const agentId of agents.ids()) {
         const info = agents.get(agentId);
@@ -20,6 +24,7 @@ function notifyKeyUpdate(agents, key, entry, options = {}) {
     }
 }
 
+// Deduplicates via a Set so agents subscribed to both endpoints receive only one notification.
 function notifyRelationUpdate(agents, action, edge) {
     const targets = new Set();
 
@@ -42,6 +47,7 @@ function notifyRelationUpdate(agents, action, edge) {
     }
 }
 
+// Sends only to agents that fromAgentId has linked TO (outbound links); inbound linkers are not notified.
 function notifyLinkedAgents(agents, fromAgentId, payload) {
     const info = agents.get(fromAgentId);
     if (!info) return;
