@@ -1,6 +1,8 @@
 node_modules/
 data/
 response/*
+ref/*
+.env
 dist/
 .ghp-temp/
 .DS_Store

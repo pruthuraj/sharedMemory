@@ -1,5 +1,7 @@
 // WebSocket server wiring memory-store, agent-registry, protocol, and delivery into a single server.
 
+const path = require('path');
+
 const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
@@ -72,6 +74,8 @@ function createSharedMemoryServer(options = {}) {
     let lastImportedAt = null;
     let lastImportStats = null;
     const authenticatedSockets = new WeakSet();
+
+    app.use(express.static(path.join(__dirname, '..', 'public')));
 
     app.get('/status', (req, res) => {
         if (authToken && req.get('authorization') !== `Bearer ${authToken}`) {
