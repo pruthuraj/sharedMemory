@@ -5,6 +5,7 @@ This project is a small local shared-memory service for agent-like clients. It e
 Agents can register an ID, set and get shared keys, subscribe to updates, relate memories through a deterministic graph, request semantic suggestions, and link to other agent IDs for forwarded activity notifications. State uses an in-process SQLite database by default, with optional file-backed SQLite persistence.
 
 ## Files
+
 - `server.js`: startup wrapper for `npm start`.
 - `src/server.js`: Express, HTTP, WebSocket setup, and lifecycle helpers.
 - `src/protocol.js`: JSON message parsing and validation.
@@ -87,6 +88,72 @@ Run the manual real-model suggestion smoke test in a second terminal after start
 MEMORY_SUGGEST_ENABLED=true npm start
 npm run smoke:suggest
 ```
+
+## Integrate With Claude Desktop Or Another MCP Client
+
+The MCP entry point is [mcp-server.mjs](mcp-server.mjs). It exposes the shared-memory tools over stdio, so Claude Desktop and other MCP clients can talk to this project without using the WebSocket server.
+
+For a dynamic Windows setup, use the launcher script in [scripts/claude-mcp.ps1](scripts/claude-mcp.ps1). It resolves the repo path at runtime, so the Claude Desktop config only needs to call PowerShell.
+
+You can use either the preset option or a custom option.
+
+Preset Claude Desktop config example on Windows:
+
+```json
+{
+  "mcpServers": {
+    "shared-memory": {
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "D:\\Pruthu\\cv projects\\test\\sharedMemory\\scripts\\claude-mcp.ps1"
+      ],
+      "env": {
+        "MEMORY_FILE": "D:\\Pruthu\\cv projects\\test\\sharedMemory\\data\\memory.db"
+      }
+    }
+  }
+}
+```
+
+Custom option: set `SHARED_MEMORY_REPO_ROOT` if the repo moves, or set `SHARED_MEMORY_ENTRYPOINT` if you want Claude Desktop to launch a different MCP entry point.
+
+```json
+{
+  "mcpServers": {
+    "shared-memory": {
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "D:\\Pruthu\\cv projects\\test\\sharedMemory\\scripts\\claude-mcp.ps1"
+      ],
+      "env": {
+        "SHARED_MEMORY_REPO_ROOT": "D:\\Pruthu\\cv projects\\test\\sharedMemory",
+        "MEMORY_FILE": "D:\\Pruthu\\cv projects\\test\\sharedMemory\\data\\memory.db"
+      }
+    }
+  }
+}
+```
+
+Use `MEMORY_FILE` if you want persistence, or omit it for an in-memory store. The MCP server exposes these tools:
+
+- `memory_set`
+- `memory_get`
+- `memory_search`
+- `memory_suggest`
+- `memory_map`
+- `memory_export`
+- `memory_validate_import`
+- `memory_import`
+
+For other MCP clients, launch `node mcp-server.mjs` as a stdio process and register the same tools. If you want the browser UI at the same time, keep `npm start` running separately for the WebSocket dashboard.
 
 ## HTTP Status
 
@@ -348,7 +415,12 @@ If the key does not exist or is expired, `entry` is `null`.
 Updates expiry and metadata timestamps without changing the stored value.
 
 ```json
-{ "type": "touch", "key": "session.note", "ttlMs": 600000, "requestId": "touch-1" }
+{
+  "type": "touch",
+  "key": "session.note",
+  "ttlMs": 600000,
+  "requestId": "touch-1"
+}
 ```
 
 Response:
@@ -497,7 +569,12 @@ Deletes a memory key and cascades all inbound and outbound graph edges.
 Response:
 
 ```json
-{ "type": "deleted", "key": "project.architecture", "removed": true, "revision": 3 }
+{
+  "type": "deleted",
+  "key": "project.architecture",
+  "removed": true,
+  "revision": 3
+}
 ```
 
 Deleting a missing key is safe and returns `removed: false` with `revision: null`. `delete` accepts positive integer `ifRevision`; stale checks return `revision-conflict`.
@@ -684,13 +761,21 @@ Response:
 Dry-run validation:
 
 ```json
-{ "type": "validate-import", "snapshot": { "entries": {}, "edges": [] }, "requestId": "validate-1" }
+{
+  "type": "validate-import",
+  "snapshot": { "entries": {}, "edges": [] },
+  "requestId": "validate-1"
+}
 ```
 
 Successful import:
 
 ```json
-{ "type": "import", "snapshot": { "entries": {}, "edges": [] }, "requestId": "import-1" }
+{
+  "type": "import",
+  "snapshot": { "entries": {}, "edges": [] },
+  "requestId": "import-1"
+}
 ```
 
 ```json
