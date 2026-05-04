@@ -68,7 +68,7 @@ test('map orders nodes deterministically before applying the limit', () => {
 });
 
 test('persistence starts empty when file is missing', () => {
-    const file = tempPath('memory.json');
+    const file = tempPath('memory.db');
     const memory = createMemoryStore({ persistence: { file } });
 
     assert.deepEqual(memory.keys(), []);
@@ -83,8 +83,8 @@ test('persistence starts empty when file is missing', () => {
     assert.equal(typeof memory.persistenceStatus().lastLoadedAt, 'number');
 });
 
-test('persistence rejects invalid JSON at startup', () => {
-    const file = tempPath('memory.json');
+test('persistence rejects corrupt SQLite file at startup', () => {
+    const file = tempPath('memory.db');
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, '{bad json', 'utf8');
 
@@ -95,7 +95,7 @@ test('persistence rejects invalid JSON at startup', () => {
 });
 
 test('flush persists entries and edges, and restart reloads them', async () => {
-    const file = tempPath('memory.json');
+    const file = tempPath('memory.db');
     const memory = createTimedStoreWithPersistence(file);
 
     memory.set('project.architecture', 'Architecture details', 'agentA', {
@@ -128,39 +128,341 @@ test('flush persists entries and edges, and restart reloads them', async () => {
 });
 
 test('persistence drops dangling edges during load', () => {
-    const file = tempPath('memory.json');
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify({
+    const memory = createTimedStore();
+
+    memory.importState({
         entries: {
-            nodeA: {
-                value: 'A',
-                summary: 'A',
-                tags: [],
-                importance: 1,
-                updatedAt: 100,
-                updatedBy: 'agentA',
-            },
+            nodeA: { value: 'A', summary: 'A', tags: [], importance: 1, updatedAt: 100, updatedBy: 'agentA' },
         },
         edges: [
-            {
-                from: 'nodeA',
-                to: 'missing',
-                relation: 'depends_on',
-                reason: 'dangling',
-                weight: 0.5,
-                updatedAt: 200,
-                updatedBy: 'agentA',
-            },
+            { from: 'nodeA', to: 'missing', relation: 'depends_on', reason: 'dangling', weight: 0.5, updatedAt: 200, updatedBy: 'agentA' },
         ],
-    }), 'utf8');
+    });
 
-    const memory = createMemoryStore({ persistence: { file } });
     assert.equal(memory.relationCount(), 0);
     assert.deepEqual(memory.map('nodeA', { depth: 1, limit: 10 }).edges, []);
 });
 
+test('snapshot export includes full entries and strict validation accepts it', () => {
+    const memory = createTimedStore();
+
+    memory.set('project.architecture', { body: 'Architecture details' }, 'agentA', {
+        summary: 'Architecture summary',
+        tags: ['architecture', 'plan'],
+        importance: 8,
+        expiresAt: 5000,
+    });
+    memory.set('project.database', { body: 'Database details' }, 'agentA', {
+        summary: 'Database summary',
+        tags: ['database'],
+        importance: 7,
+    });
+    memory.relate('project.database', 'project.architecture', 'depends_on', 'agentA', {
+        reason: '',
+        weight: 0.75,
+    });
+
+    const snapshot = memory.exportState();
+    assert.deepEqual(Object.keys(snapshot.entries), ['project.architecture', 'project.database']);
+    assert.deepEqual(snapshot.entries['project.architecture'].value, { body: 'Architecture details' });
+    assert.deepEqual(snapshot.entries['project.architecture'].tags, ['architecture', 'plan']);
+    assert.equal(snapshot.entries['project.architecture'].expiresAt, 5000);
+    assert.deepEqual(snapshot.edges.map((edge) => edge.relation), ['depends_on']);
+    assert.equal(snapshot.edges[0].reason, '');
+
+    assert.deepEqual(memory.validateSnapshot(snapshot), {
+        ok: true,
+        errors: [],
+        stats: { entryCount: 2, edgeCount: 1 },
+        snapshot,
+    });
+});
+
+test('strict snapshot validation rejects malformed entries and edges', () => {
+    const memory = createTimedStore();
+    const result = memory.validateSnapshot({
+        entries: {
+            good: {
+                value: 'good',
+                summary: 'Good entry',
+                tags: ['ok'],
+                importance: 5,
+                expiresAt: null,
+                updatedAt: 100,
+                updatedBy: 'agentA',
+            },
+            bad: {
+                summary: '',
+                tags: ['ok', ''],
+                importance: 99,
+                expiresAt: -1,
+                updatedAt: -1,
+                updatedBy: {},
+            },
+        },
+        edges: [
+            {
+                from: 'good',
+                to: 'missing',
+                relation: 'depends_on',
+                reason: 'dangling',
+                weight: 0.5,
+                updatedAt: 100,
+                updatedBy: 'agentA',
+            },
+            {
+                from: 'good',
+                to: 'good',
+                relation: 'related_to',
+                reason: '',
+                weight: 0.5,
+                updatedAt: 100,
+                updatedBy: 'agentA',
+            },
+            {
+                from: 'good',
+                to: 'good',
+                relation: 'bad_relation',
+                reason: '',
+                weight: 2,
+                updatedAt: 100,
+                updatedBy: 'agentA',
+            },
+            {
+                from: 'good',
+                to: 'missing',
+                relation: 'depends_on',
+                reason: 'duplicate identity with first',
+                weight: 0.5,
+                updatedAt: 100,
+                updatedBy: 'agentA',
+            },
+        ],
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.stats, null);
+    assert.ok(result.errors.some((error) => error.message === 'missing-value'));
+    assert.ok(result.errors.some((error) => error.message === 'invalid-importance'));
+    assert.ok(result.errors.some((error) => error.message === 'dangling-edge'));
+    assert.ok(result.errors.some((error) => error.message === 'self-relation-not-allowed'));
+    assert.ok(result.errors.some((error) => error.message === 'invalid-relation'));
+    assert.ok(result.errors.some((error) => error.message === 'invalid-weight'));
+    assert.ok(result.errors.some((error) => error.message === 'duplicate-edge'));
+});
+
+test('strict snapshot import replaces graph only after validation passes', () => {
+    const memory = createTimedStore();
+
+    memory.set('old', 'old value', 'agentA', { summary: 'Old memory' });
+    const invalid = {
+        entries: {
+            next: {
+                value: 'next value',
+                summary: 'Next memory',
+                tags: [],
+                importance: 5,
+                expiresAt: null,
+                updatedAt: 100,
+                updatedBy: 'agentB',
+            },
+        },
+        edges: [{ from: 'next', to: 'missing', relation: 'related_to', reason: '', weight: 1, updatedAt: 100, updatedBy: 'agentB' }],
+    };
+
+    const failed = memory.importSnapshot(invalid);
+    assert.equal(failed.ok, false);
+    assert.deepEqual(memory.keys(), ['old']);
+
+    const valid = {
+        entries: {
+            next: {
+                value: { restored: true },
+                summary: 'Next memory',
+                tags: ['restore'],
+                importance: 5,
+                expiresAt: null,
+                updatedAt: 100,
+                updatedBy: 'agentB',
+            },
+        },
+        edges: [],
+    };
+
+    assert.deepEqual(memory.importSnapshot(valid), {
+        ok: true,
+        errors: [],
+        stats: { entryCount: 1, edgeCount: 0 },
+    });
+    assert.deepEqual(memory.keys(), ['next']);
+    assert.deepEqual(memory.get('next').value, { restored: true });
+});
+
+test('set revisions increment and ifRevision rejects stale writes without mutation', () => {
+    const memory = createTimedStore();
+
+    const created = memory.set('versioned', 'v1', 'agentA', {
+        summary: 'Versioned memory',
+        tags: ['v1'],
+        importance: 4,
+    });
+    assert.equal(created.revision, 1);
+
+    const updated = memory.set('versioned', 'v2', 'agentB', {
+        summary: 'Versioned memory v2',
+        tags: ['v2'],
+        importance: 5,
+        ifRevision: 1,
+    });
+    assert.equal(updated.revision, 2);
+    assert.equal(memory.get('versioned').value, 'v2');
+
+    const stale = memory.set('versioned', 'stale', 'agentC', {
+        summary: 'Stale write',
+        tags: ['stale'],
+        importance: 9,
+        ifRevision: 1,
+    });
+    assert.deepEqual(stale, {
+        ok: false,
+        error: 'revision-conflict',
+        key: 'versioned',
+        currentRevision: 2,
+    });
+
+    const entry = memory.get('versioned');
+    assert.equal(entry.value, 'v2');
+    assert.equal(entry.summary, 'Versioned memory v2');
+    assert.deepEqual(entry.tags, ['v2']);
+    assert.equal(entry.importance, 5);
+    assert.equal(entry.revision, 2);
+    assert.equal(memory.search({ tags: ['stale'] }).total, 0);
+});
+
+test('ifRevision null is create-only and treats expired entries as replaceable', () => {
+    let currentTime = 1000;
+    const memory = createMemoryStore({ clock: () => currentTime });
+
+    const first = memory.set('create-only', 'v1', 'agentA', {
+        summary: 'Create only',
+        ifRevision: null,
+    });
+    assert.equal(first.revision, 1);
+
+    assert.deepEqual(memory.set('create-only', 'blocked', 'agentB', {
+        summary: 'Blocked',
+        ifRevision: null,
+    }), {
+        ok: false,
+        error: 'revision-conflict',
+        key: 'create-only',
+        currentRevision: 1,
+    });
+
+    memory.set('temporary', 'old', 'agentA', {
+        summary: 'Old temporary',
+        ttlMs: 10,
+    });
+    currentTime = 2000;
+    const replacedExpired = memory.set('temporary', 'new', 'agentB', {
+        summary: 'New temporary',
+        ifRevision: null,
+    });
+    assert.equal(replacedExpired.revision, 2);
+    assert.equal(memory.get('temporary').value, 'new');
+});
+
+test('touch and delete enforce revision checks', () => {
+    const memory = createTimedStore();
+
+    const created = memory.set('lifecycle', 'value', 'agentA', { summary: 'Lifecycle memory' });
+    assert.equal(created.revision, 1);
+
+    assert.deepEqual(memory.touch('lifecycle', 'agentB', { ifRevision: 0 }), {
+        ok: false,
+        error: 'invalid-ifRevision',
+        key: 'lifecycle',
+    });
+
+    assert.deepEqual(memory.touch('lifecycle', 'agentB', { ifRevision: 2 }), {
+        ok: false,
+        error: 'revision-conflict',
+        key: 'lifecycle',
+        currentRevision: 1,
+    });
+    assert.equal(memory.get('lifecycle').revision, 1);
+
+    const touched = memory.touch('lifecycle', 'agentB', { ifRevision: 1 });
+    assert.equal(touched.ok, true);
+    assert.equal(touched.entry.revision, 2);
+
+    assert.deepEqual(memory.delete('lifecycle', { ifRevision: 1 }), {
+        ok: false,
+        error: 'revision-conflict',
+        key: 'lifecycle',
+        currentRevision: 2,
+    });
+    assert.notEqual(memory.get('lifecycle'), null);
+
+    const deleted = memory.delete('lifecycle', { ifRevision: 2 });
+    assert.equal(deleted.removed, true);
+    assert.equal(deleted.revision, 2);
+    assert.equal(memory.get('lifecycle'), null);
+
+    assert.deepEqual(memory.delete('missing', { ifRevision: 1 }), {
+        ok: false,
+        error: 'revision-conflict',
+        key: 'missing',
+        currentRevision: null,
+    });
+});
+
+test('snapshots preserve revision and old snapshots import as revision one', () => {
+    const memory = createTimedStore();
+    memory.set('snapshot.versioned', 'v1', 'agentA', { summary: 'Snapshot versioned' });
+    memory.set('snapshot.versioned', 'v2', 'agentA', { summary: 'Snapshot versioned v2' });
+
+    const snapshot = memory.exportState();
+    assert.equal(snapshot.entries['snapshot.versioned'].revision, 2);
+    assert.equal(memory.validateSnapshot(snapshot).ok, true);
+
+    const oldSnapshot = {
+        entries: {
+            legacy: {
+                value: 'legacy',
+                summary: 'Legacy memory',
+                tags: [],
+                importance: 1,
+                expiresAt: null,
+                updatedAt: 100,
+                updatedBy: 'legacy-agent',
+            },
+        },
+        edges: [],
+    };
+
+    assert.deepEqual(memory.importSnapshot(oldSnapshot), {
+        ok: true,
+        errors: [],
+        stats: { entryCount: 1, edgeCount: 0 },
+    });
+    assert.equal(memory.get('legacy').revision, 1);
+
+    const invalid = memory.validateSnapshot({
+        entries: {
+            bad: {
+                ...oldSnapshot.entries.legacy,
+                revision: 0,
+            },
+        },
+        edges: [],
+    });
+    assert.equal(invalid.ok, false);
+    assert.ok(invalid.errors.some((error) => error.message === 'invalid-revision'));
+});
+
 test('cascade delete persists removed edges', async () => {
-    const file = tempPath('memory.json');
+    const file = tempPath('memory.db');
     const memory = createTimedStoreWithPersistence(file);
 
     memory.set('nodeA', 'A', 'agentA');
@@ -177,7 +479,7 @@ test('cascade delete persists removed edges', async () => {
 });
 
 test('debounce scheduler keeps one active timer for rapid mutations', async () => {
-    const file = tempPath('memory.json');
+    const file = tempPath('memory.db');
     const scheduled = new Map();
     let nextId = 1;
     const scheduler = {
@@ -207,37 +509,28 @@ test('debounce scheduler keeps one active timer for rapid mutations', async () =
     assert.equal(fs.existsSync(file), true);
 });
 
-test('async flush failure keeps dirty state and records the error', async () => {
+test('createMemoryStore throws when SQLite file path is inaccessible', () => {
     const parentFile = tempPath('not-a-directory');
     fs.writeFileSync(parentFile, 'blocking parent directory creation', 'utf8');
-    const file = path.join(parentFile, 'memory.json');
-    const memory = createMemoryStore({ persistence: { file } });
-    const originalError = console.error;
-    console.error = () => {};
+    const file = path.join(parentFile, 'memory.db');
 
-    try {
-        memory.set('nodeA', 'A', 'agentA');
-        assert.equal(await memory.flush(), false);
-        const status = memory.persistenceStatus();
-        assert.equal(status.dirty, true);
-        assert.equal(typeof status.lastFlushError, 'string');
-        assert.notEqual(status.lastFlushError.length, 0);
-    } finally {
-        console.error = originalError;
-    }
+    assert.throws(
+        () => createMemoryStore({ persistence: { file } }),
+        /Failed to load memory persistence file/,
+    );
 });
 
-test('flushSync writes a valid atomic snapshot', () => {
-    const file = tempPath('memory.json');
+test('flushSync marks store as not dirty and data persists', () => {
+    const file = tempPath('memory.db');
     const memory = createMemoryStore({ persistence: { file } });
 
     memory.set('nodeA', 'A', 'agentA', { summary: 'Node A', importance: 4 });
     assert.equal(memory.flushSync(), true);
-
-    const persisted = JSON.parse(fs.readFileSync(file, 'utf8'));
-    assert.equal(persisted.entries.nodeA.summary, 'Node A');
-    assert.deepEqual(persisted.edges, []);
     assert.equal(memory.persistenceStatus().dirty, false);
+
+    const restored = createMemoryStore({ persistence: { file } });
+    assert.equal(restored.get('nodeA').summary, 'Node A');
+    assert.equal(restored.map('nodeA', { depth: 1, limit: 10 }).edges.length, 0);
 });
 
 test('search returns metadata-only matches sorted by importance, recency, then key', () => {
@@ -390,7 +683,7 @@ test('pruneExpired removes expired nodes and cascades edges', () => {
 });
 
 test('persistence saves and reloads expiresAt', async () => {
-    const file = tempPath('memory.json');
+    const file = tempPath('memory.db');
     const memory = createMemoryStore({
         clock: () => 1000,
         persistence: { file },

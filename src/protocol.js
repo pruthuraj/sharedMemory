@@ -1,3 +1,5 @@
+// WebSocket message parser and per-command field validator.
+
 const COMMAND_TYPES = new Set([
     'auth',
     'register',
@@ -14,7 +16,11 @@ const COMMAND_TYPES = new Set([
     'delete',
     'map',
     'search',
+    'suggest',
     'prune',
+    'export',
+    'validate-import',
+    'import',
 ]);
 
 const RELATION_TYPES = new Set([
@@ -59,7 +65,16 @@ function hasValidTags(tags) {
     return Array.isArray(tags) && tags.every(isNonEmptyString);
 }
 
-function validateSetMetadata(message) {
+// Returns an error object on failure, or null on success (callers use `|| { ok: true, message }`).
+function validateIfRevision(message, options = {}) {
+    if (!hasOwn(message, 'ifRevision')) return null;
+    if (message.ifRevision === null && options.allowNull === true) return null;
+    return isPositiveInteger(message.ifRevision)
+        ? null
+        : { ok: false, error: 'invalid-ifRevision' };
+}
+
+function validateSetMetadata(message, options = {}) {
     if (hasOwn(message, 'ttlMs') && hasOwn(message, 'expiresAt')) {
         return { ok: false, error: 'invalid-expiry' };
     }
@@ -84,7 +99,7 @@ function validateSetMetadata(message) {
         return { ok: false, error: 'invalid-importance' };
     }
 
-    return null;
+    return validateIfRevision(message, options);
 }
 
 function validateRelationFields(message) {
@@ -103,6 +118,12 @@ function validateRelationFields(message) {
     return null;
 }
 
+/**
+ * Parse and validate a raw WebSocket message.
+ *
+ * requestId is extracted before type validation so it can be echoed on error responses.
+ * Returns { ok: true, message } or { ok: false, error, requestId? }.
+ */
 function parseMessage(raw) {
     let message;
 
@@ -149,7 +170,7 @@ function validateMessage(message) {
             if (!isNonEmptyString(message.key)) {
                 return { ok: false, error: 'missing-key' };
             }
-            return validateSetMetadata(message) || { ok: true, message };
+            return validateSetMetadata(message, { allowNull: true }) || { ok: true, message };
 
         case 'get':
         case 'subscribe':
@@ -162,6 +183,9 @@ function validateMessage(message) {
             if (message.type === 'touch') {
                 return validateSetMetadata(message) || { ok: true, message };
             }
+            if (message.type === 'delete') {
+                return validateIfRevision(message) || { ok: true, message };
+            }
             return { ok: true, message };
 
         case 'link':
@@ -173,6 +197,14 @@ function validateMessage(message) {
 
         case 'list':
         case 'prune':
+        case 'export':
+            return { ok: true, message };
+
+        case 'validate-import':
+        case 'import':
+            if (!hasOwn(message, 'snapshot')) {
+                return { ok: false, error: 'missing-snapshot' };
+            }
             return { ok: true, message };
 
         case 'relate': {
@@ -211,6 +243,7 @@ function validateMessage(message) {
             return { ok: true, message };
 
         case 'search': {
+            // At least one of query/tags/minImportance is required; a bare search is rejected.
             if (hasOwn(message, 'query') && !isNonEmptyString(message.query)) {
                 return { ok: false, error: 'invalid-query' };
             }
@@ -236,6 +269,25 @@ function validateMessage(message) {
 
             return { ok: true, message };
         }
+
+        case 'suggest':
+            if (!hasOwn(message, 'context')) {
+                return { ok: false, error: 'missing-context' };
+            }
+
+            if (!isNonEmptyString(message.context)) {
+                return { ok: false, error: 'invalid-context' };
+            }
+
+            if (hasOwn(message, 'limit') && !isIntegerInRange(message.limit, 1, 20)) {
+                return { ok: false, error: 'invalid-limit' };
+            }
+
+            if (hasOwn(message, 'tags') && !hasValidTags(message.tags)) {
+                return { ok: false, error: 'invalid-tags' };
+            }
+
+            return { ok: true, message };
 
         default:
             return { ok: false, error: 'unknown-type' };
