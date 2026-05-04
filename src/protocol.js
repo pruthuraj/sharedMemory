@@ -66,7 +66,15 @@ function hasValidTags(tags) {
 }
 
 // Returns an error object on failure, or null on success (callers use `|| { ok: true, message }`).
-function validateSetMetadata(message) {
+function validateIfRevision(message, options = {}) {
+    if (!hasOwn(message, 'ifRevision')) return null;
+    if (message.ifRevision === null && options.allowNull === true) return null;
+    return isPositiveInteger(message.ifRevision)
+        ? null
+        : { ok: false, error: 'invalid-ifRevision' };
+}
+
+function validateSetMetadata(message, options = {}) {
     if (hasOwn(message, 'ttlMs') && hasOwn(message, 'expiresAt')) {
         return { ok: false, error: 'invalid-expiry' };
     }
@@ -91,7 +99,7 @@ function validateSetMetadata(message) {
         return { ok: false, error: 'invalid-importance' };
     }
 
-    return null;
+    return validateIfRevision(message, options);
 }
 
 function validateRelationFields(message) {
@@ -162,7 +170,7 @@ function validateMessage(message) {
             if (!isNonEmptyString(message.key)) {
                 return { ok: false, error: 'missing-key' };
             }
-            return validateSetMetadata(message) || { ok: true, message };
+            return validateSetMetadata(message, { allowNull: true }) || { ok: true, message };
 
         case 'get':
         case 'subscribe':
@@ -174,6 +182,9 @@ function validateMessage(message) {
             }
             if (message.type === 'touch') {
                 return validateSetMetadata(message) || { ok: true, message };
+            }
+            if (message.type === 'delete') {
+                return validateIfRevision(message) || { ok: true, message };
             }
             return { ok: true, message };
 

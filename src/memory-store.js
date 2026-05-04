@@ -54,6 +54,7 @@ function nodeMetadata(key, entry) {
         summary: entry.summary,
         tags: entry.tags.slice(),
         importance: entry.importance,
+        revision: entry.revision,
         updatedAt: entry.updatedAt,
         updatedBy: entry.updatedBy,
     };
@@ -151,6 +152,11 @@ function validateSnapshotEntry(key, entry, errors) {
         errors.push(snapshotError(`${pathPrefix}.importance`, 'invalid-importance'));
     }
 
+    const revision = hasOwn(entry, 'revision') ? entry.revision : 1;
+    if (!isPositiveInteger(revision)) {
+        errors.push(snapshotError(`${pathPrefix}.revision`, 'invalid-revision'));
+    }
+
     if (!hasOwn(entry, 'expiresAt') || !(entry.expiresAt === null || isPositiveInteger(entry.expiresAt))) {
         errors.push(snapshotError(`${pathPrefix}.expiresAt`, 'invalid-expiresAt'));
     }
@@ -170,6 +176,7 @@ function validateSnapshotEntry(key, entry, errors) {
         summary: entry.summary,
         tags: entry.tags.slice(),
         importance: entry.importance,
+        revision,
         expiresAt: entry.expiresAt,
         updatedAt: entry.updatedAt,
         updatedBy: entry.updatedBy,
@@ -318,6 +325,7 @@ function initSchema(db) {
             value_json TEXT    NOT NULL,
             summary    TEXT    NOT NULL DEFAULT '',
             importance INTEGER NOT NULL DEFAULT 0,
+            revision   INTEGER NOT NULL DEFAULT 1,
             expires_at INTEGER,
             updated_at INTEGER NOT NULL,
             updated_by TEXT
@@ -352,6 +360,11 @@ function initSchema(db) {
             tokenize='trigram'
         );
     `);
+
+    const columns = db.prepare('PRAGMA table_info(entries)').all();
+    if (!columns.some((column) => column.name === 'revision')) {
+        db.exec('ALTER TABLE entries ADD COLUMN revision INTEGER NOT NULL DEFAULT 1');
+    }
 }
 
 // Concatenate key, summary, and tags into a single string for FTS5 indexing.
@@ -365,6 +378,7 @@ function rowToEntry(row, tags) {
         summary: row.summary,
         tags,
         importance: row.importance,
+        revision: row.revision,
         expiresAt: row.expires_at !== null && row.expires_at !== undefined ? row.expires_at : null,
         updatedAt: row.updated_at,
         updatedBy: row.updated_by !== null && row.updated_by !== undefined ? row.updated_by : null,
@@ -433,12 +447,13 @@ function createMemoryStore(options = {}) {
     const stmts = {
         // ON CONFLICT DO UPDATE avoids triggering ON DELETE CASCADE on the old row.
         upsertEntry: db.prepare(`
-            INSERT INTO entries (key, value_json, summary, importance, expires_at, updated_at, updated_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO entries (key, value_json, summary, importance, revision, expires_at, updated_at, updated_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(key) DO UPDATE SET
                 value_json = excluded.value_json,
                 summary    = excluded.summary,
                 importance = excluded.importance,
+                revision   = excluded.revision,
                 expires_at = excluded.expires_at,
                 updated_at = excluded.updated_at,
                 updated_by = excluded.updated_by
@@ -492,10 +507,11 @@ function createMemoryStore(options = {}) {
             'SELECT COUNT(*) as cnt FROM entries WHERE expires_at IS NOT NULL AND expires_at <= ?',
         ),
         touchEntry: db.prepare(
-            'UPDATE entries SET expires_at = ?, updated_at = ?, updated_by = ? WHERE key = ?',
+            'UPDATE entries SET expires_at = ?, updated_at = ?, updated_by = ?, revision = ? WHERE key = ?',
         ),
         deleteAllEntries: db.prepare('DELETE FROM entries'),
         getEntryRowid: db.prepare('SELECT rowid FROM entries WHERE key = ?'),
+        getEntryWithRowid: db.prepare('SELECT rowid, * FROM entries WHERE key = ?'),
         ftsInsert: db.prepare('INSERT INTO fts_entries(rowid, key, body) VALUES (?, ?, ?)'),
         ftsDelete: db.prepare('DELETE FROM fts_entries WHERE rowid = ?'),
         // Wrap query in double-quoted phrase to prevent FTS5 syntax interpretation.
@@ -518,9 +534,42 @@ function createMemoryStore(options = {}) {
         };
     }
 
-    const doSet = inTransaction((key, valueJson, summary, importance, expiresAt, ts, updatedBy, tags) => {
-        const existing = stmts.getEntryRowid.get(key);
-        stmts.upsertEntry.run(key, valueJson, summary, importance, expiresAt, ts, updatedBy);
+    function isVisibleRow(row, t) {
+        return Boolean(row) && (row.expires_at === null || row.expires_at === undefined || row.expires_at > t);
+    }
+
+    function revisionConflict(key, currentRevision) {
+        return {
+            ok: false,
+            error: 'revision-conflict',
+            key,
+            currentRevision,
+        };
+    }
+
+    function validateRevisionCheck(key, row, ifRevision, t, allowCreateOnly) {
+        if (ifRevision === undefined) return null;
+
+        if (ifRevision === null) {
+            if (!allowCreateOnly) return { ok: false, error: 'invalid-ifRevision', key };
+            return isVisibleRow(row, t) ? revisionConflict(key, row.revision) : null;
+        }
+
+        if (!isPositiveInteger(ifRevision)) {
+            return { ok: false, error: 'invalid-ifRevision', key };
+        }
+
+        if (!row) return revisionConflict(key, null);
+        return row.revision === ifRevision ? null : revisionConflict(key, row.revision);
+    }
+
+    const doSet = inTransaction((key, valueJson, summary, importance, expiresAt, ts, updatedBy, tags, ifRevision) => {
+        const existing = stmts.getEntryWithRowid.get(key);
+        const revisionError = validateRevisionCheck(key, existing, ifRevision, ts, true);
+        if (revisionError) return revisionError;
+
+        const nextRevision = existing ? existing.revision + 1 : 1;
+        stmts.upsertEntry.run(key, valueJson, summary, importance, nextRevision, expiresAt, ts, updatedBy);
         stmts.deleteTags.run(key);
         for (const tag of tags) {
             stmts.insertTag.run(key, tag);
@@ -528,15 +577,40 @@ function createMemoryStore(options = {}) {
         if (existing) stmts.ftsDelete.run(existing.rowid);
         const current = stmts.getEntryRowid.get(key);
         stmts.ftsInsert.run(current.rowid, key, ftsBody(key, summary, tags));
+        return { ok: true, revision: nextRevision };
     });
 
-    const doDelete = inTransaction((key) => {
-        const rowidRow = stmts.getEntryRowid.get(key);
+    const doDelete = inTransaction((key, ifRevision) => {
+        const existing = stmts.getEntryWithRowid.get(key);
+        const revisionError = validateRevisionCheck(key, existing, ifRevision, now(), false);
+        if (revisionError) return revisionError;
+
         const incidentEdgeRows = stmts.getIncidentEdges.all(key, key);
         const removedEdges = incidentEdgeRows.map(rowToEdge);
         const result = stmts.deleteEntry.run(key);
-        if (rowidRow && result.changes > 0) stmts.ftsDelete.run(rowidRow.rowid);
-        return { removed: result.changes > 0, removedEdges };
+        if (existing && result.changes > 0) stmts.ftsDelete.run(existing.rowid);
+        return {
+            ok: true,
+            removed: result.changes > 0,
+            revision: existing ? existing.revision : null,
+            removedEdges,
+        };
+    });
+
+    const doTouch = inTransaction((key, expiresAt, ts, updatedBy, ifRevision) => {
+        const row = stmts.getEntry.get(key);
+        if (!row) return { ok: false, error: 'missing-node' };
+
+        const revisionError = validateRevisionCheck(key, row, ifRevision, ts, false);
+        if (revisionError) return revisionError;
+
+        const nextRevision = row.revision + 1;
+        stmts.touchEntry.run(expiresAt, ts, updatedBy, nextRevision, key);
+        return {
+            ok: true,
+            row,
+            revision: nextRevision,
+        };
     });
 
     const doPrune = inTransaction((t) => {
@@ -573,6 +647,7 @@ function createMemoryStore(options = {}) {
 
             const summary = isNonEmptyString(entry.summary) ? entry.summary : safeSummary(entry.value);
             const importance = isValidImportance(entry.importance) ? entry.importance : DEFAULT_IMPORTANCE;
+            const revision = isPositiveInteger(entry.revision) ? entry.revision : 1;
             const expiresAt = isPositiveInteger(entry.expiresAt) ? entry.expiresAt : null;
             const updatedAt = typeof entry.updatedAt === 'number' && Number.isFinite(entry.updatedAt)
                 ? entry.updatedAt
@@ -580,7 +655,7 @@ function createMemoryStore(options = {}) {
             const updatedBy = entry.updatedBy !== undefined ? entry.updatedBy : null;
             const tags = normalizeTags(entry.tags);
 
-            stmts.upsertEntry.run(key, JSON.stringify(entry.value), summary, importance, expiresAt, updatedAt, updatedBy);
+            stmts.upsertEntry.run(key, JSON.stringify(entry.value), summary, importance, revision, expiresAt, updatedAt, updatedBy);
             for (const tag of tags) {
                 stmts.insertTag.run(key, tag);
             }
@@ -715,6 +790,7 @@ function createMemoryStore(options = {}) {
                 summary: row.summary,
                 tags: tagsByKey[row.key] || [],
                 importance: row.importance,
+                revision: row.revision,
                 expiresAt: row.expires_at !== null && row.expires_at !== undefined ? row.expires_at : null,
                 updatedAt: row.updated_at,
                 updatedBy: row.updated_by !== null && row.updated_by !== undefined ? row.updated_by : null,
@@ -894,11 +970,22 @@ function createMemoryStore(options = {}) {
             const importance = metadata.importance ?? DEFAULT_IMPORTANCE;
             const expiresAt = normalizeExpiry(metadata);
             const ts = now();
+            const ifRevision = hasOwn(metadata, 'ifRevision') ? metadata.ifRevision : undefined;
 
-            doSet(key, JSON.stringify(value), summary, importance, expiresAt, ts, updatedBy, tags);
+            const result = doSet(key, JSON.stringify(value), summary, importance, expiresAt, ts, updatedBy, tags, ifRevision);
+            if (result.ok === false) return result;
             markDirty();
 
-            return { value, summary, tags: tags.slice(), importance, expiresAt, updatedAt: ts, updatedBy };
+            return {
+                value,
+                summary,
+                tags: tags.slice(),
+                importance,
+                revision: result.revision,
+                expiresAt,
+                updatedAt: ts,
+                updatedBy,
+            };
         },
 
         get(key) {
@@ -909,10 +996,14 @@ function createMemoryStore(options = {}) {
             return rowToEntry(row, tags);
         },
 
-        delete(key) {
-            const { removed, removedEdges } = doDelete(key);
+        delete(key, options = {}) {
+            const ifRevision = hasOwn(options, 'ifRevision') ? options.ifRevision : undefined;
+            const result = doDelete(key, ifRevision);
+            if (result.ok === false) return result;
+
+            const { removed, removedEdges } = result;
             if (removed || removedEdges.length > 0) markDirty();
-            return { removed, removedEdges };
+            return { removed, revision: result.revision, removedEdges };
         },
 
         keys() {
@@ -983,20 +1074,20 @@ function createMemoryStore(options = {}) {
 
         // Update TTL and updatedAt/updatedBy without changing the stored value.
         touch(key, updatedBy, metadata = {}) {
-            const row = stmts.getEntry.get(key);
-            if (!row) return { ok: false, error: 'missing-node' };
-
             const expiresAt = normalizeExpiry(metadata);
             const ts = now();
-            stmts.touchEntry.run(expiresAt, ts, updatedBy, key);
+            const ifRevision = hasOwn(metadata, 'ifRevision') ? metadata.ifRevision : undefined;
+            const result = doTouch(key, expiresAt, ts, updatedBy, ifRevision);
+            if (!result.ok) return result;
             markDirty();
 
             const tags = stmts.getTagsForKey.all(key).map((r) => r.tag);
             const entry = {
-                value: JSON.parse(row.value_json),
-                summary: row.summary,
+                value: JSON.parse(result.row.value_json),
+                summary: result.row.summary,
                 tags,
-                importance: row.importance,
+                importance: result.row.importance,
+                revision: result.revision,
                 expiresAt,
                 updatedAt: ts,
                 updatedBy,

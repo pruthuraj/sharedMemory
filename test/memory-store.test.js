@@ -298,6 +298,169 @@ test('strict snapshot import replaces graph only after validation passes', () =>
     assert.deepEqual(memory.get('next').value, { restored: true });
 });
 
+test('set revisions increment and ifRevision rejects stale writes without mutation', () => {
+    const memory = createTimedStore();
+
+    const created = memory.set('versioned', 'v1', 'agentA', {
+        summary: 'Versioned memory',
+        tags: ['v1'],
+        importance: 4,
+    });
+    assert.equal(created.revision, 1);
+
+    const updated = memory.set('versioned', 'v2', 'agentB', {
+        summary: 'Versioned memory v2',
+        tags: ['v2'],
+        importance: 5,
+        ifRevision: 1,
+    });
+    assert.equal(updated.revision, 2);
+    assert.equal(memory.get('versioned').value, 'v2');
+
+    const stale = memory.set('versioned', 'stale', 'agentC', {
+        summary: 'Stale write',
+        tags: ['stale'],
+        importance: 9,
+        ifRevision: 1,
+    });
+    assert.deepEqual(stale, {
+        ok: false,
+        error: 'revision-conflict',
+        key: 'versioned',
+        currentRevision: 2,
+    });
+
+    const entry = memory.get('versioned');
+    assert.equal(entry.value, 'v2');
+    assert.equal(entry.summary, 'Versioned memory v2');
+    assert.deepEqual(entry.tags, ['v2']);
+    assert.equal(entry.importance, 5);
+    assert.equal(entry.revision, 2);
+    assert.equal(memory.search({ tags: ['stale'] }).total, 0);
+});
+
+test('ifRevision null is create-only and treats expired entries as replaceable', () => {
+    let currentTime = 1000;
+    const memory = createMemoryStore({ clock: () => currentTime });
+
+    const first = memory.set('create-only', 'v1', 'agentA', {
+        summary: 'Create only',
+        ifRevision: null,
+    });
+    assert.equal(first.revision, 1);
+
+    assert.deepEqual(memory.set('create-only', 'blocked', 'agentB', {
+        summary: 'Blocked',
+        ifRevision: null,
+    }), {
+        ok: false,
+        error: 'revision-conflict',
+        key: 'create-only',
+        currentRevision: 1,
+    });
+
+    memory.set('temporary', 'old', 'agentA', {
+        summary: 'Old temporary',
+        ttlMs: 10,
+    });
+    currentTime = 2000;
+    const replacedExpired = memory.set('temporary', 'new', 'agentB', {
+        summary: 'New temporary',
+        ifRevision: null,
+    });
+    assert.equal(replacedExpired.revision, 2);
+    assert.equal(memory.get('temporary').value, 'new');
+});
+
+test('touch and delete enforce revision checks', () => {
+    const memory = createTimedStore();
+
+    const created = memory.set('lifecycle', 'value', 'agentA', { summary: 'Lifecycle memory' });
+    assert.equal(created.revision, 1);
+
+    assert.deepEqual(memory.touch('lifecycle', 'agentB', { ifRevision: 0 }), {
+        ok: false,
+        error: 'invalid-ifRevision',
+        key: 'lifecycle',
+    });
+
+    assert.deepEqual(memory.touch('lifecycle', 'agentB', { ifRevision: 2 }), {
+        ok: false,
+        error: 'revision-conflict',
+        key: 'lifecycle',
+        currentRevision: 1,
+    });
+    assert.equal(memory.get('lifecycle').revision, 1);
+
+    const touched = memory.touch('lifecycle', 'agentB', { ifRevision: 1 });
+    assert.equal(touched.ok, true);
+    assert.equal(touched.entry.revision, 2);
+
+    assert.deepEqual(memory.delete('lifecycle', { ifRevision: 1 }), {
+        ok: false,
+        error: 'revision-conflict',
+        key: 'lifecycle',
+        currentRevision: 2,
+    });
+    assert.notEqual(memory.get('lifecycle'), null);
+
+    const deleted = memory.delete('lifecycle', { ifRevision: 2 });
+    assert.equal(deleted.removed, true);
+    assert.equal(deleted.revision, 2);
+    assert.equal(memory.get('lifecycle'), null);
+
+    assert.deepEqual(memory.delete('missing', { ifRevision: 1 }), {
+        ok: false,
+        error: 'revision-conflict',
+        key: 'missing',
+        currentRevision: null,
+    });
+});
+
+test('snapshots preserve revision and old snapshots import as revision one', () => {
+    const memory = createTimedStore();
+    memory.set('snapshot.versioned', 'v1', 'agentA', { summary: 'Snapshot versioned' });
+    memory.set('snapshot.versioned', 'v2', 'agentA', { summary: 'Snapshot versioned v2' });
+
+    const snapshot = memory.exportState();
+    assert.equal(snapshot.entries['snapshot.versioned'].revision, 2);
+    assert.equal(memory.validateSnapshot(snapshot).ok, true);
+
+    const oldSnapshot = {
+        entries: {
+            legacy: {
+                value: 'legacy',
+                summary: 'Legacy memory',
+                tags: [],
+                importance: 1,
+                expiresAt: null,
+                updatedAt: 100,
+                updatedBy: 'legacy-agent',
+            },
+        },
+        edges: [],
+    };
+
+    assert.deepEqual(memory.importSnapshot(oldSnapshot), {
+        ok: true,
+        errors: [],
+        stats: { entryCount: 1, edgeCount: 0 },
+    });
+    assert.equal(memory.get('legacy').revision, 1);
+
+    const invalid = memory.validateSnapshot({
+        entries: {
+            bad: {
+                ...oldSnapshot.entries.legacy,
+                revision: 0,
+            },
+        },
+        edges: [],
+    });
+    assert.equal(invalid.ok, false);
+    assert.ok(invalid.errors.some((error) => error.message === 'invalid-revision'));
+});
+
 test('cascade delete persists removed edges', async () => {
     const file = tempPath('memory.db');
     const memory = createTimedStoreWithPersistence(file);

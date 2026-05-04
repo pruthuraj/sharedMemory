@@ -275,7 +275,7 @@ Temporary memories can expire by passing either `ttlMs` or `expiresAt`, but not 
 Response:
 
 ```json
-{ "type": "ok", "action": "set", "key": "greeting" }
+{ "type": "ok", "action": "set", "key": "greeting", "revision": 1 }
 ```
 
 The stored entry has this shape:
@@ -286,6 +286,7 @@ The stored entry has this shape:
   "summary": "hello from agentA",
   "tags": [],
   "importance": 0,
+  "revision": 1,
   "expiresAt": null,
   "updatedAt": 1714694400000,
   "updatedBy": "agentA"
@@ -295,6 +296,23 @@ The stored entry has this shape:
 If `summary` is omitted, the server generates a compact fallback by stringifying the value, collapsing whitespace, and capping length. `importance` must be an integer from `0` to `10`.
 
 Expired entries are hidden from `get`, `list`, `map`, and `search` without deleting or flushing them. Expired entries are removed only by `prune` or the background prune interval.
+
+Safer clients can add `ifRevision` to prevent stale overwrites:
+
+```json
+{ "type": "set", "key": "greeting", "value": "new value", "ifRevision": 1 }
+```
+
+Omitting `ifRevision` keeps legacy last-write-wins behavior. `ifRevision: null` is create-only: it succeeds only when the key is absent or expired from the visible memory view. Stale writes return:
+
+```json
+{
+  "type": "error",
+  "message": "revision-conflict",
+  "key": "greeting",
+  "currentRevision": 2
+}
+```
 
 ### `get`
 
@@ -315,6 +333,7 @@ Response:
     "summary": "hello from agentA",
     "tags": [],
     "importance": 0,
+    "revision": 1,
     "expiresAt": null,
     "updatedAt": 1714694400000,
     "updatedBy": "agentA"
@@ -343,6 +362,7 @@ Response:
     "summary": "Temporary task context",
     "tags": [],
     "importance": 0,
+    "revision": 2,
     "expiresAt": 1714695000000,
     "updatedAt": 1714694400000,
     "updatedBy": "agentA"
@@ -351,7 +371,7 @@ Response:
 }
 ```
 
-`touch` accepts either `ttlMs` or `expiresAt`, but not both. If both expiry fields are omitted, the existing expiry is cleared and the memory becomes non-expiring.
+`touch` accepts either `ttlMs` or `expiresAt`, but not both. If both expiry fields are omitted, the existing expiry is cleared and the memory becomes non-expiring. `touch` also accepts positive integer `ifRevision`; stale checks return `revision-conflict`.
 
 ### `subscribe`
 
@@ -375,6 +395,7 @@ If the key already has a value, the server immediately sends an `update`. Future
   "key": "greeting",
   "entry": {
     "value": "new value",
+    "revision": 2,
     "updatedAt": 1714694400000,
     "updatedBy": "agentB"
   }
@@ -476,10 +497,10 @@ Deletes a memory key and cascades all inbound and outbound graph edges.
 Response:
 
 ```json
-{ "type": "deleted", "key": "project.architecture", "removed": true }
+{ "type": "deleted", "key": "project.architecture", "removed": true, "revision": 3 }
 ```
 
-Deleting a missing key is safe and returns `removed: false`.
+Deleting a missing key is safe and returns `removed: false` with `revision: null`. `delete` accepts positive integer `ifRevision`; stale checks return `revision-conflict`.
 
 ### `prune`
 
@@ -533,6 +554,7 @@ Response:
       "summary": "Server is split into focused modules.",
       "tags": ["architecture", "server"],
       "importance": 8,
+      "revision": 1,
       "updatedAt": 1714694400000,
       "updatedBy": "agentA"
     }
@@ -577,6 +599,7 @@ Response:
       "summary": "Server is split into focused modules.",
       "tags": ["architecture", "server"],
       "importance": 8,
+      "revision": 1,
       "updatedAt": 1714694400000,
       "updatedBy": "agentA"
     }
@@ -612,6 +635,7 @@ Response:
       "summary": "Database migration approach.",
       "tags": ["database"],
       "importance": 8,
+      "revision": 1,
       "score": 0.87,
       "reasons": ["semantic-match", "high-importance"]
     }
@@ -644,6 +668,7 @@ Response:
         "summary": "Database summary",
         "tags": ["database"],
         "importance": 8,
+        "revision": 1,
         "expiresAt": null,
         "updatedAt": 1714694400000,
         "updatedBy": "agentA"
@@ -678,7 +703,7 @@ Successful import:
 }
 ```
 
-Invalid import returns `ok: false`, `error: "invalid-snapshot"`, and an `errors` array. Successful imports broadcast `{ "type": "snapshot-update", "action": "imported", "mode": "replace", "stats": { ... } }` without `requestId`.
+Invalid import returns `ok: false`, `error: "invalid-snapshot"`, and an `errors` array. Snapshot exports always include `revision`; strict import accepts older snapshots without `revision` as revision `1`. Successful imports broadcast `{ "type": "snapshot-update", "action": "imported", "mode": "replace", "stats": { ... } }` without `requestId`.
 
 ## Official MCP Adapter
 
@@ -692,7 +717,7 @@ The adapter uses the same store modules directly; it does not require the WebSoc
 
 Exposed tools:
 
-- `memory_set`: store a JSON value plus optional `summary`, `tags`, `importance`, `ttlMs`, and `expiresAt`.
+- `memory_set`: store a JSON value plus optional `summary`, `tags`, `importance`, `ttlMs`, `expiresAt`, and `ifRevision`.
 - `memory_get`: load the full entry for a key.
 - `memory_search`: return metadata-only search results and `total`.
 - `memory_suggest`: return semantic suggestions; disabled suggestions return an empty list without loading the model.
@@ -809,11 +834,12 @@ The server returns `{ "type": "error", "message": "..." }` for invalid input.
 - Missing or blank `to`: `missing-to`
 - Blank `agentId`: `missing-agentId`
 - Duplicate live agent ID: `duplicate-agent`
-- Invalid metadata: `invalid-summary`, `invalid-tags`, `invalid-importance`, `invalid-expiry`
+- Invalid metadata: `invalid-summary`, `invalid-tags`, `invalid-importance`, `invalid-expiry`, `invalid-ifRevision`
 - Invalid graph request: `invalid-relation`, `invalid-reason`, `invalid-weight`, `invalid-depth`, `invalid-limit`
 - Invalid search request: `invalid-query`, `missing-filter`
 - Invalid suggest request: `missing-context`, `invalid-context`
 - Invalid snapshot request: `missing-snapshot`, `invalid-snapshot`
+- Stale versioned write: `revision-conflict`
 - Relation endpoint does not exist: `missing-node`
 - Self-relation: `self-relation-not-allowed`
 
@@ -822,5 +848,5 @@ The server returns `{ "type": "error", "message": "..." }` for invalid input.
 - State is lost on restart unless `MEMORY_FILE` is configured (SQLite file path).
 - Authentication is a single static token when `MEMORY_TOKEN` is configured; it is not a multi-user identity system.
 - The WebSocket protocol is project-specific; official MCP access is available through `npm run mcp`.
-- Concurrent writes are last-write-wins.
+- Concurrent writes are last-write-wins unless clients use `ifRevision`.
 - The FTS5 search index uses trigram tokenization; queries shorter than 3 characters will return no results.

@@ -9,6 +9,7 @@
 - **Slice 6 - Safe Integration And Fault Report**: implemented in this pass.
 - **Slice 7 - Official MCP Adapter And Real Suggestion Smoke**: implemented in this pass.
 - **Slice 8 - Snapshots / Export / Import**: implemented in this pass.
+- **Slice 9 - Versioned Memory Writes**: implemented in this pass.
 - Current verification target: `node --check` for runtime/test files and `npm test`.
 
 ---
@@ -188,7 +189,41 @@ Add operational safety tools before more advanced retrieval. Snapshots let devel
 
 ---
 
-## Next Candidate Slice - Client SDK / CLI
+## Slice 9 - Versioned Memory Writes
+
+### Summary
+Add per-entry revisions so agents can opt into stale-write protection without breaking legacy clients.
+
+### Key Behavior
+- Entries include `revision`, starting at `1` for new keys and incrementing on successful `set` and `touch`.
+- WebSocket and MCP metadata responses include `revision` wherever entry metadata is returned.
+- `set`, `touch`, and `delete` accept optional `ifRevision`.
+- Omitted `ifRevision` keeps legacy last-write-wins behavior.
+- `ifRevision: null` on `set` is create-only and treats expired entries as replaceable.
+- Stale checks return `revision-conflict` with `key` and `currentRevision`.
+- Snapshot export includes `revision`; strict import accepts missing revision as `1` for old snapshots.
+
+### Tests
+- Store coverage for revision increments, stale-write atomicity, create-only writes, lifecycle checks, and snapshot revision compatibility.
+- WebSocket coverage for revision metadata, conflict errors with request IDs, invalid `ifRevision`, broadcasts, and legacy compatibility.
+- MCP handler and stdio coverage for `memory_set` conflict behavior and revision metadata.
+
+---
+
+## Next Candidate Slice - Batch Transactions
+
+### Summary
+Build on versioned writes with an atomic multi-operation command so agents can store related memories and graph edges as one transaction.
+
+### Candidate Behavior
+- Add a WebSocket `batch` command for ordered `set`, `touch`, `delete`, `relate`, and `unrelate` operations.
+- Add MCP `memory_batch` with the same domain envelope.
+- Validate every operation before mutation, then commit all or none.
+- Support `ifRevision` inside batch operations.
+
+---
+
+## Later Candidate Slice - Client SDK / CLI
 
 ### Summary
 Wrap the stable WebSocket and MCP surfaces in developer tools so agents and humans stop hand-writing protocol envelopes.

@@ -71,20 +71,47 @@ test('MCP handlers set, get, search, and map memory with stable envelopes', asyn
     assert.equal(setResult.ok, true);
     assert.equal(setResult.key, 'project.database');
     assert.equal(setResult.entry.summary, 'Database summary');
+    assert.equal(setResult.entry.revision, 1);
     assert.equal(Object.prototype.hasOwnProperty.call(setResult.entry, 'value'), false);
 
     const getResult = await handlers.memory_get({ key: 'project.database' });
     assert.equal(getResult.ok, true);
     assert.deepEqual(getResult.entry.value, { engine: 'sqlite' });
+    assert.equal(getResult.entry.revision, 1);
+
+    const updateResult = await handlers.memory_set({
+        key: 'project.database',
+        value: { engine: 'sqlite', version: 2 },
+        summary: 'Database summary v2',
+        tags: ['database'],
+        importance: 8,
+        ifRevision: 1,
+    });
+    assert.equal(updateResult.ok, true);
+    assert.equal(updateResult.entry.revision, 2);
+
+    assert.deepEqual(await handlers.memory_set({
+        key: 'project.database',
+        value: { engine: 'stale' },
+        summary: 'Stale update',
+        ifRevision: 1,
+    }), {
+        ok: false,
+        error: 'revision-conflict',
+        key: 'project.database',
+        currentRevision: 2,
+    });
 
     const searchResult = await handlers.memory_search({ tags: ['database'] });
     assert.equal(searchResult.ok, true);
     assert.equal(searchResult.total, 1);
     assert.deepEqual(searchResult.results.map((entry) => entry.key), ['project.database']);
+    assert.equal(searchResult.results[0].revision, 2);
 
     const mapResult = await handlers.memory_map({ key: 'project.database' });
     assert.equal(mapResult.ok, true);
     assert.deepEqual(mapResult.nodes.map((node) => node.key), ['project.database']);
+    assert.equal(mapResult.nodes[0].revision, 2);
 });
 
 test('MCP handlers validate inputs with protocol-compatible domain errors', async () => {
@@ -100,6 +127,10 @@ test('MCP handlers validate inputs with protocol-compatible domain errors', asyn
     assert.deepEqual(await handlers.memory_set({ key: 'x', value: true, ttlMs: 1, expiresAt: 2 }), {
         ok: false,
         error: 'invalid-expiry',
+    });
+    assert.deepEqual(await handlers.memory_set({ key: 'x', value: true, ifRevision: 0 }), {
+        ok: false,
+        error: 'invalid-ifRevision',
     });
     assert.deepEqual(await handlers.memory_search({}), {
         ok: false,

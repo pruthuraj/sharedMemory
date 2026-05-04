@@ -238,6 +238,7 @@ test('MCP stdio tools call shared memory through real protocol', { timeout: 1000
     });
     assert.equal(setResult.ok, true);
     assert.equal(setResult.key, 'project.database');
+    assert.equal(setResult.entry.revision, 1);
     assert.equal(Object.prototype.hasOwnProperty.call(setResult.entry, 'value'), false);
 
     const getResult = await callTool(client, 'memory_get', {
@@ -245,6 +246,30 @@ test('MCP stdio tools call shared memory through real protocol', { timeout: 1000
     });
     assert.equal(getResult.ok, true);
     assert.deepEqual(getResult.entry.value, { engine: 'sqlite' });
+    assert.equal(getResult.entry.revision, 1);
+
+    const updateResult = await callTool(client, 'memory_set', {
+        key: 'project.database',
+        value: { engine: 'sqlite', version: 2 },
+        summary: 'Database summary v2',
+        tags: ['database'],
+        importance: 8,
+        ifRevision: 1,
+    });
+    assert.equal(updateResult.ok, true);
+    assert.equal(updateResult.entry.revision, 2);
+
+    assert.deepEqual(await callTool(client, 'memory_set', {
+        key: 'project.database',
+        value: { engine: 'stale' },
+        summary: 'Stale database summary',
+        ifRevision: 1,
+    }), {
+        ok: false,
+        error: 'revision-conflict',
+        key: 'project.database',
+        currentRevision: 2,
+    });
 
     const searchResult = await callTool(client, 'memory_search', {
         tags: ['database'],
@@ -252,6 +277,7 @@ test('MCP stdio tools call shared memory through real protocol', { timeout: 1000
     assert.equal(searchResult.ok, true);
     assert.equal(searchResult.total, 1);
     assert.deepEqual(searchResult.results.map((entry) => entry.key), ['project.database']);
+    assert.equal(searchResult.results[0].revision, 2);
     assert.equal(Object.prototype.hasOwnProperty.call(searchResult.results[0], 'value'), false);
 
     const mapResult = await callTool(client, 'memory_map', {
@@ -279,6 +305,7 @@ test('MCP stdio tools call shared memory through real protocol', { timeout: 1000
     assert.equal(exported.ok, true);
     assert.deepEqual(exported.stats, { entryCount: 1, edgeCount: 0 });
     assert.deepEqual(Object.keys(exported.snapshot.entries), ['project.database']);
+    assert.equal(exported.snapshot.entries['project.database'].revision, 2);
 
     assert.deepEqual(await callTool(client, 'memory_validate_import', { snapshot: exported.snapshot }), {
         ok: true,
@@ -317,4 +344,5 @@ test('MCP stdio tools call shared memory through real protocol', { timeout: 1000
     });
     const imported = await callTool(client, 'memory_get', { key: 'imported' });
     assert.equal(imported.entry.value, 'replacement');
+    assert.equal(imported.entry.revision, 1);
 });

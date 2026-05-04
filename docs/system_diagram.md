@@ -25,7 +25,7 @@ flowchart LR
     end
 
     subgraph StateLayer["State and recall"]
-        MemoryStore["src/memory-store.js<br/>graph, TTL, search, snapshots"]
+        MemoryStore["src/memory-store.js<br/>graph, TTL, search, snapshots, revisions"]
         SQLite["SQLite via node:sqlite"]
         SuggestionEngine["src/suggestion-engine.js"]
         VectorIndex["src/vector-index.js"]
@@ -101,6 +101,7 @@ erDiagram
         json value_json
         string summary
         int importance
+        int revision
         int expires_at
         int updated_at
         string updated_by
@@ -150,6 +151,30 @@ flowchart TD
     Sort --> Limit["apply node limit with root first"]
     Limit --> Edges["return edges where both endpoints selected"]
     Edges --> Result["metadata-only map-result"]
+```
+
+## Versioned Write Flow
+
+```mermaid
+sequenceDiagram
+    participant Agent as "Agent"
+    participant Server as "src/server.js or src/mcp-tools.js"
+    participant Store as "src/memory-store.js"
+    participant SQLite as "SQLite entries"
+
+    Agent->>Server: "set/touch/delete with optional ifRevision"
+    Server->>Store: "mutation request"
+    Store->>SQLite: "read current revision"
+    alt "ifRevision omitted"
+        Store->>SQLite: "write using next revision"
+        Store-->>Server: "success with revision"
+    else "ifRevision matches"
+        Store->>SQLite: "write using next revision"
+        Store-->>Server: "success with revision"
+    else "ifRevision mismatch"
+        Store-->>Server: "revision-conflict with currentRevision"
+        Server-->>Agent: "structured error"
+    end
 ```
 
 ## Snapshot Flow
@@ -242,13 +267,13 @@ sequenceDiagram
 
 ## Operational Modes
 
-| Mode | Entry | Persistence | Suggestions | Auth |
-| --- | --- | --- | --- | --- |
-| Local WebSocket dev | `npm start` | In-process SQLite unless `MEMORY_FILE` is set | Disabled by default | Disabled unless `MEMORY_TOKEN` is set |
-| Persistent WebSocket | `MEMORY_FILE=data/memory.db npm start` | File-backed SQLite WAL | Disabled by default | Optional bearer token |
-| Semantic WebSocket | `MEMORY_SUGGEST_ENABLED=true npm start` | Same as server config | Enabled and lazy-loads model on first embedding | Optional bearer token |
-| MCP stdio | `npm run mcp` | Honors `MEMORY_FILE` | Disabled unless explicitly enabled | `MEMORY_TOKEN` ignored for local stdio |
-| Real-model smoke | `npm run smoke:suggest` | Uses running WebSocket server | Requires server suggestions enabled | Uses `MEMORY_TOKEN` if configured |
+| Mode                 | Entry                                   | Persistence                                   | Suggestions                                     | Auth                                   |
+| -------------------- | --------------------------------------- | --------------------------------------------- | ----------------------------------------------- | -------------------------------------- |
+| Local WebSocket dev  | `npm start`                             | In-process SQLite unless `MEMORY_FILE` is set | Disabled by default                             | Disabled unless `MEMORY_TOKEN` is set  |
+| Persistent WebSocket | `MEMORY_FILE=data/memory.db npm start`  | File-backed SQLite WAL                        | Disabled by default                             | Optional bearer token                  |
+| Semantic WebSocket   | `MEMORY_SUGGEST_ENABLED=true npm start` | Same as server config                         | Enabled and lazy-loads model on first embedding | Optional bearer token                  |
+| MCP stdio            | `npm run mcp`                           | Honors `MEMORY_FILE`                          | Disabled unless explicitly enabled              | `MEMORY_TOKEN` ignored for local stdio |
+| Real-model smoke     | `npm run smoke:suggest`                 | Uses running WebSocket server                 | Requires server suggestions enabled             | Uses `MEMORY_TOKEN` if configured      |
 
 ## Verification Surface
 

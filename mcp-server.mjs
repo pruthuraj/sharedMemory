@@ -32,6 +32,7 @@ function registerSharedMemoryTools(server, handlers) {
                 importance: looseInput,
                 ttlMs: looseInput,
                 expiresAt: looseInput,
+                ifRevision: looseInput,
             }),
             outputSchema,
         },

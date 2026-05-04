@@ -30,6 +30,7 @@ function metadataOnly(entry) {
         summary: entry.summary,
         tags: Array.isArray(entry.tags) ? entry.tags.slice() : [],
         importance: entry.importance,
+        revision: entry.revision,
         expiresAt: entry.expiresAt ?? null,
         updatedAt: entry.updatedAt,
         updatedBy: entry.updatedBy,
@@ -40,8 +41,8 @@ function ok(payload = {}) {
     return { ok: true, ...payload };
 }
 
-function fail(error) {
-    return { ok: false, error };
+function fail(error, details = {}) {
+    return { ok: false, error, ...details };
 }
 
 function validateKey(input) {
@@ -58,6 +59,13 @@ function validateSetInput(input) {
     if (hasOwn(input, 'summary') && !isNonEmptyString(input.summary)) return 'invalid-summary';
     if (hasOwn(input, 'tags') && !hasValidTags(input.tags)) return 'invalid-tags';
     if (hasOwn(input, 'importance') && !isIntegerInRange(input.importance, 0, 10)) return 'invalid-importance';
+    if (
+        hasOwn(input, 'ifRevision')
+        && input.ifRevision !== null
+        && !isPositiveInteger(input.ifRevision)
+    ) {
+        return 'invalid-ifRevision';
+    }
     return null;
 }
 
@@ -144,13 +152,22 @@ function createSharedMemoryToolHandlers(options) {
             const error = validateSetInput(input);
             if (error) return fail(error);
 
-            const entry = memory.set(input.key, input.value, updatedBy, {
+            const metadata = {
                 summary: input.summary,
                 tags: input.tags,
                 importance: input.importance,
                 ttlMs: input.ttlMs,
                 expiresAt: input.expiresAt,
-            });
+            };
+            if (hasOwn(input, 'ifRevision')) metadata.ifRevision = input.ifRevision;
+
+            const entry = memory.set(input.key, input.value, updatedBy, metadata);
+            if (entry && entry.ok === false) {
+                return fail(entry.error, {
+                    key: entry.key,
+                    currentRevision: entry.currentRevision,
+                });
+            }
 
             if (suggestionEngine && typeof suggestionEngine.upsertMemory === 'function') {
                 await suggestionEngine.upsertMemory(input.key, entry);

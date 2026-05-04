@@ -24,6 +24,7 @@ function normalizeMetadata(key, metadata = {}, now = Date.now()) {
         summary: typeof metadata.summary === 'string' ? metadata.summary : '',
         tags: Array.isArray(metadata.tags) ? metadata.tags.slice() : [],
         importance: Number.isInteger(metadata.importance) ? metadata.importance : 0,
+        revision: Number.isInteger(metadata.revision) ? metadata.revision : 1,
         expiresAt: typeof metadata.expiresAt === 'number' && Number.isFinite(metadata.expiresAt)
             ? metadata.expiresAt
             : null,
@@ -234,6 +235,7 @@ function createSuggestionEngine(options = {}) {
                     summary: record.summary,
                     tags: record.tags.slice(),
                     importance: record.importance,
+                    revision: record.revision,
                     score: Number(ranked.score.toFixed(6)),
                     reasons: ranked.reasons,
                     updatedAt: record.updatedAt,

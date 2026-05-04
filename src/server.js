@@ -149,6 +149,18 @@ function createSharedMemoryServer(options = {}) {
         };
     }
 
+    function sendStoreError(ws, result, requestId) {
+        const response = {
+            type: 'error',
+            message: result.error,
+            requestId,
+        };
+
+        if (hasOwn(result, 'key')) response.key = result.key;
+        if (hasOwn(result, 'currentRevision')) response.currentRevision = result.currentRevision;
+        safeSend(ws, response);
+    }
+
     function upsertSuggestionMemory(key, entry) {
         if (!suggestionEngine || typeof suggestionEngine.upsertMemory !== 'function') return;
         Promise.resolve(suggestionEngine.upsertMemory(key, entry))
@@ -256,14 +268,28 @@ function createSharedMemoryServer(options = {}) {
                 }
 
                 case 'set': {
-                    const entry = memory.set(data.key, data.value, agentId, {
+                    const metadata = {
                         summary: data.summary,
                         tags: data.tags,
                         importance: data.importance,
                         ttlMs: data.ttlMs,
                         expiresAt: data.expiresAt,
+                    };
+                    if (hasOwn(data, 'ifRevision')) metadata.ifRevision = data.ifRevision;
+
+                    const entry = memory.set(data.key, data.value, agentId, metadata);
+                    if (entry && entry.ok === false) {
+                        sendStoreError(ws, entry, requestId);
+                        break;
+                    }
+
+                    safeSend(ws, {
+                        type: 'ok',
+                        action: 'set',
+                        key: data.key,
+                        revision: entry.revision,
+                        requestId,
                     });
-                    safeSend(ws, { type: 'ok', action: 'set', key: data.key, requestId });
                     upsertSuggestionMemory(data.key, entry);
                     notifyKeyUpdate(agents, data.key, entry);
                     notifyLinkedAgents(agents, agentId, { action: 'set', key: data.key, entry });
@@ -293,13 +319,16 @@ function createSharedMemoryServer(options = {}) {
                 }
 
                 case 'touch': {
-                    const result = memory.touch(data.key, agentId, {
+                    const metadata = {
                         ttlMs: data.ttlMs,
                         expiresAt: data.expiresAt,
-                    });
+                    };
+                    if (hasOwn(data, 'ifRevision')) metadata.ifRevision = data.ifRevision;
+
+                    const result = memory.touch(data.key, agentId, metadata);
 
                     if (!result.ok) {
-                        safeSend(ws, { type: 'error', message: result.error, requestId });
+                        sendStoreError(ws, result, requestId);
                         break;
                     }
 
@@ -365,8 +394,22 @@ function createSharedMemoryServer(options = {}) {
                 }
 
                 case 'delete': {
-                    const result = memory.delete(data.key);
-                    safeSend(ws, { type: 'deleted', key: data.key, removed: result.removed, requestId });
+                    const options = {};
+                    if (hasOwn(data, 'ifRevision')) options.ifRevision = data.ifRevision;
+
+                    const result = memory.delete(data.key, options);
+                    if (result.ok === false) {
+                        sendStoreError(ws, result, requestId);
+                        break;
+                    }
+
+                    safeSend(ws, {
+                        type: 'deleted',
+                        key: data.key,
+                        removed: result.removed,
+                        revision: result.revision,
+                        requestId,
+                    });
                     if (result.removed) {
                         removeSuggestionMemory(data.key);
                         notifyKeyUpdate(agents, data.key, null, { action: 'deleted' });

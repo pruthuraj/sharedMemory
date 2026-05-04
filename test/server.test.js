@@ -190,6 +190,7 @@ test('register, set, get, list, and status remain compatible', async () => {
             type: 'ok',
             action: 'set',
             key: 'greeting',
+            revision: 1,
         });
 
         client.send({ type: 'get', key: 'greeting' });
@@ -198,6 +199,7 @@ test('register, set, get, list, and status remain compatible', async () => {
         assert.equal(result.entry.value, 'hello');
         assert.equal(result.entry.updatedBy, 'agentA');
         assert.equal(typeof result.entry.updatedAt, 'number');
+        assert.equal(result.entry.revision, 1);
 
         client.send({ type: 'list' });
         assert.deepEqual(await client.waitFor((message) => message.type === 'list'), {
@@ -354,6 +356,7 @@ test('auth enabled blocks protected commands until valid auth unlocks the socket
             type: 'ok',
             action: 'set',
             key: 'allowed',
+            revision: 1,
             requestId: 'allowed-1',
         });
     } finally {
@@ -480,6 +483,156 @@ test('set supports metadata and fallback summaries', async () => {
         assert.deepEqual(await client.waitFor((message) => message.message === 'invalid-importance'), {
             type: 'error',
             message: 'invalid-importance',
+        });
+    } finally {
+        await appServer.close();
+    }
+});
+
+test('versioned WebSocket writes expose revisions and reject stale mutations', async () => {
+    const { appServer, wsUrl } = await startServer();
+
+    try {
+        const writer = await connectClient(wsUrl);
+        await writer.waitFor((message) => message.type === 'welcome');
+        writer.send({ type: 'register', agentId: 'agentA' });
+        await writer.waitFor((message) => message.type === 'registered');
+
+        const observer = await connectClient(wsUrl);
+        await observer.waitFor((message) => message.type === 'welcome');
+        observer.send({ type: 'register', agentId: 'agentB' });
+        await observer.waitFor((message) => message.type === 'registered');
+        observer.send({ type: 'subscribe', key: 'versioned' });
+        await observer.waitFor((message) => message.type === 'subscribed' && message.key === 'versioned');
+
+        writer.send({
+            type: 'set',
+            key: 'versioned',
+            value: 'v1',
+            summary: 'Versioned v1',
+            tags: ['versioned'],
+            importance: 5,
+            ifRevision: null,
+            requestId: 'create-only',
+        });
+        assert.deepEqual(await writer.waitFor((message) => message.requestId === 'create-only'), {
+            type: 'ok',
+            action: 'set',
+            key: 'versioned',
+            revision: 1,
+            requestId: 'create-only',
+        });
+        await observer.waitFor(
+            (message) => message.type === 'update' && message.key === 'versioned' && message.entry.revision === 1,
+        );
+
+        writer.send({
+            type: 'set',
+            key: 'versioned',
+            value: 'blocked',
+            summary: 'Blocked',
+            ifRevision: null,
+            requestId: 'create-conflict',
+        });
+        assert.deepEqual(await writer.waitFor((message) => message.requestId === 'create-conflict'), {
+            type: 'error',
+            message: 'revision-conflict',
+            key: 'versioned',
+            currentRevision: 1,
+            requestId: 'create-conflict',
+        });
+
+        writer.send({
+            type: 'set',
+            key: 'versioned',
+            value: 'v2',
+            summary: 'Versioned v2',
+            tags: ['versioned', 'updated'],
+            importance: 6,
+            ifRevision: 1,
+            requestId: 'set-v2',
+        });
+        assert.deepEqual(await writer.waitFor((message) => message.requestId === 'set-v2'), {
+            type: 'ok',
+            action: 'set',
+            key: 'versioned',
+            revision: 2,
+            requestId: 'set-v2',
+        });
+
+        writer.send({
+            type: 'set',
+            key: 'versioned',
+            value: 'stale',
+            summary: 'Stale',
+            ifRevision: 1,
+            requestId: 'stale-set',
+        });
+        assert.deepEqual(await writer.waitFor((message) => message.requestId === 'stale-set'), {
+            type: 'error',
+            message: 'revision-conflict',
+            key: 'versioned',
+            currentRevision: 2,
+            requestId: 'stale-set',
+        });
+
+        writer.send({ type: 'touch', key: 'versioned', ifRevision: 2, requestId: 'touch-v3' });
+        const touchAck = await writer.waitFor((message) => message.requestId === 'touch-v3');
+        assert.equal(touchAck.type, 'touched');
+        assert.equal(touchAck.entry.revision, 3);
+
+        writer.send({ type: 'touch', key: 'versioned', ifRevision: 2, requestId: 'stale-touch' });
+        assert.deepEqual(await writer.waitFor((message) => message.requestId === 'stale-touch'), {
+            type: 'error',
+            message: 'revision-conflict',
+            key: 'versioned',
+            currentRevision: 3,
+            requestId: 'stale-touch',
+        });
+
+        writer.send({ type: 'get', key: 'versioned', requestId: 'get-versioned' });
+        const getResult = await writer.waitFor((message) => message.requestId === 'get-versioned');
+        assert.equal(getResult.entry.value, 'v2');
+        assert.equal(getResult.entry.revision, 3);
+
+        writer.send({ type: 'search', tags: ['updated'], requestId: 'search-versioned' });
+        const searchResult = await writer.waitFor((message) => message.requestId === 'search-versioned');
+        assert.equal(searchResult.results[0].revision, 3);
+
+        writer.send({ type: 'map', key: 'versioned', requestId: 'map-versioned' });
+        const mapResult = await writer.waitFor((message) => message.requestId === 'map-versioned');
+        assert.equal(mapResult.nodes[0].revision, 3);
+
+        writer.send({ type: 'delete', key: 'versioned', ifRevision: 2, requestId: 'stale-delete' });
+        assert.deepEqual(await writer.waitFor((message) => message.requestId === 'stale-delete'), {
+            type: 'error',
+            message: 'revision-conflict',
+            key: 'versioned',
+            currentRevision: 3,
+            requestId: 'stale-delete',
+        });
+
+        writer.send({ type: 'delete', key: 'versioned', ifRevision: 3, requestId: 'delete-current' });
+        assert.deepEqual(await writer.waitFor((message) => message.requestId === 'delete-current'), {
+            type: 'deleted',
+            key: 'versioned',
+            removed: true,
+            revision: 3,
+            requestId: 'delete-current',
+        });
+
+        writer.send({ type: 'set', key: 'bad-revision', value: true, ifRevision: 0, requestId: 'bad-rev' });
+        assert.deepEqual(await writer.waitFor((message) => message.requestId === 'bad-rev'), {
+            type: 'error',
+            message: 'invalid-ifRevision',
+            requestId: 'bad-rev',
+        });
+
+        writer.send({ type: 'delete', key: 'bad-revision', ifRevision: null, requestId: 'bad-delete-rev' });
+        assert.deepEqual(await writer.waitFor((message) => message.requestId === 'bad-delete-rev'), {
+            type: 'error',
+            message: 'invalid-ifRevision',
+            requestId: 'bad-delete-rev',
         });
     } finally {
         await appServer.close();
@@ -637,6 +790,7 @@ test('unrelate and delete emit distinct graph lifecycle notifications', async ()
             type: 'deleted',
             key: 'nodeA',
             removed: true,
+            revision: 1,
         });
         await subscriber.waitFor(
             (message) => message.type === 'update' && message.key === 'nodeA' && message.action === 'deleted',
@@ -728,6 +882,7 @@ test('idempotent unrelate and delete do not emit false state-change broadcasts',
             type: 'deleted',
             key: 'ghost',
             removed: false,
+            revision: null,
             requestId: 'noop-delete',
         });
         await sleep(50);
@@ -747,6 +902,7 @@ test('idempotent unrelate and delete do not emit false state-change broadcasts',
             type: 'deleted',
             key: 'ghost',
             removed: true,
+            revision: 1,
             requestId: 'real-delete',
         });
         await subscriber.waitFor(
@@ -1074,6 +1230,7 @@ test('link, unlink, and offline linked targets are safe', async () => {
             type: 'ok',
             action: 'set',
             key: 'safe',
+            revision: 1,
         });
 
         agent.send({ type: 'unlink', target: 'offlineTarget' });
