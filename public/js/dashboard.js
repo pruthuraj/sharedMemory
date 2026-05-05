@@ -1200,6 +1200,14 @@ function formatImportErrors(errors = []) {
   `;
 }
 
+function formatImportStats(stats = {}, mode = 'replace') {
+    if (mode === 'merge') {
+        return `${stats.entriesAdded ?? 0} entries will be added, ${stats.entriesSkipped ?? 0} existing entries skipped, ${stats.edgesAdded ?? 0} edges will be added, and ${stats.edgesSkipped ?? 0} duplicate edges skipped.`;
+    }
+
+    return `${stats.entryCount ?? 0} entries, ${stats.edgeCount ?? 0} edges`;
+}
+
 async function handleImportFile(file) {
     if (!file) return;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
@@ -1225,6 +1233,7 @@ async function handleImportFile(file) {
     setImportResult('pending', 'Validating snapshot with server...');
     const response = await wsRpc({
         type: 'validate-import',
+        mode: 'merge',
         snapshot,
         requestId: makeRequestId('validate_import'),
     });
@@ -1243,19 +1252,19 @@ async function handleImportFile(file) {
 
     importSnapshotDraft = snapshot;
     importConfirmBtn.disabled = false;
-    const stats = response.stats || {};
-    importSummary.textContent = `${stats.entryCount ?? 0} entries, ${stats.edgeCount ?? 0} edges`;
-    setImportResult('ok', 'Snapshot is valid. Import will replace the current graph.');
+    importSummary.textContent = formatImportStats(response.stats || {}, response.mode || 'merge');
+    setImportResult('ok', 'Snapshot is valid. Import will add to the current memory. Existing memories will not be deleted or overwritten.');
 }
 
 async function importValidatedSnapshot() {
     if (!importSnapshotDraft) return;
-    if (!window.confirm('Import will replace the current memory graph. Continue?')) return;
+    if (!window.confirm('Import will add to the current memory. Existing memories will not be deleted or overwritten. Continue?')) return;
 
     importConfirmBtn.disabled = true;
     setImportResult('pending', 'Importing snapshot...');
     const response = await wsRpc({
         type: 'import',
+        mode: 'merge',
         snapshot: importSnapshotDraft,
         requestId: makeRequestId('import_snapshot'),
     });
@@ -1268,7 +1277,7 @@ async function importValidatedSnapshot() {
     }
 
     const stats = response.stats || {};
-    setImportResult('ok', `Imported ${stats.entryCount ?? 0} entries and ${stats.edgeCount ?? 0} edges.`);
+    setImportResult('ok', `Added ${stats.entriesAdded ?? 0} entries and ${stats.edgesAdded ?? 0} edges. Skipped ${stats.entriesSkipped ?? 0} existing entries and ${stats.edgesSkipped ?? 0} duplicate edges.`);
     importSnapshotDraft = null;
     importConfirmBtn.disabled = true;
     await loadGraph({ preserveView: false });

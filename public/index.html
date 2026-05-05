@@ -75,10 +75,10 @@
     </div>
     <div class="import-body">
       <input id="import-file" type="file" accept="application/json,.json" />
-      <div class="import-note">Import is strict and replace-only. A successful import replaces the current graph.</div>
+      <div class="import-note">Uploads add to the current memory by default. Existing memories will not be deleted or overwritten.</div>
       <div class="import-result" id="import-result"></div>
       <div class="import-actions">
-        <button id="import-confirm-btn" class="primary" disabled>Import Replace</button>
+        <button id="import-confirm-btn" class="primary" disabled>Add to Memory</button>
         <button id="import-cancel-btn">Cancel</button>
       </div>
     </div>

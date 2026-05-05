@@ -153,6 +153,12 @@ Use `MEMORY_FILE` if you want persistence, or omit it for an in-memory store. Th
 - `memory_validate_import`
 - `memory_import`
 
+Snapshot imports support two modes:
+
+- `merge` adds new memories and relations into the existing graph, skipping keys and edges that already exist.
+- `replace` is the explicit destructive restore path and remains the default for backward compatibility.
+
+The dashboard import flow uses `merge` by default, so uploaded JSON adds to the current memory unless you call the lower-level replace mode directly.
 For other MCP clients, launch `node mcp-server.mjs` as a stdio process and register the same tools. If you want the browser UI at the same time, keep `npm start` running separately for the WebSocket dashboard.
 
 ## HTTP Status
@@ -230,6 +236,15 @@ MEMORY_FILE=data/memory.db npm start
 The server opens (or creates) a SQLite database at the given path. A missing file starts with an empty graph. An invalid or corrupt file fails startup with a clear error message. Edges that reference missing memory entries are dropped during `importState` to preserve graph integrity.
 
 Every write (`set`, `touch`, `relate`, `unrelate`, `delete`, `prune`) is immediately durable; SQLite writes are committed synchronously to WAL before the command response is sent. The dirty flag and debounced flush still exist as a semantic acknowledgment layer; `close()`, `SIGINT`, and `SIGTERM` clear the dirty flag before the process exits.
+
+## Snapshot Import
+
+The WebSocket dashboard and MCP tools accept snapshot imports in either `merge` or `replace` mode.
+
+- `merge` validates the incoming snapshot, adds only new entries and edges, and leaves existing memory untouched.
+- `replace` validates the incoming snapshot and replaces the current graph with the imported one.
+- Dashboard uploads default to `merge` so imported files are added to the current memory.
+- Use `replace` only when you want a destructive restore from a backup snapshot.
 
 ## WebSocket Protocol
 
@@ -725,7 +740,7 @@ Response:
 
 ### Snapshots
 
-Snapshots export and restore the full graph, including memory values. Public import is strict and replace-only: invalid snapshots are rejected before the store mutates.
+Snapshots export and restore the full graph, including memory values. Public import supports both merge and replace modes: merge is additive by default in the dashboard, while replace remains the explicit destructive restore path.
 
 Export:
 

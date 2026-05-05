@@ -253,7 +253,7 @@ function validateSnapshotEdge(edge, index, validKeys, seenEdges, errors) {
     };
 }
 
-function validateSnapshot(snapshot) {
+function validateSnapshotReplace(snapshot) {
     const errors = [];
 
     if (!isPlainObject(snapshot)) {
@@ -316,6 +316,172 @@ function validateSnapshot(snapshot) {
         stats: snapshotStats(normalizedSnapshot),
         snapshot: normalizedSnapshot,
     };
+}
+
+function validateMergeSnapshotEdge(edge, index, validKeys, seenEdges, existingEdgeIds, errors) {
+    const pathPrefix = `edges.${index}`;
+    const initialErrorCount = errors.length;
+
+    if (!isPlainObject(edge)) {
+        errors.push(snapshotError(pathPrefix, 'invalid-edge'));
+        return null;
+    }
+
+    if (!isNonEmptyString(edge.from)) {
+        errors.push(snapshotError(`${pathPrefix}.from`, 'missing-from'));
+    }
+
+    if (!isNonEmptyString(edge.to)) {
+        errors.push(snapshotError(`${pathPrefix}.to`, 'missing-to'));
+    }
+
+    if (edge.from === edge.to && isNonEmptyString(edge.from)) {
+        errors.push(snapshotError(pathPrefix, 'self-relation-not-allowed'));
+    }
+
+    if (!isNonEmptyString(edge.relation) || !RELATION_TYPES.has(edge.relation)) {
+        errors.push(snapshotError(`${pathPrefix}.relation`, 'invalid-relation'));
+    }
+
+    if (isNonEmptyString(edge.from) && !validKeys.has(edge.from)) {
+        errors.push(snapshotError(`${pathPrefix}.from`, 'dangling-edge'));
+    }
+
+    if (isNonEmptyString(edge.to) && !validKeys.has(edge.to)) {
+        errors.push(snapshotError(`${pathPrefix}.to`, 'dangling-edge'));
+    }
+
+    const id = isNonEmptyString(edge.from) && isNonEmptyString(edge.to) && isNonEmptyString(edge.relation)
+        ? edgeId(edge.from, edge.relation, edge.to)
+        : null;
+    const duplicate = Boolean(id && (existingEdgeIds.has(id) || seenEdges.has(id)));
+    if (id && !duplicate) {
+        seenEdges.add(id);
+    }
+
+    if (!hasOwn(edge, 'reason') || typeof edge.reason !== 'string') {
+        errors.push(snapshotError(`${pathPrefix}.reason`, 'invalid-reason'));
+    }
+
+    if (!hasOwn(edge, 'weight') || !isValidWeight(edge.weight)) {
+        errors.push(snapshotError(`${pathPrefix}.weight`, 'invalid-weight'));
+    }
+
+    if (!hasOwn(edge, 'updatedAt') || !isNonNegativeInteger(edge.updatedAt)) {
+        errors.push(snapshotError(`${pathPrefix}.updatedAt`, 'invalid-updatedAt'));
+    }
+
+    if (!hasOwn(edge, 'updatedBy') || !isNullableString(edge.updatedBy)) {
+        errors.push(snapshotError(`${pathPrefix}.updatedBy`, 'invalid-updatedBy'));
+    }
+
+    if (errors.length > initialErrorCount) return null;
+    if (duplicate) return { duplicate: true };
+
+    return {
+        from: edge.from,
+        to: edge.to,
+        relation: edge.relation,
+        reason: edge.reason,
+        weight: edge.weight,
+        updatedAt: edge.updatedAt,
+        updatedBy: edge.updatedBy,
+    };
+}
+
+function validateSnapshotMerge(snapshot, existingKeys = new Set(), existingEdgeIds = new Set()) {
+    const errors = [];
+
+    if (!isPlainObject(snapshot)) {
+        return {
+            ok: false,
+            errors: [snapshotError('snapshot', 'invalid-snapshot')],
+            stats: null,
+        };
+    }
+
+    if (!isPlainObject(snapshot.entries)) {
+        errors.push(snapshotError('entries', 'invalid-entries'));
+    }
+
+    if (!Array.isArray(snapshot.edges)) {
+        errors.push(snapshotError('edges', 'invalid-edges'));
+    }
+
+    if (errors.length > 0) {
+        return { ok: false, errors, stats: null };
+    }
+
+    const normalizedEntries = {};
+    const validKeys = new Set(existingKeys);
+    let entriesAdded = 0;
+    let entriesSkipped = 0;
+
+    for (const key of Object.keys(snapshot.entries).sort()) {
+        const normalized = validateSnapshotEntry(key, snapshot.entries[key], errors);
+        if (!normalized) continue;
+
+        if (existingKeys.has(key)) {
+            entriesSkipped += 1;
+            continue;
+        }
+
+        normalizedEntries[key] = normalized;
+        validKeys.add(key);
+        entriesAdded += 1;
+    }
+
+    const normalizedEdges = [];
+    const seenEdges = new Set(existingEdgeIds);
+    let edgesAdded = 0;
+    let edgesSkipped = 0;
+
+    snapshot.edges.forEach((edge, index) => {
+        const normalized = validateMergeSnapshotEdge(edge, index, validKeys, seenEdges, existingEdgeIds, errors);
+        if (!normalized) return;
+        if (normalized.duplicate) {
+            edgesSkipped += 1;
+            return;
+        }
+
+        normalizedEdges.push(normalized);
+        edgesAdded += 1;
+    });
+
+    if (errors.length > 0) {
+        return { ok: false, errors, stats: null };
+    }
+
+    normalizedEdges.sort((a, b) => {
+        const byFrom = a.from.localeCompare(b.from);
+        if (byFrom !== 0) return byFrom;
+        const byRelation = a.relation.localeCompare(b.relation);
+        if (byRelation !== 0) return byRelation;
+        return a.to.localeCompare(b.to);
+    });
+
+    return {
+        ok: true,
+        errors: [],
+        stats: {
+            entriesAdded,
+            entriesSkipped,
+            edgesAdded,
+            edgesSkipped,
+        },
+        snapshot: {
+            entries: normalizedEntries,
+            edges: normalizedEdges,
+        },
+    };
+}
+
+function validateSnapshot(snapshot, options = {}) {
+    if (options.mode === 'merge') {
+        return validateSnapshotMerge(snapshot, options.existingKeys, options.existingEdgeIds);
+    }
+
+    return validateSnapshotReplace(snapshot);
 }
 
 function initSchema(db) {
@@ -684,6 +850,51 @@ function createMemoryStore(options = {}) {
         }
     });
 
+    const doMerge = inTransaction((state) => {
+        if (!isPlainObject(state)) return;
+
+        const loadedEntries = isPlainObject(state.entries) ? state.entries : {};
+        for (const [key, entry] of Object.entries(loadedEntries)) {
+            if (!isNonEmptyString(key) || !isPlainObject(entry)) continue;
+
+            const summary = isNonEmptyString(entry.summary) ? entry.summary : safeSummary(entry.value);
+            const importance = isValidImportance(entry.importance) ? entry.importance : DEFAULT_IMPORTANCE;
+            const revision = isPositiveInteger(entry.revision) ? entry.revision : 1;
+            const expiresAt = isPositiveInteger(entry.expiresAt) ? entry.expiresAt : null;
+            const updatedAt = typeof entry.updatedAt === 'number' && Number.isFinite(entry.updatedAt)
+                ? entry.updatedAt
+                : now();
+            const updatedBy = entry.updatedBy !== undefined ? entry.updatedBy : null;
+            const tags = normalizeTags(entry.tags);
+
+            stmts.upsertEntry.run(key, JSON.stringify(entry.value), summary, importance, revision, expiresAt, updatedAt, updatedBy);
+            for (const tag of tags) {
+                stmts.insertTag.run(key, tag);
+            }
+            const rowidRow = stmts.getEntryRowid.get(key);
+            stmts.ftsInsert.run(rowidRow.rowid, key, ftsBody(key, summary, tags));
+        }
+
+        const loadedEdges = Array.isArray(state.edges) ? state.edges : [];
+        for (const edge of loadedEdges) {
+            if (!isPlainObject(edge)) continue;
+            if (!isNonEmptyString(edge.from) || !isNonEmptyString(edge.to)) continue;
+            if (edge.from === edge.to) continue;
+            if (!isNonEmptyString(edge.relation) || !RELATION_TYPES.has(edge.relation)) continue;
+            if (!stmts.getEntry.get(edge.from) || !stmts.getEntry.get(edge.to)) continue;
+
+            const id = edgeId(edge.from, edge.relation, edge.to);
+            const reason = isNonEmptyString(edge.reason) ? edge.reason : '';
+            const weight = isValidWeight(edge.weight) ? edge.weight : 1;
+            const updatedAt = typeof edge.updatedAt === 'number' && Number.isFinite(edge.updatedAt)
+                ? edge.updatedAt
+                : now();
+            const updatedBy = edge.updatedBy !== undefined ? edge.updatedBy : null;
+
+            stmts.upsertEdge.run(id, edge.from, edge.to, edge.relation, reason, weight, updatedAt, updatedBy);
+        }
+    });
+
     // Accepts ttlMs (ms from now) or expiresAt (absolute ms timestamp); ttlMs takes precedence.
     function normalizeExpiry(metadata = {}) {
         if (isPositiveInteger(metadata.ttlMs)) {
@@ -767,6 +978,14 @@ function createMemoryStore(options = {}) {
         const row = stmts.getEntry.get(key);
         if (!row || row.expires_at === null || row.expires_at === undefined) return false;
         return row.expires_at <= now();
+    }
+
+    function currentKeySet() {
+        return new Set(stmts.allEntries.all().map((row) => row.key));
+    }
+
+    function currentEdgeIdSet() {
+        return new Set(stmts.allEdges.all().map((row) => row.edge_id));
     }
 
     function exportState() {
@@ -1119,16 +1338,30 @@ function createMemoryStore(options = {}) {
 
         validateSnapshot,
 
-        importSnapshot(snapshot) {
-            const validation = validateSnapshot(snapshot);
+        importSnapshot(snapshot, options = {}) {
+            const mode = options.mode === 'merge' ? 'merge' : 'replace';
+            const validation = validateSnapshot(snapshot, mode === 'merge' ? {
+                mode,
+                existingKeys: currentKeySet(),
+                existingEdgeIds: currentEdgeIdSet(),
+            } : {});
             if (!validation.ok) return validation;
-            doImport(validation.snapshot);
+            if (mode === 'merge') {
+                doMerge(validation.snapshot);
+            } else {
+                doImport(validation.snapshot);
+            }
             markDirty();
             return {
                 ok: true,
                 errors: [],
+                ...(mode === 'merge' ? { mode } : {}),
                 stats: validation.stats,
             };
+        },
+
+        mergeSnapshot(snapshot) {
+            return this.importSnapshot(snapshot, { mode: 'merge' });
         },
 
         importState(state) {

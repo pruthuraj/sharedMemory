@@ -126,6 +126,11 @@ function validateSnapshotInput(input) {
     return hasOwn(input, 'snapshot') ? null : 'missing-snapshot';
 }
 
+function validateImportMode(input) {
+    if (!hasOwn(input, 'mode')) return null;
+    return input.mode === 'replace' || input.mode === 'merge' ? null : 'invalid-mode';
+}
+
 function statsForSnapshot(snapshot) {
     return {
         entryCount: Object.keys(snapshot.entries).length,
@@ -164,6 +169,26 @@ async function refreshSuggestionIndexAfterImport(memory, suggestionEngine, previ
     }
 
     await refreshSuggestionIndex(memory, suggestionEngine);
+}
+
+async function refreshSuggestionIndexAfterMerge(memory, suggestionEngine, previousKeys) {
+    if (!suggestionEngine || typeof suggestionEngine.status !== 'function') return;
+    if (suggestionEngine.status().enabled !== true) return;
+
+    const visibleKeys = new Set(memory.keys());
+    if (typeof suggestionEngine.upsertMemory !== 'function') return;
+
+    for (const key of visibleKeys) {
+        if (previousKeys.has(key)) continue;
+        const entry = memory.get(key);
+        if (entry) {
+            await suggestionEngine.upsertMemory(key, entry);
+        }
+    }
+
+    if (typeof suggestionEngine.flushQueue === 'function') {
+        await suggestionEngine.flushQueue();
+    }
 }
 
 function createSharedMemoryToolHandlers(options) {
@@ -279,33 +304,51 @@ function createSharedMemoryToolHandlers(options) {
         async memory_validate_import(input = {}) {
             const error = validateSnapshotInput(input);
             if (error) return fail(error);
-            const result = memory.validateSnapshot(input.snapshot);
+            const modeError = validateImportMode(input);
+            if (modeError) return fail(modeError);
+            const mode = input.mode === 'merge' ? 'merge' : 'replace';
+            const state = mode === 'merge' ? memory.exportState() : null;
+            const result = memory.validateSnapshot(input.snapshot, mode === 'merge' ? {
+                mode,
+                existingKeys: new Set(Object.keys(state.entries)),
+                existingEdgeIds: new Set(state.edges.map((edge) => `${edge.from}\u001f${edge.relation}\u001f${edge.to}`)),
+            } : {});
             if (!result.ok) {
                 return {
                     ok: false,
                     error: 'invalid-snapshot',
                     errors: result.errors,
                     stats: result.stats,
+                    ...(mode === 'merge' ? { mode } : {}),
                 };
             }
-            return ok({ errors: [], stats: result.stats });
+            return ok({ errors: [], stats: result.stats, ...(mode === 'merge' ? { mode } : {}) });
         },
 
         async memory_import(input = {}) {
             const error = validateSnapshotInput(input);
             if (error) return fail(error);
+            const modeError = validateImportMode(input);
+            if (modeError) return fail(modeError);
+            const mode = input.mode === 'merge' ? 'merge' : 'replace';
             const previousKeys = new Set(Object.keys(memory.exportState().entries));
-            const result = memory.importSnapshot(input.snapshot);
+            const result = memory.importSnapshot(input.snapshot, { mode });
             if (!result.ok) {
                 return {
                     ok: false,
                     error: 'invalid-snapshot',
                     errors: result.errors,
+                    ...(mode === 'merge' ? { mode } : {}),
                 };
             }
 
-            await refreshSuggestionIndexAfterImport(memory, suggestionEngine, previousKeys);
-            return ok({ mode: 'replace', stats: result.stats });
+            if (mode === 'merge') {
+                await refreshSuggestionIndexAfterMerge(memory, suggestionEngine, previousKeys);
+            } else {
+                await refreshSuggestionIndexAfterImport(memory, suggestionEngine, previousKeys);
+            }
+
+            return ok({ ...(mode === 'merge' ? { mode } : {}), stats: result.stats });
         },
     };
 }

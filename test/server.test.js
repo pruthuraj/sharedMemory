@@ -168,7 +168,7 @@ function createKeywordEmbedder() {
         status() {
             return { modelId: 'fake-keyword-embedder', loaded: true };
         },
-        async dispose() {},
+        async dispose() { },
     };
 }
 
@@ -242,6 +242,129 @@ test('register, set, get, list, and status remain compatible', async () => {
                 lastImportStats: null,
             },
         });
+    } finally {
+        await appServer.close();
+    }
+});
+test('snapshot merge import preserves existing graph and broadcasts merge mode', async () => {
+    const { appServer, wsUrl } = await startServer();
+
+    try {
+        const actor = await connectClient(wsUrl);
+        await actor.waitFor((message) => message.type === 'welcome');
+        actor.send({ type: 'register', agentId: 'actor' });
+        await actor.waitFor((message) => message.type === 'registered');
+
+        const observer = await connectClient(wsUrl);
+        await observer.waitFor((message) => message.type === 'welcome');
+        observer.send({ type: 'register', agentId: 'observer' });
+        await observer.waitFor((message) => message.type === 'registered');
+
+        actor.send({
+            type: 'set',
+            key: 'project.architecture',
+            value: { body: 'architecture' },
+            summary: 'Architecture summary',
+            tags: ['architecture'],
+            importance: 8,
+        });
+        await actor.waitFor((message) => message.type === 'ok' && message.key === 'project.architecture');
+        actor.send({
+            type: 'set',
+            key: 'project.database',
+            value: { body: 'database' },
+            summary: 'Database summary',
+            tags: ['database'],
+            importance: 7,
+        });
+        await actor.waitFor((message) => message.type === 'ok' && message.key === 'project.database');
+        actor.send({
+            type: 'relate',
+            from: 'project.database',
+            to: 'project.architecture',
+            relation: 'depends_on',
+            weight: 0.8,
+        });
+        await actor.waitFor((message) => message.type === 'related');
+
+        const mergeSnapshot = {
+            entries: {
+                'project.database': {
+                    value: { body: 'database replacement' },
+                    summary: 'Database replacement summary',
+                    tags: ['database'],
+                    importance: 7,
+                    expiresAt: null,
+                    updatedAt: 200,
+                    updatedBy: 'external',
+                },
+                'project.notes': {
+                    value: { body: 'notes' },
+                    summary: 'Notes summary',
+                    tags: ['notes'],
+                    importance: 5,
+                    expiresAt: null,
+                    updatedAt: 300,
+                    updatedBy: 'external',
+                },
+            },
+            edges: [
+                {
+                    from: 'project.notes',
+                    to: 'project.database',
+                    relation: 'depends_on',
+                    reason: 'Notes reference the database work.',
+                    weight: 0.6,
+                    updatedAt: 400,
+                    updatedBy: 'external',
+                },
+                {
+                    from: 'project.notes',
+                    to: 'project.database',
+                    relation: 'depends_on',
+                    reason: 'Duplicate edge should be skipped.',
+                    weight: 0.6,
+                    updatedAt: 401,
+                    updatedBy: 'external',
+                },
+            ],
+        };
+
+        actor.send({ type: 'validate-import', mode: 'merge', snapshot: mergeSnapshot, requestId: 'validate-merge-1' });
+        assert.deepEqual(await actor.waitFor((message) => message.requestId === 'validate-merge-1'), {
+            type: 'import-validation',
+            ok: true,
+            errors: [],
+            mode: 'merge',
+            stats: { entriesAdded: 1, entriesSkipped: 1, edgesAdded: 1, edgesSkipped: 1 },
+            requestId: 'validate-merge-1',
+        });
+
+        actor.send({ type: 'import', mode: 'merge', snapshot: mergeSnapshot, requestId: 'import-merge-1' });
+        assert.deepEqual(await actor.waitFor((message) => message.requestId === 'import-merge-1'), {
+            type: 'import-result',
+            ok: true,
+            mode: 'merge',
+            stats: { entriesAdded: 1, entriesSkipped: 1, edgesAdded: 1, edgesSkipped: 1 },
+            requestId: 'import-merge-1',
+        });
+
+        const update = await observer.waitFor((message) => message.type === 'snapshot-update');
+        assert.deepEqual(update, {
+            type: 'snapshot-update',
+            action: 'imported',
+            mode: 'merge',
+            stats: { entriesAdded: 1, entriesSkipped: 1, edgesAdded: 1, edgesSkipped: 1 },
+        });
+        assert.equal(Object.prototype.hasOwnProperty.call(update, 'requestId'), false);
+
+        actor.send({ type: 'get', key: 'project.database', requestId: 'merge-db' });
+        assert.equal((await actor.waitFor((message) => message.requestId === 'merge-db')).entry.value.body, 'database');
+        actor.send({ type: 'get', key: 'project.notes', requestId: 'merge-notes' });
+        assert.equal((await actor.waitFor((message) => message.requestId === 'merge-notes')).entry.value.body, 'notes');
+        actor.send({ type: 'map', key: 'project.notes', requestId: 'merge-map' });
+        const graph = await actor.waitFor((message) => message.requestId === 'merge-map');
+        assert.deepEqual(graph.edges.map((edge) => edge.relation), ['depends_on']);
     } finally {
         await appServer.close();
     }
@@ -996,7 +1119,6 @@ test('snapshot export, validation, and import roundtrip over websocket', async (
         assert.deepEqual(await actor.waitFor((message) => message.requestId === 'import-1'), {
             type: 'import-result',
             ok: true,
-            mode: 'replace',
             stats: { entryCount: 2, edgeCount: 1 },
             requestId: 'import-1',
         });

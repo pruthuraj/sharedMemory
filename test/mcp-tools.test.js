@@ -216,12 +216,143 @@ test('MCP handlers export, validate, and import strict snapshots', async () => {
     };
     assert.deepEqual(await handlers.memory_import({ snapshot: replacement }), {
         ok: true,
-        mode: 'replace',
         stats: { entryCount: 1, edgeCount: 0 },
     });
     assert.deepEqual(memory.keys(), ['imported']);
     assert.ok(suggestionEngine.calls.removes.includes('project.database'));
     assert.ok(suggestionEngine.calls.upserts.some((call) => call.key === 'imported'));
+});
+
+test('MCP handlers validate and import merge snapshots without deleting existing memory', async () => {
+    const memory = createMemoryStore();
+    const suggestionEngine = createFakeSuggestionEngine(true);
+    const handlers = createSharedMemoryToolHandlers({
+        memory,
+        suggestionEngine,
+        updatedBy: 'mcp-test',
+    });
+
+    await handlers.memory_set({
+        key: 'project.database',
+        value: { engine: 'sqlite' },
+        summary: 'Database summary',
+        tags: ['database'],
+        importance: 8,
+    });
+    await handlers.memory_set({
+        key: 'project.architecture',
+        value: { pattern: 'modules' },
+        summary: 'Architecture summary',
+        tags: ['architecture'],
+        importance: 7,
+    });
+    memory.relate('project.database', 'project.architecture', 'depends_on', 'mcp-test', {
+        reason: '',
+        weight: 0.8,
+    });
+
+    const mergeSnapshot = {
+        entries: {
+            'project.database': {
+                value: { engine: 'ignored' },
+                summary: 'Database replacement',
+                tags: ['database'],
+                importance: 8,
+                expiresAt: null,
+                updatedAt: 100,
+                updatedBy: 'external',
+            },
+            'project.notes': {
+                value: { body: 'notes' },
+                summary: 'Notes summary',
+                tags: ['notes'],
+                importance: 6,
+                expiresAt: null,
+                updatedAt: 200,
+                updatedBy: 'external',
+            },
+        },
+        edges: [
+            {
+                from: 'project.notes',
+                to: 'project.database',
+                relation: 'depends_on',
+                reason: 'Notes depend on the existing database work.',
+                weight: 0.7,
+                updatedAt: 300,
+                updatedBy: 'external',
+            },
+            {
+                from: 'project.notes',
+                to: 'project.database',
+                relation: 'depends_on',
+                reason: 'Duplicate edge should be skipped.',
+                weight: 0.7,
+                updatedAt: 301,
+                updatedBy: 'external',
+            },
+        ],
+    };
+
+    assert.deepEqual(await handlers.memory_validate_import({ snapshot: mergeSnapshot, mode: 'merge' }), {
+        ok: true,
+        errors: [],
+        mode: 'merge',
+        stats: { entriesAdded: 1, entriesSkipped: 1, edgesAdded: 1, edgesSkipped: 1 },
+    });
+
+    assert.deepEqual(await handlers.memory_import({ snapshot: mergeSnapshot, mode: 'merge' }), {
+        ok: true,
+        mode: 'merge',
+        stats: { entriesAdded: 1, entriesSkipped: 1, edgesAdded: 1, edgesSkipped: 1 },
+    });
+    assert.equal(memory.get('project.database').value.engine, 'sqlite');
+    assert.equal(memory.get('project.notes').value.body, 'notes');
+    assert.equal(memory.relationCount(), 2);
+    assert.ok(suggestionEngine.calls.upserts.some((call) => call.key === 'project.notes'));
+    assert.equal(suggestionEngine.calls.removes.length, 0);
+});
+
+test('MCP merge import rejects invalid snapshots without mutation', async () => {
+    const memory = createMemoryStore();
+    const handlers = createSharedMemoryToolHandlers({
+        memory,
+        suggestionEngine: createFakeSuggestionEngine(true),
+        updatedBy: 'mcp-test',
+    });
+
+    await handlers.memory_set({
+        key: 'existing',
+        value: 'value',
+        summary: 'Existing memory',
+        tags: [],
+        importance: 4,
+    });
+
+    const result = await handlers.memory_import({
+        mode: 'merge',
+        snapshot: {
+            entries: {
+                fresh: {
+                    value: 'fresh',
+                    summary: 'Fresh memory',
+                    tags: [],
+                    importance: 4,
+                    expiresAt: null,
+                    updatedAt: 100,
+                    updatedBy: 'external',
+                },
+            },
+            edges: [
+                { from: 'fresh', to: 'missing', relation: 'depends_on', reason: '', weight: 1, updatedAt: 100, updatedBy: 'external' },
+            ],
+        },
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error, 'invalid-snapshot');
+    assert.ok(result.errors.some((error) => error.message === 'dangling-edge'));
+    assert.deepEqual(memory.keys(), ['existing']);
 });
 
 test('memory_suggest returns empty when disabled and refreshes visible memory when enabled', async () => {

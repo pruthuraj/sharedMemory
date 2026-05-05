@@ -65,6 +65,10 @@ function hasValidTags(tags) {
     return Array.isArray(tags) && tags.every(isNonEmptyString);
 }
 
+function isImportMode(value) {
+    return value === 'replace' || value === 'merge';
+}
+
 // Returns an error object on failure, or null on success (callers use `|| { ok: true, message }`).
 function validateIfRevision(message, options = {}) {
     if (!hasOwn(message, 'ifRevision')) return null;
@@ -204,6 +208,9 @@ function validateMessage(message) {
         case 'import':
             if (!hasOwn(message, 'snapshot')) {
                 return { ok: false, error: 'missing-snapshot' };
+            }
+            if (hasOwn(message, 'mode') && !isImportMode(message.mode)) {
+                return { ok: false, error: 'invalid-mode' };
             }
             return { ok: true, message };
 

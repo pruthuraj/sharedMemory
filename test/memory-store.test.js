@@ -298,6 +298,84 @@ test('strict snapshot import replaces graph only after validation passes', () =>
     assert.deepEqual(memory.get('next').value, { restored: true });
 });
 
+test('merge snapshot adds new entries, skips existing keys, and skips duplicate edges', () => {
+    const memory = createTimedStore();
+
+    memory.set('existing', 'old value', 'agentA', { summary: 'Existing memory' });
+
+    const result = memory.mergeSnapshot({
+        entries: {
+            existing: {
+                value: 'replacement value',
+                summary: 'Replacement memory',
+                tags: [],
+                importance: 4,
+                expiresAt: null,
+                updatedAt: 100,
+                updatedBy: 'agentB',
+            },
+            fresh: {
+                value: { body: 'fresh' },
+                summary: 'Fresh memory',
+                tags: ['fresh'],
+                importance: 6,
+                expiresAt: null,
+                updatedAt: 200,
+                updatedBy: 'agentB',
+            },
+        },
+        edges: [
+            { from: 'fresh', to: 'existing', relation: 'depends_on', reason: '', weight: 1, updatedAt: 300, updatedBy: 'agentB' },
+            { from: 'fresh', to: 'existing', relation: 'depends_on', reason: '', weight: 1, updatedAt: 300, updatedBy: 'agentB' },
+        ],
+    });
+
+    assert.deepEqual(result, {
+        ok: true,
+        errors: [],
+        mode: 'merge',
+        stats: {
+            entriesAdded: 1,
+            entriesSkipped: 1,
+            edgesAdded: 1,
+            edgesSkipped: 1,
+        },
+    });
+    assert.deepEqual(memory.keys().sort(), ['existing', 'fresh']);
+    assert.equal(memory.get('existing').value, 'old value');
+    assert.deepEqual(memory.get('fresh').value, { body: 'fresh' });
+    assert.equal(memory.relationCount(), 1);
+    assert.deepEqual(memory.map('fresh', { depth: 1, limit: 10 }).edges.map((edge) => edge.relation), ['depends_on']);
+});
+
+test('invalid merge snapshot leaves the current graph unchanged', () => {
+    const memory = createTimedStore();
+
+    memory.set('existing', 'old value', 'agentA', { summary: 'Existing memory' });
+
+    const result = memory.mergeSnapshot({
+        entries: {
+            fresh: {
+                value: 'fresh value',
+                summary: 'Fresh memory',
+                tags: [],
+                importance: 4,
+                expiresAt: null,
+                updatedAt: 100,
+                updatedBy: 'agentB',
+            },
+        },
+        edges: [
+            { from: 'fresh', to: 'missing', relation: 'depends_on', reason: '', weight: 1, updatedAt: 300, updatedBy: 'agentB' },
+        ],
+    });
+
+    assert.equal(result.ok, false);
+    assert.deepEqual(memory.keys(), ['existing']);
+    assert.equal(memory.get('existing').value, 'old value');
+    assert.equal(memory.get('fresh'), null);
+});
+
 test('set revisions increment and ifRevision rejects stale writes without mutation', () => {
     const memory = createTimedStore();
 

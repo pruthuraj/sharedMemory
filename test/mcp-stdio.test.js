@@ -339,7 +339,6 @@ test('MCP stdio tools call shared memory through real protocol', { timeout: 1000
     };
     assert.deepEqual(await callTool(client, 'memory_import', { snapshot: replacement }), {
         ok: true,
-        mode: 'replace',
         stats: { entryCount: 1, edgeCount: 0 },
     });
     const imported = await callTool(client, 'memory_get', { key: 'imported' });

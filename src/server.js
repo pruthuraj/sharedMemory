@@ -177,15 +177,28 @@ function createSharedMemoryServer(options = {}) {
             .catch((error) => logSuggestionError('remove', key, error));
     }
 
-    function refreshSuggestionsAfterImport(previousKeys) {
+    function refreshSuggestionsAfterImport(previousKeys, mode = 'replace') {
         const visibleKeys = new Set(memory.keys());
-        for (const key of previousKeys) {
-            if (!visibleKeys.has(key)) {
-                removeSuggestionMemory(key);
+        if (mode === 'replace') {
+            for (const key of previousKeys) {
+                if (!visibleKeys.has(key)) {
+                    removeSuggestionMemory(key);
+                }
             }
         }
 
+        if (mode === 'replace') {
+            for (const key of visibleKeys) {
+                const entry = memory.get(key);
+                if (entry) {
+                    upsertSuggestionMemory(key, entry);
+                }
+            }
+            return;
+        }
+
         for (const key of visibleKeys) {
+            if (previousKeys.has(key)) continue;
             const entry = memory.get(key);
             if (entry) {
                 upsertSuggestionMemory(key, entry);
@@ -193,13 +206,13 @@ function createSharedMemoryServer(options = {}) {
         }
     }
 
-    function notifySnapshotImported(stats) {
+    function notifySnapshotImported(stats, mode = 'replace') {
         for (const client of wss.clients) {
             if (authToken && !authenticatedSockets.has(client)) continue;
             safeSend(client, {
                 type: 'snapshot-update',
                 action: 'imported',
-                mode: 'replace',
+                mode,
                 stats,
             });
         }
@@ -483,20 +496,28 @@ function createSharedMemoryServer(options = {}) {
                 }
 
                 case 'validate-import': {
-                    const result = memory.validateSnapshot(data.snapshot);
+                    const mode = data.mode === 'merge' ? 'merge' : 'replace';
+                    const existingState = mode === 'merge' ? memory.exportState() : null;
+                    const result = memory.validateSnapshot(data.snapshot, mode === 'merge' ? {
+                        mode,
+                        existingKeys: new Set(Object.keys(existingState.entries)),
+                        existingEdgeIds: new Set(existingState.edges.map((edge) => `${edge.from}\u001f${edge.relation}\u001f${edge.to}`)),
+                    } : {});
                     safeSend(ws, {
                         type: 'import-validation',
                         ok: result.ok,
                         errors: result.errors,
                         stats: result.stats,
+                        ...(mode === 'merge' ? { mode } : {}),
                         requestId,
                     });
                     break;
                 }
 
                 case 'import': {
+                    const mode = data.mode === 'merge' ? 'merge' : 'replace';
                     const previousKeys = new Set(Object.keys(memory.exportState().entries));
-                    const result = memory.importSnapshot(data.snapshot);
+                    const result = memory.importSnapshot(data.snapshot, { mode });
                     if (!result.ok) {
                         safeSend(ws, {
                             type: 'import-result',
@@ -510,15 +531,15 @@ function createSharedMemoryServer(options = {}) {
 
                     lastImportedAt = now();
                     lastImportStats = result.stats;
-                    refreshSuggestionsAfterImport(previousKeys);
+                    refreshSuggestionsAfterImport(previousKeys, mode);
                     safeSend(ws, {
                         type: 'import-result',
                         ok: true,
-                        mode: 'replace',
+                        ...(mode === 'merge' ? { mode } : {}),
                         stats: result.stats,
                         requestId,
                     });
-                    notifySnapshotImported(result.stats);
+                    notifySnapshotImported(result.stats, mode);
                     break;
                 }
 
