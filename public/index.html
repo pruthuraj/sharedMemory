@@ -5,7 +5,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Memory Graph</title>
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="css/styles.css">
 </head>
 
 <body>
@@ -84,9 +84,14 @@
       </div>
       <div class="settings-section">
         <div class="settings-section-title">Display</div>
-        <label class="setting-row toggle">
+        <label class="setting-row">
           <span>Edge labels</span>
-          <input id="setting-edge-labels" type="checkbox" />
+          <select id="setting-edge-labels">
+            <option value="focus">Hover/click</option>
+            <option value="always">Always</option>
+            <option value="off">Off</option>
+          </select>
+          <span class="setting-value" id="setting-edge-labels-value">Focus</span>
         </label>
         <label class="setting-row toggle">
           <span>Live refresh</span>
@@ -134,7 +139,7 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js"></script>
-  <script src="dashboard.js"></script>
+  <script src="js/dashboard.js"></script>
 </body>
 
 </html>

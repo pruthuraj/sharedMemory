@@ -2,6 +2,11 @@
 
 // ── Constants ──────────────────────────────────────────────────────────
 const NODE_W = 240;
+const NODE_ROUND_MIN = 116;
+const NODE_ROUND_MAX = 196;
+const NODE_ROUND_GROWTH = 22;
+const NODE_TRANSITION_MS = 280;
+const RADIAL_RING_GAP = 220;
 const LIVE_REFRESH_MS = 5000;
 const DRAG_THRESHOLD_PX = 4;
 const ZOOM_MIN = 0.08;
@@ -10,6 +15,7 @@ const DEFAULT_WHEEL_ZOOM_INTENSITY = 0.0015;
 const DEFAULT_BUTTON_ZOOM_STEP = 1.1;
 const DEFAULT_FOCUS_MAX_DEPTH = 4;
 const DASHBOARD_SETTINGS_KEY = 'sharedMemory.dashboard.settings.v1';
+const expandedNodes = new Set();
 const FOCUS_SCALE = [
     { color: '#f8fafc', opacity: 1, edgeOpacity: 0.95, ring: 3, glow: 30 },
     { color: '#22c55e', opacity: 0.96, edgeOpacity: 0.82, ring: 2, glow: 22 },
@@ -21,7 +27,7 @@ const DEFAULT_GRAPH_SETTINGS = Object.freeze({
     focusDepth: DEFAULT_FOCUS_MAX_DEPTH,
     focusIntensity: 1,
     zoomSpeed: 1,
-    edgeLabels: true,
+    edgeLabelMode: 'focus',
     liveRefresh: true,
     palette: 'aurora',
     customPalette: {
@@ -195,6 +201,7 @@ const settingFocusDepthValue = document.getElementById('setting-focus-depth-valu
 const settingFocusIntensity = document.getElementById('setting-focus-intensity');
 const settingFocusIntensityValue = document.getElementById('setting-focus-intensity-value');
 const settingEdgeLabels = document.getElementById('setting-edge-labels');
+const settingEdgeLabelsValue = document.getElementById('setting-edge-labels-value');
 const settingLiveRefresh = document.getElementById('setting-live-refresh');
 const paletteOptions = document.getElementById('palette-options');
 const customPaletteControls = document.getElementById('custom-palette-controls');
@@ -219,6 +226,10 @@ function clampNumber(value, min, max, fallback) {
 
 function normalizeHexColor(value, fallback) {
     return /^#[0-9a-fA-F]{6}$/.test(value) ? value : fallback;
+}
+
+function normalizeEdgeLabelMode(value, fallback = DEFAULT_GRAPH_SETTINGS.edgeLabelMode) {
+    return ['focus', 'always', 'off'].includes(value) ? value : fallback;
 }
 
 function paletteVars(name, customPalette = {}) {
@@ -265,7 +276,7 @@ function loadGraphSettings() {
             focusDepth: Math.round(clampNumber(parsed.focusDepth, 1, 6, DEFAULT_GRAPH_SETTINGS.focusDepth)),
             focusIntensity: clampNumber(parsed.focusIntensity, 0.6, 1.4, DEFAULT_GRAPH_SETTINGS.focusIntensity),
             zoomSpeed: clampNumber(parsed.zoomSpeed, 0.5, 2.5, DEFAULT_GRAPH_SETTINGS.zoomSpeed),
-            edgeLabels: parsed.edgeLabels !== false,
+            edgeLabelMode: normalizeEdgeLabelMode(parsed.edgeLabelMode, parsed.edgeLabels === false ? 'off' : 'focus'),
             liveRefresh: parsed.liveRefresh !== false,
             palette: COLOR_PALETTES[parsed.palette] ? parsed.palette : 'aurora',
             customPalette: {
@@ -305,7 +316,9 @@ function applyPaletteTheme() {
 }
 
 function applyGraphSettings(options = {}) {
-    document.body.classList.toggle('hide-edge-labels', !graphSettings.edgeLabels);
+    document.body.classList.toggle('edge-labels-focus', graphSettings.edgeLabelMode === 'focus');
+    document.body.classList.toggle('edge-labels-always', graphSettings.edgeLabelMode === 'always');
+    document.body.classList.toggle('edge-labels-off', graphSettings.edgeLabelMode === 'off');
     applyPaletteTheme();
     syncSettingsControls();
     if (!options.skipSave) saveGraphSettings();
@@ -316,7 +329,8 @@ function applyGraphSettings(options = {}) {
         stopLiveRefresh();
     }
 
-    applyFocusState();
+    if (selectedKey) applyRadialFocusLayout(selectedKey);
+    else applyFocusState();
 }
 
 function syncPaletteControls() {
@@ -378,6 +392,56 @@ function nodeHeight(entry) {
     return h;
 }
 
+function nodeDegree(key) {
+    let degree = 0;
+    for (const edge of currentEdges) {
+        if (edge.from === key || edge.to === key) degree += 1;
+    }
+    return degree;
+}
+
+function collapsedNodeSize(key) {
+    const degree = nodeDegree(key);
+    const size = NODE_ROUND_MIN + Math.sqrt(degree) * NODE_ROUND_GROWTH;
+    return Math.round(Math.min(NODE_ROUND_MAX, size));
+}
+
+function nodeVisualBox(key, pos, entry = currentEntries[key]) {
+    const slotHeight = nodeHeight(entry || {});
+    const expanded = expandedNodes.has(key);
+    const roundSize = collapsedNodeSize(key);
+    const w = expanded ? NODE_W : roundSize;
+    const h = expanded ? slotHeight : roundSize;
+    return {
+        x: pos.x + (NODE_W - w) / 2,
+        y: pos.y + (slotHeight - h) / 2,
+        w,
+        h,
+    };
+}
+
+function applyNodePlacement(nodeEl, key) {
+    const pos = nodePositions[key];
+    const entry = currentEntries[key];
+    if (!pos || !entry) return;
+
+    const box = nodeVisualBox(key, pos, entry);
+    nodeEl.style.left = `${box.x}px`;
+    nodeEl.style.top = `${box.y}px`;
+    nodeEl.style.setProperty('--node-w', `${box.w}px`);
+    nodeEl.style.setProperty('--node-h', `${box.h}px`);
+    nodeEl.style.setProperty('--node-degree', String(nodeDegree(key)));
+}
+
+function setSlotCenter(key, centerX, centerY) {
+    const pos = nodePositions[key];
+    const entry = currentEntries[key];
+    if (!pos || !entry) return;
+
+    pos.x = centerX - NODE_W / 2;
+    pos.y = centerY - nodeHeight(entry) / 2;
+}
+
 function svgEl(tag) {
     return document.createElementNS('http://www.w3.org/2000/svg', tag);
 }
@@ -428,6 +492,38 @@ function focusDistances(rootKey) {
     }
 
     return distances;
+}
+
+function relationLabelBetween(sourceKey, targetKey) {
+    const edge = currentEdges.find(candidate =>
+        (candidate.from === sourceKey && candidate.to === targetKey) ||
+        (candidate.from === targetKey && candidate.to === sourceKey)
+    );
+    return edge ? edge.relation.replace(/_/g, ' ') : '';
+}
+
+function applyMiniDetail(node, distance, rootKey) {
+    node.classList.remove('focus-root', 'near-detail', 'mid-detail', 'far-detail', 'unrelated-detail');
+    const relationEl = node.querySelector('.node-mini-relation');
+    if (relationEl) relationEl.textContent = '';
+
+    if (!rootKey) return;
+
+    if (distance === undefined) {
+        node.classList.add('unrelated-detail');
+    } else if (distance === 0) {
+        node.classList.add('focus-root');
+    } else if (distance === 1) {
+        node.classList.add('near-detail');
+    } else if (distance === 2) {
+        node.classList.add('mid-detail');
+    } else {
+        node.classList.add('far-detail');
+    }
+
+    if (relationEl) {
+        relationEl.textContent = distance === 1 ? relationLabelBetween(node.dataset.key, rootKey) : '';
+    }
 }
 
 function resetNodeChrome(node, key) {
@@ -521,14 +617,110 @@ function computeLayout(entries, edges) {
     return positions;
 }
 
+function setNodePresentation(key, nodeEl) {
+    const isExpanded = expandedNodes.has(key);
+    nodeEl.classList.toggle('expanded', isExpanded);
+    nodeEl.classList.toggle('round', !isExpanded);
+    nodeEl.setAttribute('aria-expanded', isExpanded ? 'true' : 'false');
+    applyNodePlacement(nodeEl, key);
+}
+
+// Toggle node between round and expanded state with animation.
+function toggleNodeExpanded(key, nodeEl) {
+    if (expandedNodes.has(key)) {
+        expandedNodes.delete(key);
+    } else {
+        expandedNodes.add(key);
+    }
+
+    setNodePresentation(key, nodeEl);
+    rerenderEdgesForCurrentPositions();
+    window.setTimeout(rerenderEdgesForCurrentPositions, NODE_TRANSITION_MS);
+}
+
 // ── Node rendering ─────────────────────────────────────────────────────
+function collapseOtherNodes(activeKey) {
+    for (const key of Array.from(expandedNodes)) {
+        if (key === activeKey) continue;
+        expandedNodes.delete(key);
+        const node = scene.querySelector(`[data-key="${CSS.escape(key)}"]`);
+        if (node) setNodePresentation(key, node);
+    }
+}
+
+function resetToComputedLayout() {
+    if (!Object.keys(currentEntries).length) return;
+    nodePositions = computeLayout(currentEntries, currentEdges);
+    for (const node of scene.querySelectorAll('.mem-node')) {
+        applyNodePlacement(node, node.dataset.key);
+    }
+    sizeSceneToPositions(nodePositions);
+    renderEdges(currentEdges, nodePositions, currentEntries);
+    applyFocusState();
+}
+
+function clearActiveSelection(options = {}) {
+    selectedKey = null;
+    focusedKey = null;
+    lastFocusedKey = null;
+    detailPanel.classList.remove('visible');
+    if (options.resetLayout) resetToComputedLayout();
+    else applyFocusState();
+}
+
+function radialRingRadius(distance, keys) {
+    const maxSize = keys.reduce((largest, key) => Math.max(largest, nodeVisualBox(key, nodePositions[key]).w), 0);
+    const circumferenceRadius = (keys.length * Math.max(maxSize + 64, 150)) / (Math.PI * 2);
+    return Math.max(RADIAL_RING_GAP * distance, circumferenceRadius + RADIAL_RING_GAP * (distance - 1) * 0.35);
+}
+
+function applyRadialFocusLayout(rootKey) {
+    if (!rootKey || !nodePositions[rootKey] || !currentEntries[rootKey]) return;
+
+    const rootBox = nodeVisualBox(rootKey, nodePositions[rootKey]);
+    const centerX = rootBox.x + rootBox.w / 2;
+    const centerY = rootBox.y + rootBox.h / 2;
+    const distances = focusDistances(rootKey);
+    const outerDistance = graphSettings.focusDepth + 1;
+    const groups = new Map();
+
+    for (const key of Object.keys(currentEntries).sort()) {
+        const distance = key === rootKey ? 0 : (distances.has(key) ? distances.get(key) : outerDistance);
+        if (!groups.has(distance)) groups.set(distance, []);
+        groups.get(distance).push(key);
+    }
+
+    setSlotCenter(rootKey, centerX, centerY);
+
+    for (const [distance, keys] of Array.from(groups.entries()).sort((a, b) => a[0] - b[0])) {
+        if (distance === 0) continue;
+
+        const radius = radialRingRadius(distance, keys);
+        const offset = -Math.PI / 2 + (distance % 2 === 0 && keys.length > 1 ? Math.PI / keys.length : 0);
+        keys.forEach((key, index) => {
+            const angle = offset + (Math.PI * 2 * index) / keys.length;
+            setSlotCenter(key, centerX + Math.cos(angle) * radius, centerY + Math.sin(angle) * radius);
+        });
+    }
+
+    for (const node of scene.querySelectorAll('.mem-node')) {
+        applyNodePlacement(node, node.dataset.key);
+    }
+    rerenderEdgesForCurrentPositions();
+}
+
 function buildNodeEl(key, entry, pos) {
     const color = ageColor(entry.updatedAt);
+    const isExpanded = expandedNodes.has(key);
 
     const div = document.createElement('div');
-    div.className = 'mem-node';
+    div.className = `mem-node ${isExpanded ? 'expanded' : 'round'}`;
     div.dataset.key = key;
-    div.style.cssText = `left:${pos.x}px;top:${pos.y}px;border:1.5px solid ${color}44;box-shadow:0 2px 14px #00000055;`;
+    div.setAttribute('role', 'button');
+    div.setAttribute('tabindex', '0');
+    div.setAttribute('aria-expanded', isExpanded ? 'true' : 'false');
+    div.setAttribute('aria-label', `${key} memory node`);
+    div.style.cssText = `border:1.5px solid ${color}44;box-shadow:0 2px 14px #00000055;`;
 
     const tagsHtml = entry.tags && entry.tags.length
         ? `<div class="node-tags">${entry.tags.map(t => `<span class="node-tag">${esc(t)}</span>`).join('')}</div>`
@@ -539,21 +731,49 @@ function buildNodeEl(key, entry, pos) {
         : '';
 
     div.innerHTML = `
-<div class="node-header">
-  <div class="node-key-row">
-    <span class="node-dot" style="background:${color};box-shadow:0 0 6px ${color}"></span>
-    <div class="node-key">${esc(key)}</div>
-  </div>
-  <div class="node-age" style="color:${color}">${ageLabel(entry.updatedAt)}</div>
+<div class="node-mini">
+  <span class="node-dot node-mini-dot" style="background:${color};box-shadow:0 0 8px ${color}"></span>
+  <div class="node-mini-title">${esc(key)}</div>
+  <div class="node-mini-summary">${esc(entry.summary || '')}</div>
+  <div class="node-mini-tags">${(entry.tags || []).slice(0, 2).map(t => `<span>${esc(t)}</span>`).join('')}</div>
+  <div class="node-mini-relation"></div>
 </div>
-<div class="node-summary">${esc(entry.summary || '')}</div>
-${tagsHtml}${impHtml}`;
+<div class="node-card">
+  <div class="node-header">
+    <div class="node-key-row">
+      <span class="node-dot" style="background:${color};box-shadow:0 0 6px ${color}"></span>
+      <div class="node-key">${esc(key)}</div>
+    </div>
+    <div class="node-age" style="color:${color}">${ageLabel(entry.updatedAt)}</div>
+  </div>
+  <div class="node-summary">${esc(entry.summary || '')}</div>
+  ${tagsHtml}${impHtml}
+</div>`;
+
+    applyNodePlacement(div, key);
 
     div.addEventListener('pointerdown', e => beginNodeDrag(e, key, div));
     div.addEventListener('click', e => {
         e.stopPropagation();
         if (suppressClickKey === key) {
             suppressClickKey = null;
+            return;
+        }
+        const wasExpanded = expandedNodes.has(key);
+        toggleNodeExpanded(key, div);
+        if (wasExpanded) {
+            clearActiveSelection({ resetLayout: true });
+            return;
+        }
+        openDetail(key, currentEntries[key] || entry);
+    });
+    div.addEventListener('keydown', e => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        const wasExpanded = expandedNodes.has(key);
+        toggleNodeExpanded(key, div);
+        if (wasExpanded) {
+            clearActiveSelection({ resetLayout: true });
             return;
         }
         openDetail(key, currentEntries[key] || entry);
@@ -585,6 +805,7 @@ function applyFocusState() {
         const nodeKey = node.dataset.key;
         const distance = distances.get(nodeKey);
         const inFocus = Boolean(key) && distance !== undefined;
+        applyMiniDetail(node, Boolean(key) ? distance : undefined, key);
         node.classList.toggle('dimmed', Boolean(key) && !inFocus);
         node.classList.toggle('related', inFocus && distance > 0);
         node.classList.toggle('selected', selectedKey === nodeKey);
@@ -631,9 +852,12 @@ function renderEdges(edges, positions, entries) {
     edgesSvg.appendChild(defs);
 
     for (const edge of edges) {
-        const sp = positions[edge.from];
-        const tp = positions[edge.to];
-        if (!sp || !tp) continue;
+        const sourceSlot = positions[edge.from];
+        const targetSlot = positions[edge.to];
+        if (!sourceSlot || !targetSlot) continue;
+
+        const sp = nodeVisualBox(edge.from, sourceSlot, entries[edge.from]);
+        const tp = nodeVisualBox(edge.to, targetSlot, entries[edge.to]);
 
         const color = relationColors[edge.relation] || relationColors.related_to || '#6366f1';
         const sw = (1.5 + (edge.weight || 0) * 2.5).toFixed(2);
@@ -664,15 +888,18 @@ function renderEdges(edges, positions, entries) {
         const mx = (sx + tx) / 2;
         const my = (sy + ty) / 2;
 
+        const labelText = edge.relation.replace(/_/g, ' ');
+        const labelWidth = Math.max(72, labelText.length * 6 + 18);
+
         const bg = svgEl('rect');
         bg.classList.add('edge-label-bg');
-        bg.setAttribute('x', String(mx - 38));
-        bg.setAttribute('y', String(my - 9));
-        bg.setAttribute('width', '76');
-        bg.setAttribute('height', '14');
-        bg.setAttribute('rx', '3');
+        bg.setAttribute('x', String(mx - labelWidth / 2));
+        bg.setAttribute('y', String(my - 10));
+        bg.setAttribute('width', String(labelWidth));
+        bg.setAttribute('height', '18');
+        bg.setAttribute('rx', '5');
         bg.setAttribute('fill', '#05050e');
-        bg.setAttribute('opacity', '0.88');
+        bg.setAttribute('opacity', '0.94');
         g.appendChild(bg);
 
         const lbl = svgEl('text');
@@ -681,11 +908,12 @@ function renderEdges(edges, positions, entries) {
         lbl.setAttribute('y', String(my + 1));
         lbl.setAttribute('text-anchor', 'middle');
         lbl.setAttribute('dominant-baseline', 'middle');
-        lbl.setAttribute('font-size', '9');
+        lbl.setAttribute('font-size', '10');
         lbl.setAttribute('fill', color);
         lbl.setAttribute('font-family', 'system-ui, sans-serif');
+        lbl.setAttribute('font-weight', '700');
         lbl.setAttribute('opacity', '0.9');
-        lbl.textContent = edge.relation.replace(/_/g, ' ');
+        lbl.textContent = labelText;
         g.appendChild(lbl);
 
         edgesSvg.appendChild(g);
@@ -705,9 +933,10 @@ function mergePreservedPositions(nextPositions, previousPositions) {
 
 function sizeSceneToPositions(positions) {
     let maxX = 0, maxY = 0;
-    for (const p of Object.values(positions)) {
-        maxX = Math.max(maxX, p.x + p.w);
-        maxY = Math.max(maxY, p.y + p.h);
+    for (const [key, p] of Object.entries(positions)) {
+        const box = nodeVisualBox(key, p);
+        maxX = Math.max(maxX, box.x + box.w);
+        maxY = Math.max(maxY, box.y + box.h);
     }
     edgesSvg.setAttribute('width', maxX + 80);
     edgesSvg.setAttribute('height', maxY + 80);
@@ -729,6 +958,9 @@ function renderGraph(entries, edges, options = {}) {
     detailPanel.classList.remove('visible');
 
     const keys = Object.keys(entries);
+    for (const key of Array.from(expandedNodes)) {
+        if (!entries[key]) expandedNodes.delete(key);
+    }
     emptyState.classList.toggle('visible', keys.length === 0);
     updateLegend();
 
@@ -764,6 +996,8 @@ function renderGraph(entries, edges, options = {}) {
 
 // ── Detail panel ───────────────────────────────────────────────────────
 function openDetail(key, entry) {
+    collapseOtherNodes(key);
+
     // Deselect previous
     if (selectedKey) {
         const prev = scene.querySelector(`[data-key="${CSS.escape(selectedKey)}"]`);
@@ -785,6 +1019,8 @@ function openDetail(key, entry) {
         nodeEl.style.borderColor = color;
         nodeEl.style.boxShadow = `0 0 0 3px ${color}33, 0 4px 24px #00000077`;
     }
+
+    applyRadialFocusLayout(key);
 
     document.getElementById('dp-bar').style.background = `linear-gradient(90deg, ${color}, ${color}44)`;
     document.getElementById('dp-label').style.color = color;
@@ -825,16 +1061,14 @@ document.getElementById('dp-close').addEventListener('click', () => {
         const el = scene.querySelector(`[data-key="${CSS.escape(selectedKey)}"]`);
         if (el) {
             const c = ageColor(currentEntries[selectedKey]?.updatedAt || 0);
+            expandedNodes.delete(selectedKey);
+            setNodePresentation(selectedKey, el);
             el.classList.remove('selected');
             el.style.borderColor = `${c}44`;
             el.style.boxShadow = '0 2px 14px #00000055';
         }
     }
-    selectedKey = null;
-    focusedKey = null;
-    lastFocusedKey = null;
-    applyFocusState();
-    detailPanel.classList.remove('visible');
+    clearActiveSelection({ resetLayout: true });
 });
 
 viewport.addEventListener('click', e => {
@@ -895,8 +1129,7 @@ function moveDraggedNode(e) {
     const pos = nodePositions[nodeDrag.key];
     pos.x = nodeDrag.startX + clientDx / scale;
     pos.y = nodeDrag.startY + clientDy / scale;
-    nodeDrag.nodeEl.style.left = `${pos.x}px`;
-    nodeDrag.nodeEl.style.top = `${pos.y}px`;
+    applyNodePlacement(nodeDrag.nodeEl, nodeDrag.key);
     rerenderEdgesForCurrentPositions();
     e.preventDefault();
 }
@@ -926,9 +1159,10 @@ function fitView(positions) {
     const vh = viewport.clientHeight;
 
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const p of Object.values(positions)) {
-        minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
-        maxX = Math.max(maxX, p.x + p.w); maxY = Math.max(maxY, p.y + p.h);
+    for (const [key, p] of Object.entries(positions)) {
+        const box = nodeVisualBox(key, p);
+        minX = Math.min(minX, box.x); minY = Math.min(minY, box.y);
+        maxX = Math.max(maxX, box.x + box.w); maxY = Math.max(maxY, box.y + box.h);
     }
 
     const pad = 60;
@@ -967,7 +1201,10 @@ function syncSettingsControls() {
     settingFocusDepthValue.textContent = String(graphSettings.focusDepth);
     settingFocusIntensity.value = String(graphSettings.focusIntensity);
     settingFocusIntensityValue.textContent = `${graphSettings.focusIntensity.toFixed(1)}x`;
-    settingEdgeLabels.checked = graphSettings.edgeLabels;
+    settingEdgeLabels.value = graphSettings.edgeLabelMode;
+    settingEdgeLabelsValue.textContent = graphSettings.edgeLabelMode === 'always'
+        ? 'Always'
+        : graphSettings.edgeLabelMode === 'off' ? 'Off' : 'Focus';
     settingLiveRefresh.checked = graphSettings.liveRefresh;
     syncPaletteControls();
     updateSettingsSummary();
@@ -1039,7 +1276,7 @@ settingFocusIntensity.addEventListener('input', () => {
     applyGraphSettings();
 });
 settingEdgeLabels.addEventListener('change', () => {
-    graphSettings.edgeLabels = settingEdgeLabels.checked;
+    graphSettings.edgeLabelMode = normalizeEdgeLabelMode(settingEdgeLabels.value);
     applyGraphSettings();
 });
 settingLiveRefresh.addEventListener('change', () => {
