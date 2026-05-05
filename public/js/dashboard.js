@@ -7,6 +7,7 @@ const NODE_ROUND_MAX = 196;
 const NODE_ROUND_GROWTH = 22;
 const NODE_TRANSITION_MS = 280;
 const RADIAL_RING_GAP = 220;
+const RADIAL_LAYOUT_MAX_DEPTH = 2;
 const LIVE_REFRESH_MS = 5000;
 const DRAG_THRESHOLD_PX = 4;
 const ZOOM_MIN = 0.08;
@@ -170,6 +171,7 @@ let nodeDrag = null;
 let suppressClickKey = null;
 let selectedKey = null;
 let focusedKey = null;
+let hoverKey = null;
 let lastFocusedKey = null;
 let liveRefreshTimer = null;
 let refreshQueued = false;
@@ -420,6 +422,36 @@ function nodeVisualBox(key, pos, entry = currentEntries[key]) {
     };
 }
 
+function nodeCenter(box) {
+    return {
+        x: box.x + box.w / 2,
+        y: box.y + box.h / 2,
+    };
+}
+
+function edgeAnchor(box, toward, isRound) {
+    const center = nodeCenter(box);
+    const dx = toward.x - center.x;
+    const dy = toward.y - center.y;
+    const length = Math.hypot(dx, dy) || 1;
+
+    if (isRound) {
+        const radius = Math.min(box.w, box.h) / 2;
+        return {
+            x: center.x + (dx / length) * radius,
+            y: center.y + (dy / length) * radius,
+        };
+    }
+
+    const halfW = box.w / 2;
+    const halfH = box.h / 2;
+    const scale = 1 / Math.max(Math.abs(dx) / halfW, Math.abs(dy) / halfH, 1);
+    return {
+        x: center.x + dx * scale,
+        y: center.y + dy * scale,
+    };
+}
+
 function applyNodePlacement(nodeEl, key) {
     const pos = nodePositions[key];
     const entry = currentEntries[key];
@@ -459,6 +491,18 @@ function edgeTouches(edge, key) {
     return edge.from === key || edge.to === key;
 }
 
+function directNeighbors(key) {
+    const neighbors = new Set();
+    if (!key) return neighbors;
+
+    for (const edge of currentEdges) {
+        if (edge.from === key && currentEntries[edge.to]) neighbors.add(edge.to);
+        if (edge.to === key && currentEntries[edge.from]) neighbors.add(edge.from);
+    }
+
+    return neighbors;
+}
+
 function focusStyle(distance) {
     return FOCUS_SCALE[Math.min(distance, FOCUS_SCALE.length - 1)];
 }
@@ -492,6 +536,30 @@ function focusDistances(rootKey) {
     }
 
     return distances;
+}
+
+function focusedEdgeDistance(edge, distances, rootKey, selectedMode) {
+    const fromDistance = distances.get(edge.from);
+    const toDistance = distances.get(edge.to);
+    if (fromDistance === undefined || toDistance === undefined) return null;
+    const maxDistance = Math.max(fromDistance, toDistance);
+
+    if (!selectedMode) {
+        return edgeTouches(edge, rootKey) ? maxDistance : null;
+    }
+
+    if (maxDistance > RADIAL_LAYOUT_MAX_DEPTH) return null;
+    if (edgeTouches(edge, rootKey)) return maxDistance;
+    if (Math.abs(fromDistance - toDistance) === 1) return maxDistance;
+    return null;
+}
+
+function stableHash(value) {
+    let hash = 0;
+    for (let i = 0; i < value.length; i += 1) {
+        hash = ((hash << 5) - hash + value.charCodeAt(i)) | 0;
+    }
+    return Math.abs(hash);
 }
 
 function relationLabelBetween(sourceKey, targetKey) {
@@ -550,9 +618,9 @@ function applyNodeFocusChrome(node, distance) {
 function resetEdgeChrome(group) {
     group.style.opacity = '';
     group.style.filter = '';
-    for (const path of group.querySelectorAll('path')) path.setAttribute('stroke-opacity', '0.6');
-    for (const text of group.querySelectorAll('text')) text.setAttribute('opacity', '0.9');
-    for (const rect of group.querySelectorAll('rect')) rect.setAttribute('opacity', '0.88');
+    for (const path of group.querySelectorAll('path')) path.setAttribute('stroke-opacity', '0.42');
+    for (const text of group.querySelectorAll('text')) text.setAttribute('opacity', '0.85');
+    for (const rect of group.querySelectorAll('rect')) rect.setAttribute('opacity', '0.84');
 }
 
 function applyEdgeFocusChrome(group, distance) {
@@ -581,7 +649,7 @@ function updateLegend() {
 function updateStatusCount() {
     const nc = Object.keys(currentEntries).length;
     const ec = currentEdges.length;
-    setStatus(`${nc} nodes · ${ec} edges`, 'ok');
+    setStatus(`${nc} nodes - ${ec} edges`, 'ok');
 }
 
 function clampScale(value) {
@@ -662,8 +730,10 @@ function resetToComputedLayout() {
 function clearActiveSelection(options = {}) {
     selectedKey = null;
     focusedKey = null;
+    hoverKey = null;
     lastFocusedKey = null;
     detailPanel.classList.remove('visible');
+    document.body.classList.remove('inspector-open');
     if (options.resetLayout) resetToComputedLayout();
     else applyFocusState();
 }
@@ -674,18 +744,21 @@ function radialRingRadius(distance, keys) {
     return Math.max(RADIAL_RING_GAP * distance, circumferenceRadius + RADIAL_RING_GAP * (distance - 1) * 0.35);
 }
 
-function applyRadialFocusLayout(rootKey) {
+function applyRadialFocusLayout(rootKey, options = {}) {
     if (!rootKey || !nodePositions[rootKey] || !currentEntries[rootKey]) return;
 
     const rootBox = nodeVisualBox(rootKey, nodePositions[rootKey]);
-    const centerX = rootBox.x + rootBox.w / 2;
-    const centerY = rootBox.y + rootBox.h / 2;
+    const rootCenter = options.center || nodeCenter(rootBox);
+    const centerX = rootCenter.x;
+    const centerY = rootCenter.y;
     const distances = focusDistances(rootKey);
-    const outerDistance = graphSettings.focusDepth + 1;
+    const layoutDepth = Math.min(graphSettings.focusDepth, RADIAL_LAYOUT_MAX_DEPTH);
     const groups = new Map();
 
     for (const key of Object.keys(currentEntries).sort()) {
-        const distance = key === rootKey ? 0 : (distances.has(key) ? distances.get(key) : outerDistance);
+        if (!distances.has(key)) continue;
+        const distance = key === rootKey ? 0 : distances.get(key);
+        if (distance > layoutDepth) continue;
         if (!groups.has(distance)) groups.set(distance, []);
         groups.get(distance).push(key);
     }
@@ -734,6 +807,7 @@ function buildNodeEl(key, entry, pos) {
 <div class="node-mini">
   <span class="node-dot node-mini-dot" style="background:${color};box-shadow:0 0 8px ${color}"></span>
   <div class="node-mini-title">${esc(key)}</div>
+  <div class="node-mini-degree">${nodeDegree(key)} links</div>
   <div class="node-mini-summary">${esc(entry.summary || '')}</div>
   <div class="node-mini-tags">${(entry.tags || []).slice(0, 2).map(t => `<span>${esc(t)}</span>`).join('')}</div>
   <div class="node-mini-relation"></div>
@@ -779,20 +853,20 @@ function buildNodeEl(key, entry, pos) {
         openDetail(key, currentEntries[key] || entry);
     });
     div.addEventListener('mouseenter', () => setFocusKey(key));
-    div.addEventListener('mouseleave', () => {
-        if (selectedKey !== key) clearFocusKey();
-    });
+    div.addEventListener('mouseleave', () => clearFocusKey());
 
     return div;
 }
 
 function setFocusKey(key) {
+    hoverKey = key;
     focusedKey = key;
     lastFocusedKey = key;
     applyFocusState();
 }
 
 function clearFocusKey() {
+    hoverKey = null;
     focusedKey = selectedKey;
     applyFocusState();
 }
@@ -800,15 +874,23 @@ function clearFocusKey() {
 function applyFocusState() {
     const key = focusedKey;
     const distances = key ? focusDistances(key) : new Map();
+    const hoverActive = Boolean(hoverKey && key === hoverKey);
+    const hoverNeighbors = hoverActive ? directNeighbors(hoverKey) : new Set();
+    const selectedMode = Boolean(key && selectedKey === key && !hoverActive);
 
     for (const node of scene.querySelectorAll('.mem-node')) {
         const nodeKey = node.dataset.key;
-        const distance = distances.get(nodeKey);
+        const distance = hoverActive
+            ? (nodeKey === hoverKey ? 0 : (hoverNeighbors.has(nodeKey) ? 1 : undefined))
+            : distances.get(nodeKey);
         const inFocus = Boolean(key) && distance !== undefined;
         applyMiniDetail(node, Boolean(key) ? distance : undefined, key);
         node.classList.toggle('dimmed', Boolean(key) && !inFocus);
         node.classList.toggle('related', inFocus && distance > 0);
         node.classList.toggle('selected', selectedKey === nodeKey);
+        node.classList.toggle('hover-main', hoverActive && nodeKey === hoverKey);
+        node.classList.toggle('hover-neighbor', hoverActive && hoverNeighbors.has(nodeKey));
+        node.classList.toggle('hover-blurred', hoverActive && !inFocus);
         if (inFocus) applyNodeFocusChrome(node, distance);
         else {
             resetNodeChrome(node, nodeKey);
@@ -818,12 +900,15 @@ function applyFocusState() {
 
     for (const group of edgesSvg.querySelectorAll('.edge-group')) {
         resetEdgeChrome(group);
-        const fromDistance = distances.get(group.dataset.from);
-        const toDistance = distances.get(group.dataset.to);
-        const inFocus = Boolean(key) && fromDistance !== undefined && toDistance !== undefined;
+        const edge = {
+            from: group.dataset.from,
+            to: group.dataset.to,
+        };
+        const distance = key ? focusedEdgeDistance(edge, distances, key, selectedMode) : null;
+        const inFocus = distance !== null;
         group.classList.toggle('dimmed', Boolean(key) && !inFocus);
         group.classList.toggle('highlight', inFocus);
-        if (inFocus) applyEdgeFocusChrome(group, Math.max(fromDistance, toDistance));
+        if (inFocus) applyEdgeFocusChrome(group, distance);
         else if (key) group.style.opacity = String(dimmedEdgeOpacity());
     }
 }
@@ -862,12 +947,24 @@ function renderEdges(edges, positions, entries) {
         const color = relationColors[edge.relation] || relationColors.related_to || '#6366f1';
         const sw = (1.5 + (edge.weight || 0) * 2.5).toFixed(2);
 
-        const sx = sp.x + sp.w;
-        const sy = sp.y + sp.h / 2;
-        const tx = tp.x;
-        const ty = tp.y + tp.h / 2;
-        const dx = Math.max(Math.abs(tx - sx) * 0.45, 48);
-        const d = `M ${sx} ${sy} C ${sx + dx} ${sy} ${tx - dx} ${ty} ${tx} ${ty}`;
+        const sourceCenter = nodeCenter(sp);
+        const targetCenter = nodeCenter(tp);
+        const sourceAnchor = edgeAnchor(sp, targetCenter, !expandedNodes.has(edge.from));
+        const targetAnchor = edgeAnchor(tp, sourceCenter, !expandedNodes.has(edge.to));
+        const sx = sourceAnchor.x;
+        const sy = sourceAnchor.y;
+        const tx = targetAnchor.x;
+        const ty = targetAnchor.y;
+        const edgeDx = tx - sx;
+        const edgeDy = ty - sy;
+        const span = Math.hypot(edgeDx, edgeDy) || 1;
+        const normalX = -edgeDy / span;
+        const normalY = edgeDx / span;
+        const bendDirection = stableHash(edgeKey(edge)) % 2 === 0 ? 1 : -1;
+        const bend = bendDirection * Math.min(80, Math.max(18, span * 0.09));
+        const cx = (sx + tx) / 2 + normalX * bend;
+        const cy = (sy + ty) / 2 + normalY * bend;
+        const d = `M ${sx} ${sy} Q ${cx} ${cy} ${tx} ${ty}`;
 
         const g = svgEl('g');
         g.classList.add('edge-group');
@@ -884,9 +981,8 @@ function renderEdges(edges, positions, entries) {
         path.setAttribute('marker-end', `url(#arr-${edge.relation})`);
         g.appendChild(path);
 
-        // Label at bezier midpoint
-        const mx = (sx + tx) / 2;
-        const my = (sy + ty) / 2;
+        const mx = 0.25 * sx + 0.5 * cx + 0.25 * tx;
+        const my = 0.25 * sy + 0.5 * cy + 0.25 * ty;
 
         const labelText = edge.relation.replace(/_/g, ' ');
         const labelWidth = Math.max(72, labelText.length * 6 + 18);
@@ -956,6 +1052,7 @@ function renderGraph(entries, edges, options = {}) {
     focusedKey = null;
     lastFocusedKey = null;
     detailPanel.classList.remove('visible');
+    document.body.classList.remove('inspector-open');
 
     const keys = Object.keys(entries);
     for (const key of Array.from(expandedNodes)) {
@@ -996,6 +1093,9 @@ function renderGraph(entries, edges, options = {}) {
 
 // ── Detail panel ───────────────────────────────────────────────────────
 function openDetail(key, entry) {
+    const previousSelected = selectedKey;
+    const currentBox = nodePositions[key] ? nodeVisualBox(key, nodePositions[key], entry) : null;
+    const focusCenter = currentBox ? nodeCenter(currentBox) : null;
     collapseOtherNodes(key);
 
     // Deselect previous
@@ -1020,7 +1120,11 @@ function openDetail(key, entry) {
         nodeEl.style.boxShadow = `0 0 0 3px ${color}33, 0 4px 24px #00000077`;
     }
 
-    applyRadialFocusLayout(key);
+    if (previousSelected !== key) {
+        nodePositions = computeLayout(currentEntries, currentEdges);
+        if (focusCenter) setSlotCenter(key, focusCenter.x, focusCenter.y);
+    }
+    applyRadialFocusLayout(key, { center: focusCenter });
 
     document.getElementById('dp-bar').style.background = `linear-gradient(90deg, ${color}, ${color}44)`;
     document.getElementById('dp-label').style.color = color;
@@ -1033,9 +1137,9 @@ function openDetail(key, entry) {
 
     const tagsHtml = entry.tags && entry.tags.length
         ? `<div class="dp-tags">${entry.tags.map(t => `<span class="dp-tag">${esc(t)}</span>`).join('')}</div>`
-        : '<span style="color:#374151">—</span>';
+        : '<span style="color:#374151">-</span>';
 
-    const date = entry.updatedAt ? new Date(entry.updatedAt).toLocaleString() : '—';
+    const date = entry.updatedAt ? new Date(entry.updatedAt).toLocaleString() : '-';
     const age = entry.updatedAt ? ageLabel(entry.updatedAt) : '';
     const exp = entry.expiresAt
         ? `<div class="dp-row"><span class="dp-rl">Expires</span><span class="dp-rv" style="color:#f59e0b">${new Date(entry.expiresAt).toLocaleString()}</span></div>`
@@ -1043,16 +1147,17 @@ function openDetail(key, entry) {
 
     document.getElementById('dp-body').innerHTML = `
 <div class="dp-key">${esc(key)}</div>
-<div class="dp-ts" style="color:${color}">${esc(date)}${age ? ` · ${esc(age)}` : ''}</div>
+<div class="dp-ts" style="color:${color}">${esc(date)}${age ? ` - ${esc(age)}` : ''}</div>
 <div class="dp-value">${esc(val)}</div>
-<div class="dp-row"><span class="dp-rl">Summary</span><span class="dp-rv">${esc(entry.summary || '—')}</span></div>
+<div class="dp-row"><span class="dp-rl">Summary</span><span class="dp-rv">${esc(entry.summary || '-')}</span></div>
 <div class="dp-row"><span class="dp-rl">Tags</span><span class="dp-rv">${tagsHtml}</span></div>
-<div class="dp-row"><span class="dp-rl">Importance</span><span class="dp-rv" style="color:#a5b4fc">${entry.importance ?? '—'}</span></div>
-<div class="dp-row"><span class="dp-rl">Revision</span><span class="dp-rv">${entry.revision ?? '—'}</span></div>
-<div class="dp-row"><span class="dp-rl">Updated by</span><span class="dp-rv">${esc(entry.updatedBy || '—')}</span></div>
+<div class="dp-row"><span class="dp-rl">Importance</span><span class="dp-rv" style="color:#a5b4fc">${entry.importance ?? '-'}</span></div>
+<div class="dp-row"><span class="dp-rl">Revision</span><span class="dp-rv">${entry.revision ?? '-'}</span></div>
+<div class="dp-row"><span class="dp-rl">Updated by</span><span class="dp-rv">${esc(entry.updatedBy || '-')}</span></div>
 ${exp}`;
 
     detailPanel.classList.add('visible');
+    document.body.classList.add('inspector-open');
     applyFocusState();
 }
 
@@ -1317,7 +1422,7 @@ document.getElementById('fullscreen-btn').addEventListener('click', () => {
     else document.exitFullscreen().catch(() => { });
 });
 document.addEventListener('fullscreenchange', () => {
-    document.getElementById('fullscreen-btn').textContent = document.fullscreenElement ? '⊠' : '⛶';
+    document.getElementById('fullscreen-btn').textContent = document.fullscreenElement ? '[]' : '[ ]';
     setTimeout(() => fitView(nodePositions), 80);
 });
 
@@ -1453,7 +1558,7 @@ function handleLiveMessage(msg) {
 async function connect() {
     const token = tokenInput.value.trim();
     connectBtn.disabled = true;
-    setStatus('Connecting…');
+    setStatus('Connecting...');
 
     if (ws) { try { ws.close(); } catch { } ws = null; }
     msgQueue.length = 0;
@@ -1491,7 +1596,7 @@ async function connect() {
     const opened = await new Promise(res => { ws.onopen = () => res(true); ws.onerror = () => res(false); });
     if (!opened || ws.readyState !== WebSocket.OPEN) { connectBtn.disabled = false; return; }
 
-    // Welcome (no requestId — may already be queued)
+    // Welcome (no requestId - may already be queued)
     const welcome = drainQueue('welcome') || await new Promise(res => { pending['__welcome__'] = res; });
     if (!welcome || welcome.type !== 'welcome') {
         setStatus('Bad server response', 'error'); connectBtn.disabled = false; return;
@@ -1514,7 +1619,7 @@ async function loadGraph(options = {}) {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     if (!options.silent) {
         loadingEl.classList.add('visible');
-        setStatus('Loading…');
+        setStatus('Loading...');
     }
 
     const r = await wsRpc({ type: 'export', requestId: makeRequestId('export') });

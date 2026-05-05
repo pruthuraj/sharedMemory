@@ -1,5 +1,7 @@
 // Shared MCP tool handlers kept transport-independent for deterministic tests.
 
+const { RELATION_TYPES } = require('./protocol.js');
+
 function isPlainObject(value) {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
@@ -95,6 +97,28 @@ function validateMapInput(input) {
     if (keyError) return keyError;
     if (hasOwn(input, 'depth') && !isIntegerInRange(input.depth, 0, 10)) return 'invalid-depth';
     if (hasOwn(input, 'limit') && !isIntegerInRange(input.limit, 1, 100)) return 'invalid-limit';
+    return null;
+}
+
+function validateRelateInput(input) {
+    if (!isNonEmptyString(input.from)) return 'missing-from';
+    if (!isNonEmptyString(input.to)) return 'missing-to';
+    if (!isNonEmptyString(input.relation) || !RELATION_TYPES.has(input.relation)) {
+        return 'invalid-relation';
+    }
+    if (hasOwn(input, 'reason') && !isNonEmptyString(input.reason)) return 'invalid-reason';
+    if (hasOwn(input, 'weight') && !(typeof input.weight === 'number' && Number.isFinite(input.weight))) {
+        return 'invalid-weight';
+    }
+    return null;
+}
+
+function validateUnrelateInput(input) {
+    if (!isNonEmptyString(input.from)) return 'missing-from';
+    if (!isNonEmptyString(input.to)) return 'missing-to';
+    if (!isNonEmptyString(input.relation) || !RELATION_TYPES.has(input.relation)) {
+        return 'invalid-relation';
+    }
     return null;
 }
 
@@ -225,6 +249,26 @@ function createSharedMemoryToolHandlers(options) {
                 limit: input.limit,
             });
             return graph ? ok(graph) : fail('missing-node');
+        },
+
+        async memory_relate(input = {}) {
+            const error = validateRelateInput(input);
+            if (error) return fail(error);
+
+            const result = memory.relate(input.from, input.to, input.relation, updatedBy, {
+                reason: input.reason,
+                weight: input.weight,
+            });
+            if (!result.ok) return fail(result.error);
+            return ok({ action: result.action, edge: result.edge });
+        },
+
+        async memory_unrelate(input = {}) {
+            const error = validateUnrelateInput(input);
+            if (error) return fail(error);
+
+            const result = memory.unrelate(input.from, input.to, input.relation);
+            return ok({ removed: Boolean(result.removed), edge: result.edge });
         },
 
         async memory_export() {

@@ -13,8 +13,8 @@
   <div id="toolbar">
     <h1>Memory Graph</h1>
     <div class="tb-sep"></div>
-    <div class="ld" id="ld-nodes"><span class="dot" style="background:#10b981"></span><span>—</span></div>
-    <div class="ld" id="ld-edges"><span class="dot" style="background:#6366f1"></span><span>—</span></div>
+    <div class="ld" id="ld-nodes"><span class="dot" style="background:#10b981"></span><span>-</span></div>
+    <div class="ld" id="ld-edges"><span class="dot" style="background:#6366f1"></span><span>-</span></div>
     <div class="tb-spacer"></div>
     <span id="status-text">Not connected</span>
     <input type="password" id="token-input" placeholder="Token (optional)" autocomplete="off" />
@@ -22,7 +22,7 @@
     <button id="refresh-btn" disabled>Refresh</button>
     <button id="settings-btn" title="Graph settings" aria-expanded="false"
       aria-controls="settings-panel">Settings</button>
-    <button id="fullscreen-btn" title="Fullscreen">⛶</button>
+    <button id="fullscreen-btn" title="Fullscreen">[ ]</button>
   </div>
 
   <div id="viewport">
@@ -30,7 +30,7 @@
       <svg id="edges-svg"></svg>
     </div>
     <div id="empty-state">
-      <div class="es-icon">🧠</div>
+      <div class="es-icon">M</div>
       <div class="es-title">No memory entries</div>
       <div class="es-sub">Connect and add entries to see the graph.</div>
     </div>
@@ -43,7 +43,7 @@
     <div class="dp-bar" id="dp-bar"></div>
     <div class="dp-header">
       <div class="dp-label" id="dp-label">Memory Entry</div>
-      <button class="dp-close" id="dp-close">✕</button>
+      <button class="dp-close" id="dp-close">x</button>
     </div>
     <div class="dp-body" id="dp-body"></div>
   </div>
@@ -134,8 +134,8 @@
 
   <div id="controls">
     <button id="zoom-in-btn" title="Zoom in">+</button>
-    <button id="zoom-out-btn" title="Zoom out">−</button>
-    <button id="fit-btn" title="Fit view">⊡</button>
+    <button id="zoom-out-btn" title="Zoom out">-</button>
+    <button id="fit-btn" title="Fit view">[]</button>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js"></script>

@@ -97,6 +97,38 @@ function registerSharedMemoryTools(server, handlers) {
     );
 
     server.registerTool(
+        'memory_relate',
+        {
+            title: 'Relate Memory',
+            description: 'Create or update a typed graph edge between two memory keys. Relations: related_to, depends_on, supports, contradicts, mentions, derived_from, next_step.',
+            inputSchema: z.object({
+                from: looseInput,
+                to: looseInput,
+                relation: looseInput,
+                reason: looseInput,
+                weight: looseInput,
+            }),
+            outputSchema,
+        },
+        async (input) => mcpToolResult(await handlers.memory_relate(input)),
+    );
+
+    server.registerTool(
+        'memory_unrelate',
+        {
+            title: 'Unrelate Memory',
+            description: 'Remove a typed graph edge between two memory keys.',
+            inputSchema: z.object({
+                from: looseInput,
+                to: looseInput,
+                relation: looseInput,
+            }),
+            outputSchema,
+        },
+        async (input) => mcpToolResult(await handlers.memory_unrelate(input)),
+    );
+
+    server.registerTool(
         'memory_export',
         {
             title: 'Export Memory Snapshot',
