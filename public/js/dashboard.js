@@ -180,6 +180,7 @@ let graphSettings = loadGraphSettings();
 const subscribedKeys = new Set();
 const pending = {};
 const msgQueue = [];
+let importSnapshotDraft = null;
 
 // ── DOM refs ───────────────────────────────────────────────────────────
 const viewport = document.getElementById('viewport');
@@ -192,6 +193,20 @@ const refreshBtn = document.getElementById('refresh-btn');
 const statusText = document.getElementById('status-text');
 const emptyState = document.getElementById('empty-state');
 const loadingEl = document.getElementById('loading');
+const identityBtn = document.getElementById('identity-btn');
+const identityPanel = document.getElementById('identity-panel');
+const identityClose = document.getElementById('identity-close');
+const identitySummary = document.getElementById('identity-summary');
+const identitySearch = document.getElementById('identity-search');
+const identityList = document.getElementById('identity-list');
+const importBtn = document.getElementById('import-btn');
+const importPanel = document.getElementById('import-panel');
+const importClose = document.getElementById('import-close');
+const importFile = document.getElementById('import-file');
+const importSummary = document.getElementById('import-summary');
+const importResult = document.getElementById('import-result');
+const importConfirmBtn = document.getElementById('import-confirm-btn');
+const importCancelBtn = document.getElementById('import-cancel-btn');
 const settingsBtn = document.getElementById('settings-btn');
 const settingsPanel = document.getElementById('settings-panel');
 const settingsClose = document.getElementById('settings-close');
@@ -372,6 +387,11 @@ function ageColor(ts) {
     if (ms < 3_600_000) return '#10b981';
     if (ms < 86_400_000) return '#6366f1';
     return '#475569';
+}
+
+function nodeIdentityColor(key) {
+    const hue = stableHash(String(key)) % 360;
+    return `hsl(${hue} 78% 58%)`;
 }
 
 function ageLabel(ts) {
@@ -595,7 +615,7 @@ function applyMiniDetail(node, distance, rootKey) {
 }
 
 function resetNodeChrome(node, key) {
-    const color = ageColor(currentEntries[key]?.updatedAt || 0);
+    const color = nodeIdentityColor(key);
     node.style.opacity = '';
     node.style.borderColor = `${color}44`;
     node.style.boxShadow = '0 2px 14px #00000055';
@@ -734,6 +754,7 @@ function clearActiveSelection(options = {}) {
     lastFocusedKey = null;
     detailPanel.classList.remove('visible');
     document.body.classList.remove('inspector-open');
+    renderIdentityPanel();
     if (options.resetLayout) resetToComputedLayout();
     else applyFocusState();
 }
@@ -783,7 +804,8 @@ function applyRadialFocusLayout(rootKey, options = {}) {
 }
 
 function buildNodeEl(key, entry, pos) {
-    const color = ageColor(entry.updatedAt);
+    const color = nodeIdentityColor(key);
+    const recencyColor = ageColor(entry.updatedAt);
     const isExpanded = expandedNodes.has(key);
 
     const div = document.createElement('div');
@@ -793,7 +815,7 @@ function buildNodeEl(key, entry, pos) {
     div.setAttribute('tabindex', '0');
     div.setAttribute('aria-expanded', isExpanded ? 'true' : 'false');
     div.setAttribute('aria-label', `${key} memory node`);
-    div.style.cssText = `border:1.5px solid ${color}44;box-shadow:0 2px 14px #00000055;`;
+    div.style.cssText = `--node-color:${color};border:1.5px solid ${color}66;box-shadow:0 2px 14px #00000055;`;
 
     const tagsHtml = entry.tags && entry.tags.length
         ? `<div class="node-tags">${entry.tags.map(t => `<span class="node-tag">${esc(t)}</span>`).join('')}</div>`
@@ -818,7 +840,7 @@ function buildNodeEl(key, entry, pos) {
       <span class="node-dot" style="background:${color};box-shadow:0 0 6px ${color}"></span>
       <div class="node-key">${esc(key)}</div>
     </div>
-    <div class="node-age" style="color:${color}">${ageLabel(entry.updatedAt)}</div>
+    <div class="node-age" style="color:${recencyColor}">${ageLabel(entry.updatedAt)}</div>
   </div>
   <div class="node-summary">${esc(entry.summary || '')}</div>
   ${tagsHtml}${impHtml}
@@ -1044,6 +1066,215 @@ function rerenderEdgesForCurrentPositions() {
     applyFocusState();
 }
 
+function identityFilterText() {
+    return identitySearch ? identitySearch.value.trim().toLowerCase() : '';
+}
+
+function renderIdentityPanel() {
+    if (!identityList || !identitySummary) return;
+
+    const keys = Object.keys(currentEntries).sort();
+    const filter = identityFilterText();
+    const visibleKeys = filter
+        ? keys.filter((key) => {
+            const entry = currentEntries[key] || {};
+            const haystack = [
+                key,
+                entry.summary || '',
+                ...(entry.tags || []),
+            ].join(' ').toLowerCase();
+            return haystack.includes(filter);
+        })
+        : keys;
+
+    identitySummary.textContent = `${keys.length} ${keys.length === 1 ? 'node' : 'nodes'}`;
+
+    if (!keys.length) {
+        identityList.innerHTML = '<div class="identity-empty">Connect to load node identities.</div>';
+        return;
+    }
+
+    if (!visibleKeys.length) {
+        identityList.innerHTML = '<div class="identity-empty">No matching nodes.</div>';
+        return;
+    }
+
+    identityList.innerHTML = visibleKeys.map((key) => {
+        const entry = currentEntries[key] || {};
+        const color = nodeIdentityColor(key);
+        const active = selectedKey === key ? ' active' : '';
+        const summary = entry.summary || 'No summary';
+        return `
+      <button class="identity-item${active}" data-key="${esc(key)}" title="${esc(key)}">
+        <span class="identity-swatch" style="background:${color};box-shadow:0 0 12px ${color}88"></span>
+        <span class="identity-copy">
+          <span class="identity-key">${esc(key)}</span>
+          <span class="identity-meta">${nodeDegree(key)} links - importance ${entry.importance ?? 0}</span>
+          <span class="identity-node-summary">${esc(summary)}</span>
+        </span>
+      </button>
+    `;
+    }).join('');
+}
+
+function openIdentityPanel() {
+    identityPanel.classList.add('visible');
+    identityPanel.setAttribute('aria-hidden', 'false');
+    identityBtn.setAttribute('aria-expanded', 'true');
+    document.body.classList.add('identity-open');
+    renderIdentityPanel();
+}
+
+function closeIdentityPanel() {
+    identityPanel.classList.remove('visible');
+    identityPanel.setAttribute('aria-hidden', 'true');
+    identityBtn.setAttribute('aria-expanded', 'false');
+    document.body.classList.remove('identity-open');
+}
+
+function toggleIdentityPanel() {
+    if (identityPanel.classList.contains('visible')) closeIdentityPanel();
+    else openIdentityPanel();
+}
+
+function focusIdentityNode(key) {
+    const entry = currentEntries[key];
+    if (!entry) return;
+
+    const node = scene.querySelector(`[data-key="${CSS.escape(key)}"]`);
+    if (node && !expandedNodes.has(key)) {
+        expandedNodes.add(key);
+        setNodePresentation(key, node);
+        rerenderEdgesForCurrentPositions();
+        window.setTimeout(rerenderEdgesForCurrentPositions, NODE_TRANSITION_MS);
+    }
+
+    openDetail(key, entry);
+}
+
+function unwrapSnapshotPayload(payload) {
+    if (payload && typeof payload === 'object' && !Array.isArray(payload) && payload.snapshot) {
+        return payload.snapshot;
+    }
+    return payload;
+}
+
+function setImportResult(kind, content) {
+    importResult.className = `import-result ${kind}`;
+    importResult.innerHTML = content;
+}
+
+function resetImportPanel() {
+    importSnapshotDraft = null;
+    importConfirmBtn.disabled = true;
+    importSummary.textContent = 'Choose a JSON snapshot file';
+    setImportResult('', '');
+    importFile.value = '';
+}
+
+function openImportPanel() {
+    importPanel.classList.add('visible');
+    importPanel.setAttribute('aria-hidden', 'false');
+    importBtn.setAttribute('aria-expanded', 'true');
+    if (!importSnapshotDraft) {
+        importSummary.textContent = 'Choose a JSON snapshot file';
+    }
+}
+
+function closeImportPanel() {
+    importPanel.classList.remove('visible');
+    importPanel.setAttribute('aria-hidden', 'true');
+    importBtn.setAttribute('aria-expanded', 'false');
+}
+
+function formatImportErrors(errors = []) {
+    if (!Array.isArray(errors) || !errors.length) return 'Unknown validation error.';
+    return `
+    <div class="import-error-title">${errors.length} validation ${errors.length === 1 ? 'error' : 'errors'}</div>
+    <ul>
+      ${errors.slice(0, 12).map(error =>
+        `<li><code>${esc(error.path || 'snapshot')}</code>: ${esc(error.message || 'invalid')}</li>`
+    ).join('')}
+    </ul>
+    ${errors.length > 12 ? `<div class="import-more">+${errors.length - 12} more errors</div>` : ''}
+  `;
+}
+
+async function handleImportFile(file) {
+    if (!file) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        setImportResult('error', 'Connect before importing a snapshot.');
+        return;
+    }
+
+    importSnapshotDraft = null;
+    importConfirmBtn.disabled = true;
+    importSummary.textContent = `Validating ${file.name}`;
+    setImportResult('pending', 'Reading file...');
+
+    let parsed;
+    try {
+        parsed = JSON.parse(await file.text());
+    } catch (error) {
+        importSummary.textContent = 'Invalid JSON file';
+        setImportResult('error', `JSON parse failed: ${esc(error.message)}`);
+        return;
+    }
+
+    const snapshot = unwrapSnapshotPayload(parsed);
+    setImportResult('pending', 'Validating snapshot with server...');
+    const response = await wsRpc({
+        type: 'validate-import',
+        snapshot,
+        requestId: makeRequestId('validate_import'),
+    });
+
+    if (response.type === 'error') {
+        importSummary.textContent = 'Validation request failed';
+        setImportResult('error', esc(response.message || 'validation-failed'));
+        return;
+    }
+
+    if (!response.ok) {
+        importSummary.textContent = 'Snapshot failed validation';
+        setImportResult('error', formatImportErrors(response.errors));
+        return;
+    }
+
+    importSnapshotDraft = snapshot;
+    importConfirmBtn.disabled = false;
+    const stats = response.stats || {};
+    importSummary.textContent = `${stats.entryCount ?? 0} entries, ${stats.edgeCount ?? 0} edges`;
+    setImportResult('ok', 'Snapshot is valid. Import will replace the current graph.');
+}
+
+async function importValidatedSnapshot() {
+    if (!importSnapshotDraft) return;
+    if (!window.confirm('Import will replace the current memory graph. Continue?')) return;
+
+    importConfirmBtn.disabled = true;
+    setImportResult('pending', 'Importing snapshot...');
+    const response = await wsRpc({
+        type: 'import',
+        snapshot: importSnapshotDraft,
+        requestId: makeRequestId('import_snapshot'),
+    });
+
+    if (response.type === 'error' || response.ok === false) {
+        importConfirmBtn.disabled = false;
+        importSummary.textContent = 'Import failed';
+        setImportResult('error', response.errors ? formatImportErrors(response.errors) : esc(response.error || response.message || 'import-failed'));
+        return;
+    }
+
+    const stats = response.stats || {};
+    setImportResult('ok', `Imported ${stats.entryCount ?? 0} entries and ${stats.edgeCount ?? 0} edges.`);
+    importSnapshotDraft = null;
+    importConfirmBtn.disabled = true;
+    await loadGraph({ preserveView: false });
+    window.setTimeout(closeImportPanel, 700);
+}
+
 function renderGraph(entries, edges, options = {}) {
     const previousSelected = options.preserveSelection ? selectedKey : null;
     const previousPositions = options.preservePositions ? nodePositions : {};
@@ -1060,6 +1291,7 @@ function renderGraph(entries, edges, options = {}) {
     }
     emptyState.classList.toggle('visible', keys.length === 0);
     updateLegend();
+    renderIdentityPanel();
 
     if (!keys.length) {
         nodePositions = {};
@@ -1102,7 +1334,7 @@ function openDetail(key, entry) {
     if (selectedKey) {
         const prev = scene.querySelector(`[data-key="${CSS.escape(selectedKey)}"]`);
         if (prev) {
-            const c = ageColor(currentEntries[selectedKey]?.updatedAt || 0);
+            const c = nodeIdentityColor(selectedKey);
             prev.style.borderColor = `${c}44`;
             prev.style.boxShadow = '0 2px 14px #00000055';
         }
@@ -1111,7 +1343,8 @@ function openDetail(key, entry) {
     selectedKey = key;
     focusedKey = key;
     lastFocusedKey = key;
-    const color = ageColor(entry.updatedAt);
+    const color = nodeIdentityColor(key);
+    const recencyColor = ageColor(entry.updatedAt);
 
     const nodeEl = scene.querySelector(`[data-key="${CSS.escape(key)}"]`);
     if (nodeEl) {
@@ -1147,7 +1380,7 @@ function openDetail(key, entry) {
 
     document.getElementById('dp-body').innerHTML = `
 <div class="dp-key">${esc(key)}</div>
-<div class="dp-ts" style="color:${color}">${esc(date)}${age ? ` - ${esc(age)}` : ''}</div>
+<div class="dp-ts" style="color:${recencyColor}">${esc(date)}${age ? ` - ${esc(age)}` : ''}</div>
 <div class="dp-value">${esc(val)}</div>
 <div class="dp-row"><span class="dp-rl">Summary</span><span class="dp-rv">${esc(entry.summary || '-')}</span></div>
 <div class="dp-row"><span class="dp-rl">Tags</span><span class="dp-rv">${tagsHtml}</span></div>
@@ -1158,6 +1391,7 @@ ${exp}`;
 
     detailPanel.classList.add('visible');
     document.body.classList.add('inspector-open');
+    renderIdentityPanel();
     applyFocusState();
 }
 
@@ -1165,7 +1399,7 @@ document.getElementById('dp-close').addEventListener('click', () => {
     if (selectedKey) {
         const el = scene.querySelector(`[data-key="${CSS.escape(selectedKey)}"]`);
         if (el) {
-            const c = ageColor(currentEntries[selectedKey]?.updatedAt || 0);
+            const c = nodeIdentityColor(selectedKey);
             expandedNodes.delete(selectedKey);
             setNodePresentation(selectedKey, el);
             el.classList.remove('selected');
@@ -1362,6 +1596,22 @@ document.getElementById('zoom-out-btn').addEventListener('click', () => {
 });
 document.getElementById('fit-btn').addEventListener('click', () => fitView(nodePositions));
 fitFocusedBtn.addEventListener('click', fitFocusedNeighborhood);
+identityBtn.addEventListener('click', toggleIdentityPanel);
+identityClose.addEventListener('click', closeIdentityPanel);
+identitySearch.addEventListener('input', renderIdentityPanel);
+identityList.addEventListener('click', (event) => {
+    const item = event.target.closest('.identity-item');
+    if (!item) return;
+    focusIdentityNode(item.dataset.key);
+});
+importBtn.addEventListener('click', openImportPanel);
+importClose.addEventListener('click', closeImportPanel);
+importCancelBtn.addEventListener('click', () => {
+    resetImportPanel();
+    closeImportPanel();
+});
+importFile.addEventListener('change', () => handleImportFile(importFile.files?.[0]));
+importConfirmBtn.addEventListener('click', importValidatedSnapshot);
 settingsBtn.addEventListener('click', () => toggleSettingsPanel());
 settingsClose.addEventListener('click', () => toggleSettingsPanel(false));
 resetSettingsBtn.addEventListener('click', () => {
@@ -1410,12 +1660,30 @@ settingCustomAccent.addEventListener('input', () => {
     applyGraphSettings();
 });
 document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') toggleSettingsPanel(false);
+    if (e.key === 'Escape') {
+        toggleSettingsPanel(false);
+        closeIdentityPanel();
+        closeImportPanel();
+    }
 });
 document.addEventListener('mousedown', e => {
-    if (!settingsPanel.classList.contains('visible')) return;
-    if (settingsPanel.contains(e.target) || settingsBtn.contains(e.target)) return;
-    toggleSettingsPanel(false);
+    if (settingsPanel.classList.contains('visible')) {
+        if (!settingsPanel.contains(e.target) && !settingsBtn.contains(e.target)) {
+            toggleSettingsPanel(false);
+        }
+    }
+
+    if (identityPanel.classList.contains('visible')) {
+        if (!identityPanel.contains(e.target) && !identityBtn.contains(e.target)) {
+            closeIdentityPanel();
+        }
+    }
+
+    if (importPanel.classList.contains('visible')) {
+        if (!importPanel.contains(e.target) && !importBtn.contains(e.target)) {
+            closeImportPanel();
+        }
+    }
 });
 document.getElementById('fullscreen-btn').addEventListener('click', () => {
     if (!document.fullscreenElement) document.documentElement.requestFullscreen().catch(() => { });
@@ -1591,6 +1859,7 @@ async function connect() {
         setStatus('Disconnected', 'error');
         connectBtn.disabled = false;
         refreshBtn.disabled = true;
+        importBtn.disabled = true;
     };
 
     const opened = await new Promise(res => { ws.onopen = () => res(true); ws.onerror = () => res(false); });
@@ -1610,6 +1879,7 @@ async function connect() {
     }
 
     refreshBtn.disabled = false;
+    importBtn.disabled = false;
     connectBtn.disabled = false;
     await loadGraph();
     startLiveRefresh();
