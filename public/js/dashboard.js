@@ -15,7 +15,6 @@ const ZOOM_MAX = 3;
 const DEFAULT_WHEEL_ZOOM_INTENSITY = 0.0015;
 const DEFAULT_BUTTON_ZOOM_STEP = 1.1;
 const DEFAULT_FOCUS_MAX_DEPTH = 4;
-const DASHBOARD_SETTINGS_KEY = 'sharedMemory.dashboard.settings.v1';
 const expandedNodes = new Set();
 const FOCUS_SCALE = [
     { color: '#f8fafc', opacity: 1, edgeOpacity: 0.95, ring: 3, glow: 30 },
@@ -24,141 +23,11 @@ const FOCUS_SCALE = [
     { color: '#a855f7', opacity: 0.58, edgeOpacity: 0.43, ring: 1, glow: 12 },
     { color: '#f59e0b', opacity: 0.4, edgeOpacity: 0.3, ring: 1, glow: 8 },
 ];
-const DEFAULT_GRAPH_SETTINGS = Object.freeze({
-    focusDepth: DEFAULT_FOCUS_MAX_DEPTH,
-    focusIntensity: 1,
-    zoomSpeed: 1,
-    edgeLabelMode: 'focus',
-    liveRefresh: true,
-    palette: 'aurora',
-    customPalette: {
-        appBg: '#05050e',
-        panelBg: '#0f0f1e',
-        surfaceBg: '#080810',
-        surfaceBg2: '#0b0b14',
-        borderColor: '#2d2d44',
-        accent: '#6366f1',
-        accent2: '#22c55e',
-    },
-});
-
-const COLOR_PALETTES = {
-    aurora: {
-        label: 'Aurora',
-        vars: {
-            appBg: '#05050e',
-            gridColor: '#12122a',
-            panelBg: '#0f0f1e',
-            surfaceBg: '#080810',
-            surfaceBg2: '#0b0b14',
-            borderColor: '#2d2d44',
-            accent: '#6366f1',
-            accent2: '#22c55e',
-        },
-    },
-    ocean: {
-        label: 'Ocean',
-        vars: {
-            appBg: '#061018',
-            gridColor: '#12304a',
-            panelBg: '#0d1720',
-            surfaceBg: '#08131b',
-            surfaceBg2: '#0b1a26',
-            borderColor: '#23435c',
-            accent: '#06b6d4',
-            accent2: '#3b82f6',
-        },
-    },
-    ember: {
-        label: 'Ember',
-        vars: {
-            appBg: '#130906',
-            gridColor: '#3a1a14',
-            panelBg: '#1a1110',
-            surfaceBg: '#150d0c',
-            surfaceBg2: '#1e1210',
-            borderColor: '#4d2a25',
-            accent: '#f97316',
-            accent2: '#ef4444',
-        },
-    },
-    forest: {
-        label: 'Forest',
-        vars: {
-            appBg: '#07110d',
-            gridColor: '#163126',
-            panelBg: '#0e1814',
-            surfaceBg: '#09120f',
-            surfaceBg2: '#0d1a16',
-            borderColor: '#224035',
-            accent: '#22c55e',
-            accent2: '#84cc16',
-        },
-    },
-    mono: {
-        label: 'Mono',
-        vars: {
-            appBg: '#0a0a0a',
-            gridColor: '#202020',
-            panelBg: '#111111',
-            surfaceBg: '#121212',
-            surfaceBg2: '#161616',
-            borderColor: '#343434',
-            accent: '#e5e7eb',
-            accent2: '#9ca3af',
-        },
-    },
-};
-
-const RELATION_COLOR_PRESETS = {
-    aurora: {
-        related_to: '#6366f1',
-        depends_on: '#f59e0b',
-        supports: '#22c55e',
-        contradicts: '#ef4444',
-        mentions: '#06b6d4',
-        derived_from: '#a855f7',
-        next_step: '#f97316',
-    },
-    ocean: {
-        related_to: '#38bdf8',
-        depends_on: '#60a5fa',
-        supports: '#14b8a6',
-        contradicts: '#f43f5e',
-        mentions: '#22d3ee',
-        derived_from: '#818cf8',
-        next_step: '#0ea5e9',
-    },
-    ember: {
-        related_to: '#fb7185',
-        depends_on: '#fb923c',
-        supports: '#f97316',
-        contradicts: '#ef4444',
-        mentions: '#f59e0b',
-        derived_from: '#c084fc',
-        next_step: '#fdba74',
-    },
-    forest: {
-        related_to: '#4ade80',
-        depends_on: '#84cc16',
-        supports: '#22c55e',
-        contradicts: '#f87171',
-        mentions: '#10b981',
-        derived_from: '#34d399',
-        next_step: '#a3e635',
-    },
-    mono: {
-        related_to: '#e5e7eb',
-        depends_on: '#cbd5e1',
-        supports: '#94a3b8',
-        contradicts: '#9ca3af',
-        mentions: '#d1d5db',
-        derived_from: '#f3f4f6',
-        next_step: '#6b7280',
-    },
-};
-
-let relationColors = { ...RELATION_COLOR_PRESETS.aurora };
+// Settings schema/store/panel/apply live in js/settings/. window.Settings is
+// populated by those scripts (loaded before this one). Schema-driven palette
+// + relation-color presets live in window.SettingsSchema; CSS-var application
+// and relation-color resolution live in window.SettingsApply.
+let relationColors = window.SettingsApply.relationColors('aurora', {});
 
 // ── State ──────────────────────────────────────────────────────────────
 let ws = null;
@@ -176,7 +45,7 @@ let lastFocusedKey = null;
 let liveRefreshTimer = null;
 let refreshQueued = false;
 let nextRpcId = 1;
-let graphSettings = loadGraphSettings();
+let graphSettings = window.Settings.snapshot();
 const subscribedKeys = new Set();
 const pending = {};
 const msgQueue = [];
@@ -210,23 +79,10 @@ const importCancelBtn = document.getElementById('import-cancel-btn');
 const settingsBtn = document.getElementById('settings-btn');
 const settingsPanel = document.getElementById('settings-panel');
 const settingsClose = document.getElementById('settings-close');
-const settingsSummary = document.getElementById('settings-summary');
-const settingZoomSpeed = document.getElementById('setting-zoom-speed');
-const settingZoomSpeedValue = document.getElementById('setting-zoom-speed-value');
-const settingFocusDepth = document.getElementById('setting-focus-depth');
-const settingFocusDepthValue = document.getElementById('setting-focus-depth-value');
-const settingFocusIntensity = document.getElementById('setting-focus-intensity');
-const settingFocusIntensityValue = document.getElementById('setting-focus-intensity-value');
-const settingEdgeLabels = document.getElementById('setting-edge-labels');
-const settingEdgeLabelsValue = document.getElementById('setting-edge-labels-value');
-const settingLiveRefresh = document.getElementById('setting-live-refresh');
-const paletteOptions = document.getElementById('palette-options');
-const customPaletteControls = document.getElementById('custom-palette-controls');
-const settingCustomBg = document.getElementById('setting-custom-bg');
-const settingCustomSurface = document.getElementById('setting-custom-surface');
-const settingCustomAccent = document.getElementById('setting-custom-accent');
-const fitFocusedBtn = document.getElementById('fit-focused-btn');
-const resetSettingsBtn = document.getElementById('reset-settings-btn');
+// All other settings controls (sliders, selects, palette grid, profile UI) are
+// owned by js/settings/panel.js. fit-focused-btn and reset-settings-btn are
+// generated by the panel and looked up after Settings.init() runs.
+let fitFocusedBtn = null;
 
 // ── Helpers ────────────────────────────────────────────────────────────
 function esc(v) {
@@ -235,140 +91,10 @@ function esc(v) {
         .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-function clampNumber(value, min, max, fallback) {
-    const n = Number(value);
-    if (!Number.isFinite(n)) return fallback;
-    return Math.max(min, Math.min(max, n));
-}
-
-function normalizeHexColor(value, fallback) {
-    return /^#[0-9a-fA-F]{6}$/.test(value) ? value : fallback;
-}
-
-function normalizeEdgeLabelMode(value, fallback = DEFAULT_GRAPH_SETTINGS.edgeLabelMode) {
-    return ['focus', 'always', 'off'].includes(value) ? value : fallback;
-}
-
-function paletteVars(name, customPalette = {}) {
-    const preset = COLOR_PALETTES[name] || COLOR_PALETTES.aurora;
-    if (name !== 'custom') return preset.vars;
-
-    return {
-        appBg: normalizeHexColor(customPalette.appBg, DEFAULT_GRAPH_SETTINGS.customPalette.appBg),
-        gridColor: normalizeHexColor(customPalette.gridColor, '#12122a'),
-        panelBg: normalizeHexColor(customPalette.panelBg, DEFAULT_GRAPH_SETTINGS.customPalette.panelBg),
-        surfaceBg: normalizeHexColor(customPalette.surfaceBg, DEFAULT_GRAPH_SETTINGS.customPalette.surfaceBg),
-        surfaceBg2: normalizeHexColor(customPalette.surfaceBg2, DEFAULT_GRAPH_SETTINGS.customPalette.surfaceBg2),
-        borderColor: normalizeHexColor(customPalette.borderColor, DEFAULT_GRAPH_SETTINGS.customPalette.borderColor),
-        accent: normalizeHexColor(customPalette.accent, DEFAULT_GRAPH_SETTINGS.customPalette.accent),
-        accent2: normalizeHexColor(customPalette.accent2, DEFAULT_GRAPH_SETTINGS.customPalette.accent2),
-    };
-}
-
-function relationPalette(name, customPalette = {}) {
-    if (name !== 'custom') {
-        return { ...(RELATION_COLOR_PRESETS[name] || RELATION_COLOR_PRESETS.aurora) };
-    }
-
-    const accent = normalizeHexColor(customPalette.accent, DEFAULT_GRAPH_SETTINGS.customPalette.accent);
-    const accent2 = normalizeHexColor(customPalette.accent2, DEFAULT_GRAPH_SETTINGS.customPalette.accent2);
-    return {
-        related_to: accent,
-        depends_on: accent2,
-        supports: '#22c55e',
-        contradicts: '#ef4444',
-        mentions: '#06b6d4',
-        derived_from: '#a855f7',
-        next_step: '#f97316',
-    };
-}
-
-function loadGraphSettings() {
-    try {
-        const parsed = JSON.parse(localStorage.getItem(DASHBOARD_SETTINGS_KEY) || '{}');
-        const customPalette = parsed.customPalette && typeof parsed.customPalette === 'object'
-            ? parsed.customPalette
-            : {};
-        return {
-            focusDepth: Math.round(clampNumber(parsed.focusDepth, 1, 6, DEFAULT_GRAPH_SETTINGS.focusDepth)),
-            focusIntensity: clampNumber(parsed.focusIntensity, 0.6, 1.4, DEFAULT_GRAPH_SETTINGS.focusIntensity),
-            zoomSpeed: clampNumber(parsed.zoomSpeed, 0.5, 2.5, DEFAULT_GRAPH_SETTINGS.zoomSpeed),
-            edgeLabelMode: normalizeEdgeLabelMode(parsed.edgeLabelMode, parsed.edgeLabels === false ? 'off' : 'focus'),
-            liveRefresh: parsed.liveRefresh !== false,
-            palette: COLOR_PALETTES[parsed.palette] ? parsed.palette : 'aurora',
-            customPalette: {
-                appBg: normalizeHexColor(customPalette.appBg, DEFAULT_GRAPH_SETTINGS.customPalette.appBg),
-                panelBg: normalizeHexColor(customPalette.panelBg, DEFAULT_GRAPH_SETTINGS.customPalette.panelBg),
-                surfaceBg: normalizeHexColor(customPalette.surfaceBg, DEFAULT_GRAPH_SETTINGS.customPalette.surfaceBg),
-                surfaceBg2: normalizeHexColor(customPalette.surfaceBg2, DEFAULT_GRAPH_SETTINGS.customPalette.surfaceBg2),
-                borderColor: normalizeHexColor(customPalette.borderColor, DEFAULT_GRAPH_SETTINGS.customPalette.borderColor),
-                accent: normalizeHexColor(customPalette.accent, DEFAULT_GRAPH_SETTINGS.customPalette.accent),
-                accent2: normalizeHexColor(customPalette.accent2, DEFAULT_GRAPH_SETTINGS.customPalette.accent2),
-            },
-        };
-    } catch {
-        return { ...DEFAULT_GRAPH_SETTINGS };
-    }
-}
-
-function saveGraphSettings() {
-    try {
-        localStorage.setItem(DASHBOARD_SETTINGS_KEY, JSON.stringify(graphSettings));
-    } catch { }
-}
-
-function applyPaletteTheme() {
-    const vars = paletteVars(graphSettings.palette, graphSettings.customPalette);
-    relationColors = relationPalette(graphSettings.palette, graphSettings.customPalette);
-    const root = document.documentElement.style;
-    root.setProperty('--app-bg', vars.appBg);
-    root.setProperty('--grid-color', vars.gridColor);
-    root.setProperty('--panel-bg', vars.panelBg);
-    root.setProperty('--surface-bg', vars.surfaceBg);
-    root.setProperty('--surface-bg-2', vars.surfaceBg2);
-    root.setProperty('--border-color', vars.borderColor);
-    root.setProperty('--accent', vars.accent);
-    root.setProperty('--accent-2', vars.accent2);
-    rerenderEdgesForCurrentPositions();
-}
-
-function applyGraphSettings(options = {}) {
-    document.body.classList.toggle('edge-labels-focus', graphSettings.edgeLabelMode === 'focus');
-    document.body.classList.toggle('edge-labels-always', graphSettings.edgeLabelMode === 'always');
-    document.body.classList.toggle('edge-labels-off', graphSettings.edgeLabelMode === 'off');
-    applyPaletteTheme();
-    syncSettingsControls();
-    if (!options.skipSave) saveGraphSettings();
-
-    if (graphSettings.liveRefresh) {
-        if (ws && ws.readyState === WebSocket.OPEN && !liveRefreshTimer) startLiveRefresh();
-    } else {
-        stopLiveRefresh();
-    }
-
-    if (selectedKey) applyRadialFocusLayout(selectedKey);
-    else applyFocusState();
-}
-
-function syncPaletteControls() {
-    const paletteKeys = Object.keys(COLOR_PALETTES);
-    paletteOptions.innerHTML = paletteKeys.map((key) => {
-        const palette = COLOR_PALETTES[key];
-        const checked = graphSettings.palette === key ? 'checked' : '';
-        return `
-      <label class="palette-option">
-        <input type="radio" name="palette-mode" value="${key}" ${checked} />
-        <span class="palette-swatch" style="background:${palette.vars.accent}"></span>
-        <span>${palette.label}</span>
-      </label>
-    `;
-    }).join('');
-
-    customPaletteControls.classList.toggle('visible', graphSettings.palette === 'custom');
-    settingCustomBg.value = graphSettings.customPalette.appBg;
-    settingCustomSurface.value = graphSettings.customPalette.panelBg;
-    settingCustomAccent.value = graphSettings.customPalette.accent;
-}
+// Settings persistence and palette/edge-label application now live in
+// js/settings/. The onChange subscriber installed in initSettings() runs the
+// graph-side effects (relationColors refresh, edge re-render, focus rerun,
+// live-refresh timer, filtered reload) when any setting changes.
 
 function dimmedNodeOpacity() {
     return Math.max(0.08, 0.3 - graphSettings.focusIntensity * 0.11);
@@ -424,8 +150,9 @@ function nodeDegree(key) {
 
 function collapsedNodeSize(key) {
     const degree = nodeDegree(key);
-    const size = NODE_ROUND_MIN + Math.sqrt(degree) * NODE_ROUND_GROWTH;
-    return Math.round(Math.min(NODE_ROUND_MAX, size));
+    const scale = Number(graphSettings && graphSettings.nodeScale) || 1;
+    const size = (NODE_ROUND_MIN + Math.sqrt(degree) * NODE_ROUND_GROWTH) * scale;
+    return Math.round(Math.min(NODE_ROUND_MAX * scale, size));
 }
 
 function nodeVisualBox(key, pos, entry = currentEntries[key]) {
@@ -967,7 +694,8 @@ function renderEdges(edges, positions, entries) {
         const tp = nodeVisualBox(edge.to, targetSlot, entries[edge.to]);
 
         const color = relationColors[edge.relation] || relationColors.related_to || '#6366f1';
-        const sw = (1.5 + (edge.weight || 0) * 2.5).toFixed(2);
+        const edgeScale = Number(graphSettings.edgeThickness) || 1;
+        const sw = ((1.5 + (edge.weight || 0) * 2.5) * edgeScale).toFixed(2);
 
         const sourceCenter = nodeCenter(sp);
         const targetCenter = nodeCenter(tp);
@@ -1284,7 +1012,27 @@ async function importValidatedSnapshot() {
     window.setTimeout(closeImportPanel, 700);
 }
 
-function renderGraph(entries, edges, options = {}) {
+// Apply settings-driven filters (min importance, relation-type toggles) to a
+// raw entry/edge pair. Edges referencing filtered-out entries are dropped.
+function filteredGraph(entries, edges) {
+    const minImportance = Number(graphSettings.minImportance) || 0;
+    const relFilters = graphSettings.relationFilters || {};
+    const visibleEntries = {};
+    for (const [key, entry] of Object.entries(entries)) {
+        if ((entry.importance ?? 0) < minImportance) continue;
+        visibleEntries[key] = entry;
+    }
+    const visibleEdges = edges.filter((e) => {
+        if (relFilters[e.relation] === false) return false;
+        return visibleEntries[e.from] && visibleEntries[e.to];
+    });
+    return { entries: visibleEntries, edges: visibleEdges };
+}
+
+function renderGraph(rawEntries, rawEdges, options = {}) {
+    const filtered = filteredGraph(rawEntries, rawEdges);
+    const entries = filtered.entries;
+    const edges = filtered.edges;
     const previousSelected = options.preserveSelection ? selectedKey : null;
     const previousPositions = options.preservePositions ? nodePositions : {};
     for (const el of scene.querySelectorAll('.mem-node')) el.remove();
@@ -1537,33 +1285,11 @@ function fitFocusedNeighborhood() {
     fitView(Object.keys(focusedPositions).length ? focusedPositions : nodePositions);
 }
 
-function updateSettingsSummary() {
-    settingsSummary.textContent =
-        `depth ${graphSettings.focusDepth} | focus ${graphSettings.focusIntensity.toFixed(1)}x | zoom ${graphSettings.zoomSpeed.toFixed(1)}x`;
-}
-
-function syncSettingsControls() {
-    settingZoomSpeed.value = String(graphSettings.zoomSpeed);
-    settingZoomSpeedValue.textContent = `${graphSettings.zoomSpeed.toFixed(1)}x`;
-    settingFocusDepth.value = String(graphSettings.focusDepth);
-    settingFocusDepthValue.textContent = String(graphSettings.focusDepth);
-    settingFocusIntensity.value = String(graphSettings.focusIntensity);
-    settingFocusIntensityValue.textContent = `${graphSettings.focusIntensity.toFixed(1)}x`;
-    settingEdgeLabels.value = graphSettings.edgeLabelMode;
-    settingEdgeLabelsValue.textContent = graphSettings.edgeLabelMode === 'always'
-        ? 'Always'
-        : graphSettings.edgeLabelMode === 'off' ? 'Off' : 'Focus';
-    settingLiveRefresh.checked = graphSettings.liveRefresh;
-    syncPaletteControls();
-    updateSettingsSummary();
-}
-
 function toggleSettingsPanel(force) {
     const nextVisible = force ?? !settingsPanel.classList.contains('visible');
     settingsPanel.classList.toggle('visible', nextVisible);
     settingsPanel.setAttribute('aria-hidden', nextVisible ? 'false' : 'true');
     settingsBtn.setAttribute('aria-expanded', nextVisible ? 'true' : 'false');
-    if (nextVisible) syncSettingsControls();
 }
 
 viewport.addEventListener('mousedown', e => {
@@ -1604,7 +1330,7 @@ document.getElementById('zoom-out-btn').addEventListener('click', () => {
     zoomAtCenter(scale / zoomButtonFactor());
 });
 document.getElementById('fit-btn').addEventListener('click', () => fitView(nodePositions));
-fitFocusedBtn.addEventListener('click', fitFocusedNeighborhood);
+// fit-focused-btn is bound after Settings.init() once the panel renders it.
 identityBtn.addEventListener('click', toggleIdentityPanel);
 identityClose.addEventListener('click', closeIdentityPanel);
 identitySearch.addEventListener('input', renderIdentityPanel);
@@ -1623,51 +1349,47 @@ importFile.addEventListener('change', () => handleImportFile(importFile.files?.[
 importConfirmBtn.addEventListener('click', importValidatedSnapshot);
 settingsBtn.addEventListener('click', () => toggleSettingsPanel());
 settingsClose.addEventListener('click', () => toggleSettingsPanel(false));
-resetSettingsBtn.addEventListener('click', () => {
-    graphSettings = { ...DEFAULT_GRAPH_SETTINGS };
-    applyGraphSettings();
-});
-settingZoomSpeed.addEventListener('input', () => {
-    graphSettings.zoomSpeed = clampNumber(settingZoomSpeed.value, 0.5, 2.5, DEFAULT_GRAPH_SETTINGS.zoomSpeed);
-    applyGraphSettings();
-});
-settingFocusDepth.addEventListener('input', () => {
-    graphSettings.focusDepth = Math.round(clampNumber(settingFocusDepth.value, 1, 6, DEFAULT_GRAPH_SETTINGS.focusDepth));
-    applyGraphSettings();
-});
-settingFocusIntensity.addEventListener('input', () => {
-    graphSettings.focusIntensity = clampNumber(settingFocusIntensity.value, 0.6, 1.4, DEFAULT_GRAPH_SETTINGS.focusIntensity);
-    applyGraphSettings();
-});
-settingEdgeLabels.addEventListener('change', () => {
-    graphSettings.edgeLabelMode = normalizeEdgeLabelMode(settingEdgeLabels.value);
-    applyGraphSettings();
-});
-settingLiveRefresh.addEventListener('change', () => {
-    graphSettings.liveRefresh = settingLiveRefresh.checked;
-    applyGraphSettings();
-});
-paletteOptions.addEventListener('change', (event) => {
-    const target = event.target;
-    if (!(target instanceof HTMLInputElement) || target.name !== 'palette-mode') return;
-    graphSettings.palette = target.value;
-    applyGraphSettings();
-});
-settingCustomBg.addEventListener('input', () => {
-    graphSettings.palette = 'custom';
-    graphSettings.customPalette.appBg = settingCustomBg.value;
-    applyGraphSettings();
-});
-settingCustomSurface.addEventListener('input', () => {
-    graphSettings.palette = 'custom';
-    graphSettings.customPalette.panelBg = settingCustomSurface.value;
-    applyGraphSettings();
-});
-settingCustomAccent.addEventListener('input', () => {
-    graphSettings.palette = 'custom';
-    graphSettings.customPalette.accent = settingCustomAccent.value;
-    applyGraphSettings();
-});
+
+// Apply graph-side effects whenever a setting changes. The panel writes back
+// through window.Settings.set, which runs apply.js (CSS vars + body classes)
+// and then calls every subscriber registered here.
+function handleSettingsChange({ settings, changed }) {
+    graphSettings = settings;
+    relationColors = window.SettingsApply.relationColors(settings.palette, settings.customPalette || {});
+
+    const paletteTouched = changed.has('palette')
+        || changed.has('customPalette.appBg')
+        || changed.has('customPalette.panelBg')
+        || changed.has('customPalette.accent');
+    if (paletteTouched) rerenderEdgesForCurrentPositions();
+
+    if (changed.has('liveRefresh')) {
+        if (settings.liveRefresh) {
+            if (ws && ws.readyState === WebSocket.OPEN && !liveRefreshTimer) startLiveRefresh();
+        } else {
+            stopLiveRefresh();
+        }
+    }
+
+    if (changed.has('focusDepth') || changed.has('focusIntensity') || changed.has('edgeLabelMode')) {
+        if (selectedKey) applyRadialFocusLayout(selectedKey);
+        else applyFocusState();
+    }
+
+    if (changed.has('minImportance') || changed.has('relationFilters')) {
+        // Filters are applied at render time via filteredGraph(); just re-render
+        // from the current snapshot without hitting the network.
+        renderGraph(currentEntries, currentEdges, { preserveSelection: true, preservePositions: true, fit: false });
+    }
+
+    if (changed.has('nodeScale') || changed.has('labelScale') || changed.has('edgeThickness')) {
+        rerenderEdgesForCurrentPositions();
+    }
+}
+
+window.Settings.init({ onChange: handleSettingsChange });
+fitFocusedBtn = document.getElementById('fit-focused-btn');
+if (fitFocusedBtn) fitFocusedBtn.addEventListener('click', fitFocusedNeighborhood);
 document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
         toggleSettingsPanel(false);
@@ -1925,5 +1647,8 @@ connectBtn.addEventListener('click', connect);
 refreshBtn.addEventListener('click', loadGraph);
 tokenInput.addEventListener('keydown', e => { if (e.key === 'Enter') connect(); });
 
-applyGraphSettings({ skipSave: true });
+// Initial palette/edge-label/CSS-vars apply happens inside Settings.init().
+// Run focus-state once the snapshot is in hand so the radial layout matches.
+if (selectedKey) applyRadialFocusLayout(selectedKey);
+else applyFocusState();
 applyTransform();

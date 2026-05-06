@@ -15,6 +15,10 @@
     --accent-hover: #4f46e5;
     --accent-2: #22c55e;
     --danger: #ef4444;
+    /* Set by js/settings/apply.js — driven by the Display section sliders. */
+    --node-scale: 1;
+    --label-scale: 1;
+    --edge-stroke-scale: 1;
 }
 
 /* ── Reset ────────────────────────────────────────────────────────────────── */
@@ -1277,3 +1281,150 @@ body.edge-labels-off .edge-label-text {
 @keyframes spin {
     to { transform: rotate(360deg); }
 }
+
+/* ── Settings panel: schema-driven UI ─────────────────────────────────────── */
+.settings-search {
+    padding: 8px 12px 4px;
+    border-bottom: 1px solid var(--border-soft);
+}
+.settings-search input {
+    width: 100%;
+    padding: 6px 10px;
+    background: var(--surface-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font: inherit;
+    outline: none;
+}
+.settings-search input:focus {
+    border-color: var(--accent);
+}
+
+.settings-section { border-bottom: 1px solid var(--border-soft); }
+.settings-section[data-collapsed="true"] .settings-section-body { display: none; }
+.settings-section.search-empty { display: none; }
+
+.settings-section-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 10px 12px;
+    background: transparent;
+    border: 0;
+    color: var(--text-primary);
+    cursor: pointer;
+    text-align: left;
+    font: inherit;
+}
+.settings-section-header:hover { background: color-mix(in srgb, var(--surface-bg) 60%, transparent); }
+.settings-section-title { font-weight: 600; flex: 1; }
+.settings-section-modified {
+    color: var(--accent-2);
+    font-weight: 700;
+    font-size: 18px;
+    line-height: 1;
+}
+.settings-section-chevron {
+    color: var(--text-muted);
+    font-family: monospace;
+    width: 14px;
+    text-align: center;
+}
+.settings-section-body { padding: 4px 12px 12px; display: flex; flex-direction: column; gap: 8px; }
+
+.setting-row {
+    display: grid;
+    grid-template-columns: minmax(80px, 110px) 1fr auto;
+    align-items: center;
+    gap: 8px;
+}
+.setting-row.toggle { grid-template-columns: 1fr auto; }
+.setting-row.color-row { grid-template-columns: minmax(80px, 110px) auto; }
+.setting-row.relation-row,
+.setting-row.palette-row { grid-template-columns: 1fr; gap: 6px; }
+.setting-row.search-hidden { display: none; }
+.setting-row[hidden] { display: none; }
+.setting-row .setting-label { color: var(--text-muted); font-size: 13px; }
+.setting-row input[type="range"] { width: 100%; }
+.setting-row select,
+.setting-row input[type="text"] {
+    background: var(--surface-bg);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 4px 8px;
+    font: inherit;
+}
+.setting-row .setting-value {
+    min-width: 36px;
+    text-align: right;
+    color: var(--text-soft);
+    font-variant-numeric: tabular-nums;
+    font-size: 12px;
+}
+
+.relation-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+.relation-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    background: var(--surface-bg);
+    font-size: 12px;
+    cursor: pointer;
+    user-select: none;
+}
+.relation-chip input { accent-color: var(--accent); }
+.relation-chip:has(input:checked) {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 16%, var(--surface-bg) 84%);
+}
+
+.palette-swatch-custom {
+    background: linear-gradient(135deg, #6366f1, #22c55e, #f59e0b);
+}
+
+.profile-row {
+    display: flex;
+    gap: 6px;
+    margin-top: 6px;
+    flex-wrap: wrap;
+}
+.profile-row select,
+.profile-row input[type="text"] {
+    flex: 1;
+    min-width: 120px;
+    background: var(--surface-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+    padding: 4px 8px;
+    font: inherit;
+}
+.profile-row button {
+    background: var(--surface-bg);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 4px 10px;
+    cursor: pointer;
+    font: inherit;
+}
+.profile-row button:hover { border-color: var(--accent); color: var(--accent); }
+
+/* Display-section scale variables: --node-scale and --label-scale are
+ * exposed as CSS custom properties so future rules / mn-* refinements can
+ * pick them up without churn. Edge thickness is read from JS at
+ * stroke-width time (see renderEdges). Node sizing reads graphSettings
+ * directly in collapsedNodeSize. */
+.mn-title,
+.mn-summary,
+.mn-tags { font-size: calc(1em * var(--label-scale)); }

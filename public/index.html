@@ -93,78 +93,7 @@
       <button class="settings-close" id="settings-close" title="Close settings">x</button>
     </div>
     <div class="settings-body">
-      <div class="settings-section">
-        <div class="settings-section-title">Navigation</div>
-        <label class="setting-row">
-          <span>Zoom speed</span>
-          <input id="setting-zoom-speed" type="range" min="0.5" max="2.5" step="0.1" />
-          <span class="setting-value" id="setting-zoom-speed-value">1.0x</span>
-        </label>
-        <div class="settings-actions">
-          <button id="fit-focused-btn">Fit Focus</button>
-          <button id="reset-settings-btn">Reset</button>
-        </div>
-      </div>
-      <div class="settings-section">
-        <div class="settings-section-title">Focus</div>
-        <label class="setting-row">
-          <span>Depth</span>
-          <input id="setting-focus-depth" type="range" min="1" max="6" step="1" />
-          <span class="setting-value" id="setting-focus-depth-value">4</span>
-        </label>
-        <label class="setting-row">
-          <span>Intensity</span>
-          <input id="setting-focus-intensity" type="range" min="0.6" max="1.4" step="0.1" />
-          <span class="setting-value" id="setting-focus-intensity-value">1.0x</span>
-        </label>
-      </div>
-      <div class="settings-section">
-        <div class="settings-section-title">Display</div>
-        <label class="setting-row">
-          <span>Edge labels</span>
-          <select id="setting-edge-labels">
-            <option value="focus">Hover/click</option>
-            <option value="always">Always</option>
-            <option value="off">Off</option>
-          </select>
-          <span class="setting-value" id="setting-edge-labels-value">Focus</span>
-        </label>
-        <label class="setting-row toggle">
-          <span>Live refresh</span>
-          <input id="setting-live-refresh" type="checkbox" />
-        </label>
-      </div>
-      <div class="settings-section">
-        <div class="settings-section-title">Palette</div>
-        <div class="setting-inline">
-          <div class="palette-grid" id="palette-options"></div>
-          <div class="palette-note">Choose a preset palette or switch to Custom for your own background and accent
-            colors.</div>
-          <div class="custom-palette" id="custom-palette-controls">
-            <label class="color-row">
-              <span>Background</span>
-              <input id="setting-custom-bg" type="color" />
-            </label>
-            <label class="color-row">
-              <span>Surface</span>
-              <input id="setting-custom-surface" type="color" />
-            </label>
-            <label class="color-row">
-              <span>Accent</span>
-              <input id="setting-custom-accent" type="color" />
-            </label>
-          </div>
-        </div>
-      </div>
-      <div class="settings-section">
-        <div class="settings-section-title">Suggested Additions</div>
-        <ul class="idea-list">
-          <li>Minimap for fast travel across very large memory maps.</li>
-          <li>Relation filters for hiding low-value edge types while reasoning.</li>
-          <li>Saved local layouts for manually arranged graph views.</li>
-          <li>Path inspector for showing the shortest route between two memories.</li>
-        </ul>
-      </div>
+      <!-- Built dynamically by js/settings/panel.js from the schema. -->
     </div>
   </div>
 
@@ -175,6 +104,12 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js"></script>
+  <script src="js/settings/schema.js"></script>
+  <script src="js/settings/store.js"></script>
+  <script src="js/settings/profiles.js"></script>
+  <script src="js/settings/apply.js"></script>
+  <script src="js/settings/panel.js"></script>
+  <script src="js/settings/index.js"></script>
   <script src="js/dashboard.js"></script>
 </body>
 
