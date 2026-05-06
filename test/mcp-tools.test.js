@@ -393,6 +393,115 @@ test('memory_suggest returns empty when disabled and refreshes visible memory wh
     });
 });
 
+test('memory_bulk_set applies per-item with partial-failure tolerance', async () => {
+    const handlers = createSharedMemoryToolHandlers({
+        memory: createMemoryStore(),
+        suggestionEngine: createFakeSuggestionEngine(false),
+        updatedBy: 'mcp-test',
+    });
+
+    const empty = await handlers.memory_bulk_set({ entries: [] });
+    assert.equal(empty.ok, false);
+    assert.equal(empty.error, 'missing-entries');
+
+    const result = await handlers.memory_bulk_set({
+        entries: [
+            { key: 'a', value: 1, summary: 's', tags: ['t'], importance: 5 },
+            { key: 'b', value: 2, summary: 's', tags: ['t'], importance: 5 },
+            { value: 3 },
+        ],
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.results.length, 3);
+    assert.equal(result.results[0].ok, true);
+    assert.equal(result.results[1].ok, true);
+    assert.equal(result.results[2].ok, false);
+    assert.equal(result.results[2].error, 'missing-key');
+
+    const got = await handlers.memory_get({ key: 'a' });
+    assert.equal(got.entry.value, 1);
+});
+
+test('memory_bulk_relate applies per-item with partial-failure tolerance', async () => {
+    const handlers = createSharedMemoryToolHandlers({
+        memory: createMemoryStore(),
+        suggestionEngine: createFakeSuggestionEngine(false),
+        updatedBy: 'mcp-test',
+    });
+
+    await handlers.memory_set({ key: 'a', value: 1, summary: 's', tags: ['t'], importance: 5 });
+    await handlers.memory_set({ key: 'b', value: 1, summary: 's', tags: ['t'], importance: 5 });
+
+    const result = await handlers.memory_bulk_relate({
+        relations: [
+            { from: 'a', to: 'b', relation: 'related_to' },
+            { from: 'a', to: 'missing', relation: 'related_to' },
+        ],
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.results[0].ok, true);
+    assert.equal(result.results[1].ok, false);
+    assert.equal(result.results[1].error, 'missing-node');
+});
+
+test('memory_audit reports hygiene categories and validates input', async () => {
+    const memory = createMemoryStore();
+    const handlers = createSharedMemoryToolHandlers({
+        memory,
+        suggestionEngine: createFakeSuggestionEngine(false),
+        updatedBy: 'mcp-test',
+    });
+
+    await handlers.memory_set({ key: 'good.a', value: 1, summary: 's', tags: ['t'], importance: 5 });
+    await handlers.memory_set({ key: 'good.b', value: 1, summary: 's2', tags: ['t'], importance: 5 });
+    await handlers.memory_relate({ from: 'good.a', to: 'good.b', relation: 'related_to' });
+    await handlers.memory_set({ key: 'bad.zombie', value: 1 });
+
+    const audit = await handlers.memory_audit({});
+    assert.equal(audit.ok, true);
+    assert.ok(audit.zombies.includes('bad.zombie'));
+    assert.ok(!audit.zombies.includes('good.a'));
+    assert.ok(audit.orphans.includes('bad.zombie'));
+    assert.ok(!audit.orphans.includes('good.a'));
+    assert.equal(audit.counts.zombies, audit.zombies.length);
+
+    const invalid = await handlers.memory_audit({ staleMs: 'not a number' });
+    assert.equal(invalid.ok, false);
+    assert.equal(invalid.error, 'invalid-staleMs');
+});
+
+test('memory_set surfaces metadata warnings without blocking the write', async () => {
+    const handlers = createSharedMemoryToolHandlers({
+        memory: createMemoryStore(),
+        suggestionEngine: createFakeSuggestionEngine(false),
+        updatedBy: 'mcp-test',
+    });
+
+    const sparse = await handlers.memory_set({ key: 'task.x', value: 'hi' });
+    assert.equal(sparse.ok, true);
+    assert.deepEqual(sparse.warnings, ['missing-summary', 'missing-tags', 'missing-importance']);
+
+    const partial = await handlers.memory_set({
+        key: 'task.y',
+        value: 'hi',
+        summary: 'something',
+        tags: [],
+        importance: 0,
+    });
+    assert.equal(partial.ok, true);
+    assert.deepEqual(partial.warnings, ['missing-tags', 'missing-importance']);
+
+    const full = await handlers.memory_set({
+        key: 'task.z',
+        value: 'hi',
+        summary: 'full entry',
+        tags: ['ok'],
+        importance: 5,
+    });
+    assert.equal(full.ok, true);
+    assert.equal(Object.prototype.hasOwnProperty.call(full, 'warnings'), false);
+});
+
 test('mcpToolResult serializes JSON text and structured content', () => {
     const output = { ok: true, value: 1 };
     assert.deepEqual(mcpToolResult(output), {

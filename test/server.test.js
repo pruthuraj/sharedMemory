@@ -191,6 +191,7 @@ test('register, set, get, list, and status remain compatible', async () => {
             action: 'set',
             key: 'greeting',
             revision: 1,
+            warnings: ['missing-summary', 'missing-tags', 'missing-importance'],
         });
 
         client.send({ type: 'get', key: 'greeting' });
@@ -240,6 +241,13 @@ test('register, set, get, list, and status remain compatible', async () => {
                 lastExportedAt: null,
                 lastImportedAt: null,
                 lastImportStats: null,
+            },
+            audit: {
+                zombieCount: 1,
+                orphanCount: 1,
+                duplicateGroupCount: 0,
+                staleCount: 0,
+                expiredCount: 0,
             },
         });
     } finally {
@@ -481,6 +489,7 @@ test('auth enabled blocks protected commands until valid auth unlocks the socket
             key: 'allowed',
             revision: 1,
             requestId: 'allowed-1',
+            warnings: ['missing-summary', 'missing-tags', 'missing-importance'],
         });
     } finally {
         await appServer.close();
@@ -1353,6 +1362,7 @@ test('link, unlink, and offline linked targets are safe', async () => {
             action: 'set',
             key: 'safe',
             revision: 1,
+            warnings: ['missing-summary', 'missing-tags', 'missing-importance'],
         });
 
         agent.send({ type: 'unlink', target: 'offlineTarget' });
@@ -2008,6 +2018,94 @@ test('real suggestion engine indexes memory through debounced queue and returns 
         });
         const afterDelete = await client.waitFor((message) => message.requestId === 'suggest-after-delete');
         assert.deepEqual(afterDelete.suggestions.map((suggestion) => suggestion.key), []);
+    } finally {
+        await appServer.close();
+    }
+});
+
+test('bulk_set applies many entries in one round-trip with per-item results', async () => {
+    const { appServer, wsUrl } = await startServer();
+    try {
+        const client = await connectClient(wsUrl);
+        client.send({
+            type: 'bulk_set',
+            entries: [
+                { key: 'b1', value: 1, summary: 's', tags: ['t'], importance: 5 },
+                { key: 'b2', value: 2, summary: 's', tags: ['t'], importance: 5 },
+                { value: 3 },
+            ],
+            requestId: 'bulk-1',
+        });
+        const reply = await client.waitFor((m) => m.requestId === 'bulk-1');
+        assert.equal(reply.type, 'bulk-set-result');
+        assert.equal(reply.results.length, 3);
+        assert.equal(reply.results[0].ok, true);
+        assert.equal(reply.results[2].ok, false);
+
+        client.send({ type: 'bulk_set', entries: [], requestId: 'bulk-empty' });
+        const empty = await client.waitFor((m) => m.requestId === 'bulk-empty');
+        assert.equal(empty.type, 'error');
+        assert.equal(empty.message, 'missing-entries');
+
+        await client.close();
+    } finally {
+        await appServer.close();
+    }
+});
+
+test('audit command returns hygiene buckets over websocket', async () => {
+    const { appServer, wsUrl } = await startServer();
+    try {
+        const client = await connectClient(wsUrl);
+
+        client.send({ type: 'set', key: 'good', value: 1, summary: 'g', tags: ['t'], importance: 5 });
+        await client.waitFor((m) => m.type === 'ok' && m.key === 'good');
+        client.send({ type: 'set', key: 'bad', value: 1 });
+        await client.waitFor((m) => m.type === 'ok' && m.key === 'bad');
+
+        client.send({ type: 'audit', requestId: 'audit-1' });
+        const audit = await client.waitFor((m) => m.requestId === 'audit-1');
+        assert.equal(audit.type, 'audit-result');
+        assert.ok(Array.isArray(audit.zombies));
+        assert.ok(audit.zombies.includes('bad'));
+        assert.ok(!audit.zombies.includes('good'));
+        assert.equal(audit.counts.zombies, audit.zombies.length);
+
+        client.send({ type: 'audit', staleMs: 'bogus', requestId: 'audit-bad' });
+        const bad = await client.waitFor((m) => m.requestId === 'audit-bad');
+        assert.equal(bad.type, 'error');
+        assert.equal(bad.message, 'invalid-staleMs');
+
+        await client.close();
+    } finally {
+        await appServer.close();
+    }
+});
+
+test('set responds with metadata warnings when summary/tags/importance are missing', async () => {
+    const { appServer, wsUrl } = await startServer();
+    try {
+        const client = await connectClient(wsUrl);
+
+        client.send({ type: 'set', key: 'task.sparse', value: 'hello', requestId: 'sparse' });
+        const sparse = await client.waitFor((m) => m.requestId === 'sparse');
+        assert.equal(sparse.type, 'ok');
+        assert.deepEqual(sparse.warnings, ['missing-summary', 'missing-tags', 'missing-importance']);
+
+        client.send({
+            type: 'set',
+            key: 'task.full',
+            value: 'hello',
+            summary: 'full entry',
+            tags: ['ok'],
+            importance: 5,
+            requestId: 'full',
+        });
+        const full = await client.waitFor((m) => m.requestId === 'full');
+        assert.equal(full.type, 'ok');
+        assert.equal(Object.prototype.hasOwnProperty.call(full, 'warnings'), false);
+
+        await client.close();
     } finally {
         await appServer.close();
     }

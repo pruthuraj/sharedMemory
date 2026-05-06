@@ -14,7 +14,7 @@ const {
     safeSend,
 } = require('./delivery');
 const { createMemoryStore } = require('./memory-store');
-const { parseMessage } = require('./protocol');
+const { parseMessage, auditMetadata } = require('./protocol');
 const { createSuggestionEngine } = require('./suggestion-engine');
 
 const DEFAULT_PRUNE_INTERVAL_MS = 600000;
@@ -73,6 +73,9 @@ function createSharedMemoryServer(options = {}) {
     let lastExportedAt = null;
     let lastImportedAt = null;
     let lastImportStats = null;
+    let cachedAuditAt = 0;
+    let cachedAuditSummary = null;
+    const AUDIT_CACHE_MS = 5000;
     const authenticatedSockets = new WeakSet();
 
     app.use(express.static(path.join(__dirname, '..', 'public')));
@@ -93,8 +96,26 @@ function createSharedMemoryServer(options = {}) {
             persistence: memory.persistenceStatus(),
             suggestions: suggestionStatus(),
             snapshot: snapshotStatus(),
+            audit: auditSummary(),
         });
     });
+
+    function auditSummary() {
+        const t = now();
+        if (cachedAuditSummary && t - cachedAuditAt < AUDIT_CACHE_MS) {
+            return cachedAuditSummary;
+        }
+        const full = memory.audit();
+        cachedAuditSummary = {
+            zombieCount: full.counts.zombies,
+            orphanCount: full.counts.orphans,
+            duplicateGroupCount: full.counts.duplicates,
+            staleCount: full.counts.stale,
+            expiredCount: full.counts.expired,
+        };
+        cachedAuditAt = t;
+        return cachedAuditSummary;
+    }
 
     // Strips the internal edge id before sending to clients; id is a server-side index key only.
     function publicEdge(edge) {
@@ -300,13 +321,16 @@ function createSharedMemoryServer(options = {}) {
                         break;
                     }
 
-                    safeSend(ws, {
+                    const setWarnings = auditMetadata(data);
+                    const setResponse = {
                         type: 'ok',
                         action: 'set',
                         key: data.key,
                         revision: entry.revision,
                         requestId,
-                    });
+                    };
+                    if (setWarnings.length > 0) setResponse.warnings = setWarnings;
+                    safeSend(ws, setResponse);
                     upsertSuggestionMemory(data.key, entry);
                     notifyKeyUpdate(agents, data.key, entry);
                     notifyLinkedAgents(agents, agentId, { action: 'set', key: data.key, entry });
@@ -477,6 +501,36 @@ function createSharedMemoryServer(options = {}) {
                         safeSend(ws, { type: 'error', message: 'suggest-failed', requestId });
                         logSuggestionError('run', 'context', error);
                     }
+                    break;
+                }
+
+                case 'bulk_set': {
+                    const result = memory.bulkSet(data.entries, agentId);
+                    safeSend(ws, { type: 'bulk-set-result', results: result.results, requestId });
+                    for (let i = 0; i < result.results.length; i++) {
+                        const r = result.results[i];
+                        if (!r.ok) continue;
+                        const entry = memory.get(r.key);
+                        if (entry) {
+                            upsertSuggestionMemory(r.key, entry);
+                            notifyKeyUpdate(agents, r.key, entry);
+                        }
+                    }
+                    break;
+                }
+
+                case 'bulk_relate': {
+                    const result = memory.bulkRelate(data.relations, agentId);
+                    safeSend(ws, { type: 'bulk-relate-result', results: result.results, requestId });
+                    for (const r of result.results) {
+                        if (r.ok) notifyRelationUpdate(agents, r.action, publicEdge(r.edge));
+                    }
+                    break;
+                }
+
+                case 'audit': {
+                    const result = memory.audit({ staleMs: data.staleMs });
+                    safeSend(ws, { type: 'audit-result', ...result, requestId });
                     break;
                 }
 

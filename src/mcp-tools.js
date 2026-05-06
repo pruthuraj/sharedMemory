@@ -1,6 +1,6 @@
 // Shared MCP tool handlers kept transport-independent for deterministic tests.
 
-const { RELATION_TYPES } = require('./protocol.js');
+const { RELATION_TYPES, auditMetadata } = require('./protocol.js');
 
 function isPlainObject(value) {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -122,6 +122,11 @@ function validateUnrelateInput(input) {
     return null;
 }
 
+function validateAuditInput(input) {
+    if (hasOwn(input, 'staleMs') && !isPositiveInteger(input.staleMs)) return 'invalid-staleMs';
+    return null;
+}
+
 function validateSnapshotInput(input) {
     return hasOwn(input, 'snapshot') ? null : 'missing-snapshot';
 }
@@ -222,7 +227,10 @@ function createSharedMemoryToolHandlers(options) {
                 await suggestionEngine.upsertMemory(input.key, entry);
             }
 
-            return ok({ key: input.key, entry: metadataOnly(entry) });
+            const warnings = auditMetadata(input);
+            const payload = { key: input.key, entry: metadataOnly(entry) };
+            if (warnings.length > 0) payload.warnings = warnings;
+            return ok(payload);
         },
 
         async memory_get(input = {}) {
@@ -294,6 +302,36 @@ function createSharedMemoryToolHandlers(options) {
 
             const result = memory.unrelate(input.from, input.to, input.relation);
             return ok({ removed: Boolean(result.removed), edge: result.edge });
+        },
+
+        async memory_bulk_set(input = {}) {
+            if (!Array.isArray(input.entries) || input.entries.length === 0) {
+                return fail('missing-entries');
+            }
+            const result = memory.bulkSet(input.entries, updatedBy);
+
+            if (suggestionEngine && typeof suggestionEngine.upsertMemory === 'function') {
+                for (const r of result.results) {
+                    if (!r.ok) continue;
+                    const entry = memory.get(r.key);
+                    if (entry) await suggestionEngine.upsertMemory(r.key, entry);
+                }
+            }
+            return ok({ results: result.results });
+        },
+
+        async memory_bulk_relate(input = {}) {
+            if (!Array.isArray(input.relations) || input.relations.length === 0) {
+                return fail('missing-relations');
+            }
+            const result = memory.bulkRelate(input.relations, updatedBy);
+            return ok({ results: result.results });
+        },
+
+        async memory_audit(input = {}) {
+            const error = validateAuditInput(input);
+            if (error) return fail(error);
+            return ok(memory.audit({ staleMs: input.staleMs }));
         },
 
         async memory_export() {

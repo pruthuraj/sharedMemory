@@ -43,6 +43,7 @@ let focusedKey = null;
 let hoverKey = null;
 let lastFocusedKey = null;
 let liveRefreshTimer = null;
+let isFirstLoad = true;
 let refreshQueued = false;
 let nextRpcId = 1;
 let graphSettings = window.Settings.snapshot();
@@ -59,6 +60,7 @@ const detailPanel = document.getElementById('detail-panel');
 const tokenInput = document.getElementById('token-input');
 const connectBtn = document.getElementById('connect-btn');
 const refreshBtn = document.getElementById('refresh-btn');
+const auditBadge = document.getElementById('audit-badge');
 const statusText = document.getElementById('status-text');
 const emptyState = document.getElementById('empty-state');
 const loadingEl = document.getElementById('loading');
@@ -116,8 +118,9 @@ function ageColor(ts) {
 }
 
 function nodeIdentityColor(key) {
-    const hue = stableHash(String(key)) % 360;
-    return `hsl(${hue} 78% 58%)`;
+    const ns = String(key).split('.')[0] || String(key);
+    const hue = stableHash(ns) % 360;
+    return `hsl(${hue} 92% 64%)`;
 }
 
 function ageLabel(ts) {
@@ -149,9 +152,11 @@ function nodeDegree(key) {
 }
 
 function collapsedNodeSize(key) {
+    const entry = currentEntries[key] || {};
+    const importance = Math.max(0, Math.min(10, Number(entry.importance) || 0));
     const degree = nodeDegree(key);
     const scale = Number(graphSettings && graphSettings.nodeScale) || 1;
-    const size = (NODE_ROUND_MIN + Math.sqrt(degree) * NODE_ROUND_GROWTH) * scale;
+    const size = (NODE_ROUND_MIN + importance * 1.8 + Math.sqrt(degree) * (NODE_ROUND_GROWTH * 0.5)) * scale;
     return Math.round(Math.min(NODE_ROUND_MAX * scale, size));
 }
 
@@ -405,12 +410,27 @@ function clampScale(value) {
 
 // ── Layout ─────────────────────────────────────────────────────────────
 function computeLayout(entries, edges) {
-    const g = new dagre.graphlib.Graph({ multigraph: true });
+    const mode = (graphSettings && graphSettings.layoutMode) || 'radial';
+    if (mode === 'force') return computeForceLayout(entries, edges);
+    if (mode === 'radial') return computeRadialLayout(entries, edges);
+    return computeHierarchicalLayout(entries, edges);
+}
+
+function computeHierarchicalLayout(entries, edges) {
+    const g = new dagre.graphlib.Graph({ multigraph: true, compound: true });
     g.setGraph({ rankdir: 'LR', ranksep: 90, nodesep: 20, marginx: 60, marginy: 60 });
     g.setDefaultEdgeLabel(() => ({}));
 
+    const clusters = new Set();
     for (const [key, entry] of Object.entries(entries)) {
         g.setNode(key, { width: NODE_W, height: nodeHeight(entry) });
+        const ns = String(key).split('.')[0] || 'misc';
+        const clusterId = `__ns__${ns}`;
+        if (!clusters.has(clusterId)) {
+            g.setNode(clusterId, {});
+            clusters.add(clusterId);
+        }
+        g.setParent(key, clusterId);
     }
 
     const seen = new Set();
@@ -426,8 +446,147 @@ function computeLayout(entries, edges) {
 
     const positions = {};
     for (const key of g.nodes()) {
+        if (key.startsWith('__ns__')) continue;
         const n = g.node(key);
         if (n) positions[key] = { x: n.x - n.width / 2, y: n.y - n.height / 2, w: n.width, h: n.height };
+    }
+    return positions;
+}
+
+function computeRadialLayout(entries, edges) {
+    // Each namespace gets an angular sector around the origin. Within a sector,
+    // higher-importance nodes sit closer to the centre.
+    const keys = Object.keys(entries);
+    const clusters = new Map();
+    for (const key of keys) {
+        const ns = String(key).split('.')[0] || 'misc';
+        if (!clusters.has(ns)) clusters.set(ns, []);
+        clusters.get(ns).push(key);
+    }
+    const nsList = Array.from(clusters.keys()).sort();
+    const sectorCount = nsList.length;
+    const baseRadius = 220;
+    const radiusStep = 90;
+    const positions = {};
+
+    nsList.forEach((ns, sectorIdx) => {
+        const items = clusters.get(ns).slice().sort((a, b) => {
+            const ia = entries[a].importance || 0;
+            const ib = entries[b].importance || 0;
+            return ib - ia;
+        });
+        const sectorAngle = (sectorIdx / sectorCount) * Math.PI * 2;
+        const sectorWidth = (Math.PI * 2) / sectorCount;
+        items.forEach((key, idx) => {
+            const entry = entries[key];
+            const importance = Number(entry.importance) || 0;
+            const ring = Math.floor(idx / Math.max(1, Math.ceil(Math.sqrt(items.length))));
+            const radius = baseRadius + ring * radiusStep + (10 - importance) * 6;
+            const angleJitter = ((idx % Math.max(1, Math.ceil(Math.sqrt(items.length)))) / Math.max(1, items.length)) * sectorWidth;
+            const angle = sectorAngle + angleJitter * 0.9 + sectorWidth * 0.05;
+            const cx = Math.cos(angle) * radius;
+            const cy = Math.sin(angle) * radius;
+            const w = NODE_W;
+            const h = nodeHeight(entry);
+            positions[key] = { x: cx - w / 2, y: cy - h / 2, w, h };
+        });
+    });
+
+    return shiftPositionsToPositive(positions);
+}
+
+function computeForceLayout(entries, edges) {
+    const keys = Object.keys(entries);
+    const n = keys.length;
+    if (!n) return {};
+
+    // Deterministic seed from a circle so the simulation starts from a reproducible state.
+    const ns = keys.map((k) => String(k).split('.')[0] || 'misc');
+    const nsList = Array.from(new Set(ns));
+    const nsCenters = {};
+    nsList.forEach((name, i) => {
+        const a = (i / nsList.length) * Math.PI * 2;
+        nsCenters[name] = { x: Math.cos(a) * 280, y: Math.sin(a) * 280 };
+    });
+
+    const nodes = keys.map((k, i) => {
+        const a = (i / n) * Math.PI * 2;
+        return {
+            id: k,
+            namespace: ns[i],
+            x: Math.cos(a) * 320 + (stableHash(k) % 40 - 20),
+            y: Math.sin(a) * 320 + (stableHash(k + 'y') % 40 - 20),
+        };
+    });
+
+    const links = [];
+    const idSet = new Set(keys);
+    for (const e of edges) {
+        if (!idSet.has(e.from) || !idSet.has(e.to)) continue;
+        links.push({ source: e.from, target: e.to });
+    }
+
+    // Custom force pulling each node toward its namespace centroid (replaces the
+    // CLUSTER_PULL term in the old custom simulation).
+    function clusterForce(strength) {
+        let cachedNodes;
+        function force(alpha) {
+            for (const node of cachedNodes) {
+                const c = nsCenters[node.namespace];
+                if (!c) continue;
+                node.vx = (node.vx || 0) + (c.x - node.x) * strength * alpha;
+                node.vy = (node.vy || 0) + (c.y - node.y) * strength * alpha;
+            }
+        }
+        force.initialize = (n) => { cachedNodes = n; };
+        return force;
+    }
+
+    if (typeof window === 'undefined' || !window.d3 || !window.d3.forceSimulation) {
+        // Fallback: skip force pass and use seeded positions if d3 failed to load.
+        const positions = {};
+        for (const node of nodes) {
+            const entry = entries[node.id];
+            positions[node.id] = { x: node.x - NODE_W / 2, y: node.y - nodeHeight(entry) / 2, w: NODE_W, h: nodeHeight(entry) };
+        }
+        return shiftPositionsToPositive(positions);
+    }
+
+    const d3 = window.d3;
+    const sim = d3.forceSimulation(nodes)
+        .force('charge', d3.forceManyBody().strength(-450).distanceMax(900))
+        .force('link', d3.forceLink(links).id((d) => d.id).distance(140).strength(0.5))
+        .force('cluster', clusterForce(0.18))
+        .force('center', d3.forceCenter(0, 0))
+        .force('collide', d3.forceCollide(70))
+        .stop();
+
+    // Run synchronously: quadtree-backed many-body keeps this fast even at hundreds of nodes.
+    const ITERS = 300;
+    for (let i = 0; i < ITERS; i++) sim.tick();
+
+    const positions = {};
+    for (const node of nodes) {
+        const entry = entries[node.id];
+        const w = NODE_W;
+        const h = nodeHeight(entry);
+        positions[node.id] = { x: node.x - w / 2, y: node.y - h / 2, w, h };
+    }
+    return shiftPositionsToPositive(positions);
+}
+
+function shiftPositionsToPositive(positions) {
+    let minX = Infinity, minY = Infinity;
+    for (const p of Object.values(positions)) {
+        if (p.x < minX) minX = p.x;
+        if (p.y < minY) minY = p.y;
+    }
+    const PAD = 80;
+    const dx = -minX + PAD;
+    const dy = -minY + PAD;
+    for (const p of Object.values(positions)) {
+        p.x += dx;
+        p.y += dy;
     }
     return positions;
 }
@@ -542,6 +701,10 @@ function buildNodeEl(key, entry, pos) {
     div.setAttribute('tabindex', '0');
     div.setAttribute('aria-expanded', isExpanded ? 'true' : 'false');
     div.setAttribute('aria-label', `${key} memory node`);
+    const tooltipParts = [key];
+    if (entry.summary) tooltipParts.push(entry.summary);
+    if (entry.importance > 0) tooltipParts.push(`importance ${entry.importance}/10`);
+    div.title = tooltipParts.join('\n');
     div.style.cssText = `--node-color:${color};border:1.5px solid ${color}66;box-shadow:0 2px 14px #00000055;`;
 
     const tagsHtml = entry.tags && entry.tags.length
@@ -665,6 +828,54 @@ function applyFocusState() {
 // ── Edge rendering ─────────────────────────────────────────────────────
 function renderEdges(edges, positions, entries) {
     while (edgesSvg.firstChild) edgesSvg.removeChild(edgesSvg.firstChild);
+
+    // Cluster hulls — one translucent region per namespace, drawn first so they sit beneath edges and nodes.
+    const HULL_PAD = 28;
+    const clusterBoxes = {};
+    for (const [key, pos] of Object.entries(positions)) {
+        if (!entries[key]) continue;
+        const ns = String(key).split('.')[0] || 'misc';
+        const box = nodeVisualBox(key, pos, entries[key]);
+        const cur = clusterBoxes[ns];
+        if (!cur) {
+            clusterBoxes[ns] = { minX: box.x, minY: box.y, maxX: box.x + box.w, maxY: box.y + box.h, count: 1 };
+        } else {
+            cur.minX = Math.min(cur.minX, box.x);
+            cur.minY = Math.min(cur.minY, box.y);
+            cur.maxX = Math.max(cur.maxX, box.x + box.w);
+            cur.maxY = Math.max(cur.maxY, box.y + box.h);
+            cur.count += 1;
+        }
+    }
+    for (const [ns, b] of Object.entries(clusterBoxes)) {
+        if (b.count < 2) continue;
+        const hue = stableHash(ns) % 360;
+        const rect = svgEl('rect');
+        rect.setAttribute('x', String(b.minX - HULL_PAD));
+        rect.setAttribute('y', String(b.minY - HULL_PAD));
+        rect.setAttribute('width', String(b.maxX - b.minX + HULL_PAD * 2));
+        rect.setAttribute('height', String(b.maxY - b.minY + HULL_PAD * 2));
+        rect.setAttribute('rx', '18');
+        rect.setAttribute('ry', '18');
+        rect.setAttribute('fill', `hsla(${hue}, 80%, 55%, 0.07)`);
+        rect.setAttribute('stroke', `hsla(${hue}, 80%, 60%, 0.32)`);
+        rect.setAttribute('stroke-width', '1');
+        rect.setAttribute('stroke-dasharray', '4 4');
+        rect.setAttribute('pointer-events', 'none');
+        edgesSvg.appendChild(rect);
+
+        const label = svgEl('text');
+        label.setAttribute('x', String(b.minX - HULL_PAD + 12));
+        label.setAttribute('y', String(b.minY - HULL_PAD + 18));
+        label.setAttribute('fill', `hsla(${hue}, 90%, 70%, 0.65)`);
+        label.setAttribute('font-size', '11');
+        label.setAttribute('font-family', 'system-ui, sans-serif');
+        label.setAttribute('font-weight', '600');
+        label.setAttribute('letter-spacing', '0.5');
+        label.setAttribute('pointer-events', 'none');
+        label.textContent = ns.toUpperCase();
+        edgesSvg.appendChild(label);
+    }
 
     // Arrow markers
     const defs = svgEl('defs');
@@ -1152,6 +1363,33 @@ ${exp}`;
     applyFocusState();
 }
 
+document.getElementById('dp-copy').addEventListener('click', async () => {
+    if (!selectedKey) return;
+    const entry = currentEntries[selectedKey];
+    if (!entry) return;
+    const payload = JSON.stringify({ key: selectedKey, ...entry }, null, 2);
+    const btn = document.getElementById('dp-copy');
+    try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(payload);
+        } else {
+            const ta = document.createElement('textarea');
+            ta.value = payload;
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+        }
+        const original = btn.textContent;
+        btn.textContent = 'Copied';
+        btn.disabled = true;
+        setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 1200);
+    } catch (_) {
+        btn.textContent = 'Failed';
+        setTimeout(() => { btn.textContent = 'Copy'; }, 1200);
+    }
+});
+
 document.getElementById('dp-close').addEventListener('click', () => {
     if (selectedKey) {
         const el = scene.querySelector(`[data-key="${CSS.escape(selectedKey)}"]`);
@@ -1177,6 +1415,7 @@ viewport.addEventListener('click', e => {
 function applyTransform() {
     scene.style.transform = `translate(${panX}px,${panY}px) scale(${scale})`;
     viewport.style.backgroundSize = `${32 * scale}px ${32 * scale}px`;
+    viewport.style.setProperty('--scene-scale', scale);
     viewport.style.backgroundPosition = `${panX}px ${panY}px`;
 }
 
@@ -1385,6 +1624,10 @@ function handleSettingsChange({ settings, changed }) {
     if (changed.has('nodeScale') || changed.has('labelScale') || changed.has('edgeThickness')) {
         rerenderEdgesForCurrentPositions();
     }
+
+    if (changed.has('layoutMode')) {
+        renderGraph(currentEntries, currentEdges, { preserveSelection: true, preservePositions: false, fit: true });
+    }
 }
 
 window.Settings.init({ onChange: handleSettingsChange });
@@ -1392,11 +1635,121 @@ fitFocusedBtn = document.getElementById('fit-focused-btn');
 if (fitFocusedBtn) fitFocusedBtn.addEventListener('click', fitFocusedNeighborhood);
 document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
+        if (!paletteEl.hidden) {
+            closePalette();
+            return;
+        }
         toggleSettingsPanel(false);
         closeIdentityPanel();
         closeImportPanel();
     }
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
+        e.preventDefault();
+        openPalette();
+    }
 });
+
+const paletteEl = document.getElementById('palette');
+const paletteInput = document.getElementById('palette-input');
+const paletteResults = document.getElementById('palette-results');
+let paletteActiveIndex = 0;
+let paletteCurrentKeys = [];
+
+function openPalette() {
+    if (!paletteEl) return;
+    paletteEl.hidden = false;
+    paletteInput.value = '';
+    renderPaletteResults('');
+    paletteInput.focus();
+}
+
+function closePalette() {
+    if (!paletteEl) return;
+    paletteEl.hidden = true;
+}
+
+function renderPaletteResults(query) {
+    const q = query.trim().toLowerCase();
+    const all = Object.keys(currentEntries).map((k) => ({
+        key: k,
+        entry: currentEntries[k],
+        importance: (currentEntries[k] && currentEntries[k].importance) || 0,
+    }));
+
+    const matches = q.length === 0
+        ? all
+        : all.filter(({ key, entry }) => {
+            if (key.toLowerCase().includes(q)) return true;
+            const sum = String((entry && entry.summary) || '').toLowerCase();
+            return sum.includes(q);
+        });
+
+    matches.sort((a, b) => {
+        if (a.importance !== b.importance) return b.importance - a.importance;
+        return a.key.localeCompare(b.key);
+    });
+
+    const top = matches.slice(0, 20);
+    paletteCurrentKeys = top.map((m) => m.key);
+    paletteActiveIndex = 0;
+
+    paletteResults.innerHTML = '';
+    top.forEach((m, i) => {
+        const li = document.createElement('li');
+        if (i === 0) li.classList.add('active');
+        const keyEl = document.createElement('span');
+        keyEl.className = 'palette-key';
+        keyEl.textContent = m.key;
+        const sumEl = document.createElement('span');
+        sumEl.className = 'palette-summary';
+        sumEl.textContent = (m.entry && m.entry.summary) || '';
+        li.appendChild(keyEl);
+        li.appendChild(sumEl);
+        li.addEventListener('mouseenter', () => {
+            paletteActiveIndex = i;
+            updatePaletteActive();
+        });
+        li.addEventListener('click', () => paletteSelect(m.key));
+        paletteResults.appendChild(li);
+    });
+}
+
+function updatePaletteActive() {
+    Array.from(paletteResults.children).forEach((node, i) => {
+        node.classList.toggle('active', i === paletteActiveIndex);
+        if (i === paletteActiveIndex && node.scrollIntoView) {
+            node.scrollIntoView({ block: 'nearest' });
+        }
+    });
+}
+
+function paletteSelect(key) {
+    if (!key) return;
+    closePalette();
+    const entry = currentEntries[key];
+    if (entry) openDetail(key, entry);
+}
+
+if (paletteEl && paletteInput) {
+    paletteInput.addEventListener('input', (e) => renderPaletteResults(e.target.value));
+    paletteInput.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            if (paletteActiveIndex < paletteCurrentKeys.length - 1) paletteActiveIndex++;
+            updatePaletteActive();
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            if (paletteActiveIndex > 0) paletteActiveIndex--;
+            updatePaletteActive();
+        } else if (e.key === 'Enter') {
+            e.preventDefault();
+            paletteSelect(paletteCurrentKeys[paletteActiveIndex]);
+        }
+    });
+    paletteEl.addEventListener('mousedown', (e) => {
+        if (e.target === paletteEl) closePalette();
+    });
+}
 document.addEventListener('mousedown', e => {
     if (settingsPanel.classList.contains('visible')) {
         if (!settingsPanel.contains(e.target) && !settingsBtn.contains(e.target)) {
@@ -1640,7 +1993,70 @@ async function loadGraph(options = {}) {
         fit: options.preserveView ? false : true,
     });
 
+    if (isFirstLoad && !options.preserveView) {
+        isFirstLoad = false;
+        fitToTopCluster();
+    }
+
     updateStatusCount();
+    refreshAuditBadge();
+}
+
+function fitToTopCluster() {
+    const keys = Object.keys(currentEntries);
+    if (keys.length < 8) return;
+    let topKey = null;
+    let topScore = -1;
+    for (const k of keys) {
+        const e = currentEntries[k];
+        const score = (Number(e && e.importance) || 0) + Math.sqrt(nodeDegree(k)) * 1.5;
+        if (score > topScore) { topScore = score; topKey = k; }
+    }
+    if (!topKey || !nodePositions[topKey]) return;
+    const distances = focusDistances(topKey);
+    const cluster = {};
+    for (const key of distances.keys()) {
+        if (nodePositions[key]) cluster[key] = nodePositions[key];
+    }
+    if (Object.keys(cluster).length < 3) return;
+    fitView(cluster);
+}
+
+let lastAuditZombies = [];
+
+async function refreshAuditBadge() {
+    if (!ws || ws.readyState !== WebSocket.OPEN || !auditBadge) return;
+    try {
+        const r = await wsRpc({ type: 'audit', requestId: makeRequestId('audit') });
+        if (!r || r.type !== 'audit-result' || !r.counts) {
+            auditBadge.hidden = true;
+            return;
+        }
+        lastAuditZombies = Array.isArray(r.zombies) ? r.zombies : [];
+        const count = r.counts.zombies || 0;
+        if (count > 0) {
+            auditBadge.hidden = false;
+            auditBadge.textContent = `! ${count}`;
+            auditBadge.title = `${count} memory ${count === 1 ? 'entry has' : 'entries have'} missing tags / importance / summary — click to view`;
+        } else {
+            auditBadge.hidden = true;
+        }
+    } catch (_) {
+        auditBadge.hidden = true;
+    }
+}
+
+if (auditBadge) {
+    auditBadge.addEventListener('click', () => {
+        if (!identityPanel || lastAuditZombies.length === 0) return;
+        identityPanel.setAttribute('aria-hidden', 'false');
+        identityBtn.setAttribute('aria-expanded', 'true');
+        if (identitySearch) {
+            identitySearch.value = lastAuditZombies[0].split('.')[0] || '';
+            identitySearch.dispatchEvent(new Event('input', { bubbles: true }));
+            identitySearch.focus();
+        }
+    });
 }
 
 connectBtn.addEventListener('click', connect);

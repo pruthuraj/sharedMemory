@@ -78,7 +78,7 @@
             id: 'filters',
             title: 'Filters',
             settings: [
-                { id: 'minImportance', type: 'range', label: 'Min importance', min: 0, max: 10, step: 1, default: 0, format: (v) => String(Math.round(v)) },
+                { id: 'minImportance', type: 'range', label: 'Min importance (0–10)', min: 0, max: 10, step: 1, default: 0, format: (v) => `${Math.round(v)} / 10` },
                 { id: 'relationFilters', type: 'relationToggles', label: 'Show relations', relations: RELATION_TYPES, default: { ...DEFAULT_RELATION_FILTERS } },
             ],
         },

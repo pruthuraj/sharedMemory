@@ -1181,6 +1181,98 @@ function createMemoryStore(options = {}) {
         return { results, total: matched.length };
     }
 
+    // Default staleness threshold for audit(): 30 days.
+    const DEFAULT_AUDIT_STALE_MS = 30 * 24 * 3600 * 1000;
+
+    function audit(opts = {}) {
+        const t = now();
+        const staleMs = Number.isFinite(opts.staleMs) && opts.staleMs > 0
+            ? opts.staleMs
+            : DEFAULT_AUDIT_STALE_MS;
+
+        const allEntries = stmts.allEntries.all();
+        const allTags = stmts.allTags.all();
+        const allEdges = stmts.allEdges.all();
+
+        const tagsByKey = new Map();
+        for (const row of allTags) {
+            if (!tagsByKey.has(row.key)) tagsByKey.set(row.key, []);
+            tagsByKey.get(row.key).push(row.tag);
+        }
+
+        const incidentCount = new Map();
+        for (const edge of allEdges) {
+            incidentCount.set(edge.from_key, (incidentCount.get(edge.from_key) || 0) + 1);
+            incidentCount.set(edge.to_key, (incidentCount.get(edge.to_key) || 0) + 1);
+        }
+
+        const zombies = [];
+        const orphans = [];
+        const stale = [];
+        const expired = [];
+        const summaryGroups = new Map();
+
+        for (const row of allEntries) {
+            const isExpiredRow = row.expires_at !== null && row.expires_at !== undefined && row.expires_at <= t;
+            if (isExpiredRow) {
+                expired.push(row.key);
+                continue;
+            }
+
+            const tags = tagsByKey.get(row.key) || [];
+            const importance = row.importance || 0;
+            const summary = typeof row.summary === 'string' ? row.summary.trim() : '';
+
+            if (importance === 0 || tags.length === 0 || summary.length === 0) {
+                zombies.push(row.key);
+            }
+
+            if ((incidentCount.get(row.key) || 0) === 0) {
+                orphans.push(row.key);
+            }
+
+            if (Number.isFinite(row.updated_at) && (t - row.updated_at) > staleMs) {
+                stale.push(row.key);
+            }
+
+            if (summary.length > 0) {
+                const fingerprint = summary.slice(0, 60).toLowerCase();
+                if (!summaryGroups.has(fingerprint)) summaryGroups.set(fingerprint, []);
+                summaryGroups.get(fingerprint).push(row.key);
+            }
+        }
+
+        const duplicates = [];
+        for (const [fingerprint, keys] of summaryGroups) {
+            if (keys.length >= 2) duplicates.push({ fingerprint, keys: keys.slice().sort() });
+        }
+        duplicates.sort((a, b) => a.fingerprint.localeCompare(b.fingerprint));
+
+        zombies.sort();
+        orphans.sort();
+        stale.sort();
+        expired.sort();
+
+        return {
+            zombies,
+            orphans,
+            duplicates,
+            stale,
+            expired,
+            counts: {
+                zombies: zombies.length,
+                orphans: orphans.length,
+                duplicates: duplicates.length,
+                stale: stale.length,
+                expired: expired.length,
+                totalEntries: allEntries.length - expired.length,
+                totalEdges: allEdges.length,
+            },
+            staleMs,
+            generatedAt: t,
+        };
+    }
+
     return {
         // metadata fields: summary, tags, importance (0-10), ttlMs (ms from now), expiresAt (absolute ms).
         set(key, value, updatedBy, metadata = {}) {
@@ -1333,6 +1425,52 @@ function createMemoryStore(options = {}) {
         expiryStatus,
 
         search,
+
+        // Apply many `set` calls in one round-trip. Each item is independent —
+        // a failed item is reported in `results` without aborting siblings.
+        bulkSet(items, updatedBy) {
+            if (!Array.isArray(items)) return { results: [] };
+            const out = this;
+            const results = items.map((item) => {
+                if (!item || typeof item.key !== 'string') {
+                    return { ok: false, error: 'missing-key' };
+                }
+                const metadata = {
+                    summary: item.summary,
+                    tags: item.tags,
+                    importance: item.importance,
+                    ttlMs: item.ttlMs,
+                    expiresAt: item.expiresAt,
+                };
+                if (Object.prototype.hasOwnProperty.call(item, 'ifRevision')) {
+                    metadata.ifRevision = item.ifRevision;
+                }
+                const entry = out.set(item.key, item.value, updatedBy, metadata);
+                if (entry && entry.ok === false) {
+                    return { ok: false, key: item.key, error: entry.error, currentRevision: entry.currentRevision };
+                }
+                return { ok: true, key: item.key, revision: entry.revision };
+            });
+            return { results };
+        },
+
+        // Apply many `relate` calls in one round-trip; partial-failure tolerant.
+        bulkRelate(items, updatedBy) {
+            if (!Array.isArray(items)) return { results: [] };
+            const out = this;
+            const results = items.map((item) => {
+                if (!item) return { ok: false, error: 'invalid-item' };
+                const result = out.relate(item.from, item.to, item.relation, updatedBy, {
+                    reason: item.reason,
+                    weight: item.weight,
+                });
+                if (!result.ok) return { ok: false, from: item.from, to: item.to, relation: item.relation, error: result.error };
+                return { ok: true, action: result.action, edge: result.edge };
+            });
+            return { results };
+        },
+
+        audit,
 
         exportState,
 

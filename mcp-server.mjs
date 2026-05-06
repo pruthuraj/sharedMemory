@@ -129,6 +129,39 @@ function registerSharedMemoryTools(server, handlers) {
     );
 
     server.registerTool(
+        'memory_bulk_set',
+        {
+            title: 'Bulk Set Memory',
+            description: 'Apply many memory_set operations in one call. Each entry is processed independently — a failure in one does not abort the others.',
+            inputSchema: z.object({ entries: looseInput }),
+            outputSchema,
+        },
+        async (input) => mcpToolResult(await handlers.memory_bulk_set(input)),
+    );
+
+    server.registerTool(
+        'memory_bulk_relate',
+        {
+            title: 'Bulk Relate Memory',
+            description: 'Apply many memory_relate operations in one call. Each relation is processed independently.',
+            inputSchema: z.object({ relations: looseInput }),
+            outputSchema,
+        },
+        async (input) => mcpToolResult(await handlers.memory_bulk_relate(input)),
+    );
+
+    server.registerTool(
+        'memory_audit',
+        {
+            title: 'Audit Memory',
+            description: 'Report memory hygiene issues: zombies (no tags or zero importance), orphans (no edges), duplicates (similar summaries), stale (not updated recently), and expired entries.',
+            inputSchema: z.object({ staleMs: looseInput }),
+            outputSchema,
+        },
+        async (input) => mcpToolResult(await handlers.memory_audit(input)),
+    );
+
+    server.registerTool(
         'memory_export',
         {
             title: 'Export Memory Snapshot',

@@ -21,6 +21,9 @@ const COMMAND_TYPES = new Set([
     'export',
     'validate-import',
     'import',
+    'audit',
+    'bulk_set',
+    'bulk_relate',
 ]);
 
 const RELATION_TYPES = new Set([
@@ -104,6 +107,23 @@ function validateSetMetadata(message, options = {}) {
     }
 
     return validateIfRevision(message, options);
+}
+
+// Soft-warn helper for `set`/`touch`: never blocks the write, just reports
+// missing recall metadata so clients can self-correct. Returns a string[]
+// (empty when the metadata is fully populated).
+function auditMetadata(message) {
+    const warnings = [];
+    if (!hasOwn(message, 'summary') || !isNonEmptyString(message.summary)) {
+        warnings.push('missing-summary');
+    }
+    if (!hasOwn(message, 'tags') || !Array.isArray(message.tags) || message.tags.length === 0) {
+        warnings.push('missing-tags');
+    }
+    if (!hasOwn(message, 'importance') || message.importance === 0) {
+        warnings.push('missing-importance');
+    }
+    return warnings;
 }
 
 function validateRelationFields(message) {
@@ -202,6 +222,24 @@ function validateMessage(message) {
         case 'list':
         case 'prune':
         case 'export':
+            return { ok: true, message };
+
+        case 'audit':
+            if (hasOwn(message, 'staleMs') && !isPositiveInteger(message.staleMs)) {
+                return { ok: false, error: 'invalid-staleMs' };
+            }
+            return { ok: true, message };
+
+        case 'bulk_set':
+            if (!Array.isArray(message.entries) || message.entries.length === 0) {
+                return { ok: false, error: 'missing-entries' };
+            }
+            return { ok: true, message };
+
+        case 'bulk_relate':
+            if (!Array.isArray(message.relations) || message.relations.length === 0) {
+                return { ok: false, error: 'missing-relations' };
+            }
             return { ok: true, message };
 
         case 'validate-import':
@@ -304,4 +342,5 @@ function validateMessage(message) {
 module.exports = {
     parseMessage,
     RELATION_TYPES,
+    auditMetadata,
 };

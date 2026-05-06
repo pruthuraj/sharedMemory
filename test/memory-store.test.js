@@ -787,3 +787,50 @@ function createTimedStoreWithPersistence(file) {
         persistence: { file },
     });
 }
+
+test('audit reports zombies, orphans, duplicates, stale, and expired entries', () => {
+    let time = 1000;
+    const memory = createMemoryStore({
+        now() { return time; },
+    });
+
+    memory.set('full.a', 'a', 'test', { summary: 'Project A docs', tags: ['proj'], importance: 7 });
+    memory.set('full.b', 'b', 'test', { summary: 'Project B docs', tags: ['proj'], importance: 7 });
+    memory.relate('full.a', 'full.b', 'related_to', 'test');
+
+    memory.set('zombie.no-tags', 'x', 'test', { summary: 'has summary', importance: 5 });
+    memory.set('zombie.no-importance', 'x', 'test', { summary: 'has summary', tags: ['t'] });
+
+    memory.set('dup.one', 'x', 'test', { summary: 'Identical summary text here', tags: ['t'], importance: 3 });
+    memory.set('dup.two', 'x', 'test', { summary: 'Identical summary text here', tags: ['t'], importance: 3 });
+
+    memory.set('orphan.solo', 'x', 'test', { summary: 'Alone in the world', tags: ['t'], importance: 3 });
+
+    memory.set('expiring.soon', 'x', 'test', { summary: 'Bye soon', tags: ['t'], importance: 3, ttlMs: 50 });
+
+    time = 5000 + 31 * 24 * 3600 * 1000;
+    memory.set('fresh.entry', 'x', 'test', { summary: 'Fresh and new', tags: ['t'], importance: 3 });
+
+    const result = memory.audit();
+
+    assert.ok(result.zombies.includes('zombie.no-tags'));
+    assert.ok(result.zombies.includes('zombie.no-importance'));
+    assert.ok(!result.zombies.includes('full.a'));
+
+    assert.ok(result.orphans.includes('orphan.solo'));
+    assert.ok(!result.orphans.includes('full.a'));
+    assert.ok(!result.orphans.includes('full.b'));
+
+    const dupGroup = result.duplicates.find((g) => g.keys.includes('dup.one'));
+    assert.ok(dupGroup, 'duplicate summary group should be reported');
+    assert.deepEqual(dupGroup.keys, ['dup.one', 'dup.two']);
+
+    assert.ok(result.expired.includes('expiring.soon'));
+    assert.ok(!result.zombies.includes('expiring.soon'), 'expired entries should not also count as zombies');
+
+    assert.ok(result.stale.includes('full.a'));
+    assert.ok(!result.stale.includes('fresh.entry'));
+
+    assert.equal(result.counts.zombies, result.zombies.length);
+    assert.equal(result.counts.duplicates, result.duplicates.length);
+});

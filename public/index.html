@@ -15,6 +15,7 @@
     <div class="tb-sep"></div>
     <div class="ld" id="ld-nodes"><span class="dot" style="background:#10b981"></span><span>-</span></div>
     <div class="ld" id="ld-edges"><span class="dot" style="background:#6366f1"></span><span>-</span></div>
+    <button id="audit-badge" class="audit-badge" hidden title="Memory hygiene issues — click to view zombies">!</button>
     <div class="tb-spacer"></div>
     <span id="status-text">Not connected</span>
     <input type="password" id="token-input" placeholder="Token (optional)" autocomplete="off" />
@@ -46,6 +47,7 @@
     <div class="dp-bar" id="dp-bar"></div>
     <div class="dp-header">
       <div class="dp-label" id="dp-label">Memory Entry</div>
+      <button class="dp-copy" id="dp-copy" title="Copy entry as JSON">Copy</button>
       <button class="dp-close" id="dp-close">x</button>
     </div>
     <div class="dp-body" id="dp-body"></div>
@@ -97,13 +99,22 @@
     </div>
   </div>
 
+  <div id="palette" hidden role="dialog" aria-label="Find node">
+    <div class="palette-card">
+      <input id="palette-input" type="text" placeholder="Find a node by key or summary..." autocomplete="off" />
+      <ul id="palette-results"></ul>
+      <div class="palette-hint">Up/Down to navigate, Enter to focus, Esc to close</div>
+    </div>
+  </div>
+
   <div id="controls">
-    <button id="zoom-in-btn" title="Zoom in">+</button>
-    <button id="zoom-out-btn" title="Zoom out">-</button>
-    <button id="fit-btn" title="Fit view">[]</button>
+    <button id="zoom-in-btn" title="Zoom in"><span aria-hidden="true">+</span><span class="ctl-label">Zoom in</span></button>
+    <button id="zoom-out-btn" title="Zoom out"><span aria-hidden="true">-</span><span class="ctl-label">Zoom out</span></button>
+    <button id="fit-btn" title="Fit view to all nodes"><span aria-hidden="true">[ ]</span><span class="ctl-label">Fit all</span></button>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
   <script src="js/settings/schema.js"></script>
   <script src="js/settings/store.js"></script>
   <script src="js/settings/profiles.js"></script>
