@@ -108,7 +108,9 @@ body {
     transform: scale(1.05);
 }
 
-.audit-badge[hidden] { display: none; }
+.audit-badge[hidden] {
+    display: none;
+}
 
 #palette {
     position: fixed;
@@ -122,14 +124,16 @@ body {
     padding-top: 12vh;
 }
 
-#palette[hidden] { display: none; }
+#palette[hidden] {
+    display: none;
+}
 
 .palette-card {
     width: min(560px, 92vw);
     background: var(--surface-bg, #0d0d18);
     border: 1px solid var(--border-color, #2d2d44);
     border-radius: 10px;
-    box-shadow: 0 24px 60px rgba(0,0,0,0.45);
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
     overflow: hidden;
     display: flex;
     flex-direction: column;
@@ -252,6 +256,13 @@ button.primary {
     color: #fff;
 }
 
+/* Connected state for connect button (clear visual when connected) */
+button.primary.connected {
+    background: var(--accent-2);
+    border-color: var(--accent-2);
+    color: #fff;
+}
+
 button.primary:hover:not(:disabled) {
     background: var(--accent-hover);
     filter: none;
@@ -337,6 +348,23 @@ body.inspector-open #viewport {
     will-change: transform, filter, opacity;
 }
 
+/* During continuous zoom/pan we remove costly transitions and shadows to improve responsiveness */
+body.zooming .mem-node,
+body.zooming .edge-group,
+body.zooming .node-mini-title,
+body.zooming .node-key,
+body.zooming .node-summary {
+    transition: none !important;
+    box-shadow: none !important;
+    filter: none !important;
+    text-shadow: none !important;
+}
+
+/* Subtle smoothing helper for transforms */
+#scene {
+    will-change: transform;
+}
+
 .mem-node.round {
     width: var(--node-w, 116px);
     height: var(--node-h, 116px);
@@ -368,6 +396,40 @@ body.inspector-open #viewport {
     max-width: calc(var(--node-w, 116px) - 24px);
     overflow-wrap: anywhere;
     text-shadow: 0 1px 6px #000;
+}
+
+.node-mini-title-svg {
+    display: none;
+    width: min(100%, calc(var(--node-w, 116px) - 24px));
+    height: 24px;
+}
+
+.node-mini-title-svg text {
+    fill: var(--text-primary);
+    font-family: monospace;
+    font-size: 13px;
+    font-weight: 800;
+    paint-order: fill;
+}
+
+body.low-scale-labels .node-mini-title {
+    display: none;
+}
+
+body.low-scale-labels .node-mini-title-svg {
+    display: block;
+}
+
+/* Improve font rendering for node labels and summaries to avoid GPU rasterization artifacts */
+.node-mini-title,
+.node-key,
+.node-summary,
+.edge-label-text {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: geometricPrecision;
+    paint-order: fill;
+    transform: translateZ(0);
 }
 
 .node-mini-dot {
@@ -515,6 +577,54 @@ body.inspector-open #viewport {
         0 4px 20px #00000077;
 }
 
+/* Hover relation badge */
+.mem-node:hover::before {
+    content: attr(data-degree) ' link';
+    position: absolute;
+    top: -26px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--accent);
+    color: white;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: 12px;
+    white-space: nowrap;
+    pointer-events: none;
+    z-index: 1000;
+    opacity: 0;
+    animation: fadeInBadge 0.2s ease forwards;
+}
+
+@keyframes fadeInBadge {
+    from {
+        opacity: 0;
+        transform: translateX(-50%) translateY(-4px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0);
+    }
+}
+
+/* Highlight edges - will be applied via JavaScript */
+svg.edges .edge-path {
+    transition: stroke 0.15s ease, stroke-width 0.15s ease, opacity 0.15s ease;
+}
+
+svg.edges .edge-path.edge-highlighted {
+    stroke: var(--accent);
+    stroke-width: 2.5;
+    opacity: 1;
+    filter: drop-shadow(0 0 4px rgba(99, 102, 241, 0.6));
+}
+
+svg.edges .edge-path.edge-dimmed {
+    opacity: 0.15;
+}
+
 .mem-node.selected {
     z-index: 5;
 }
@@ -533,9 +643,17 @@ body.inspector-open #viewport {
 }
 
 @keyframes node-pulse {
-    0%   { transform: scale(1); }
-    35%  { transform: scale(1.035); }
-    100% { transform: scale(1); }
+    0% {
+        transform: scale(1);
+    }
+
+    35% {
+        transform: scale(1.035);
+    }
+
+    100% {
+        transform: scale(1);
+    }
 }
 
 .node-header {
@@ -704,7 +822,9 @@ body.edge-labels-off .edge-label-text {
     flex-shrink: 0;
 }
 
-.dp-label { flex: 1; }
+.dp-label {
+    flex: 1;
+}
 
 .dp-copy {
     background: transparent;
@@ -790,6 +910,7 @@ body.edge-labels-off .edge-label-text {
 }
 
 @media (max-width: 900px) {
+
     body.identity-open #viewport,
     body.inspector-open #viewport {
         margin-left: 0;
@@ -1153,6 +1274,26 @@ body.edge-labels-off .edge-label-text {
     text-transform: uppercase;
 }
 
+#zoom-indicator {
+    min-width: 56px;
+    padding: 5px 8px;
+    border: 1px solid var(--border-color);
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--panel-bg) 88%, #000 12%);
+    color: var(--text-primary);
+    font-size: 11px;
+    font-weight: 800;
+    text-align: center;
+    letter-spacing: 0.3px;
+    transition: transform 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+#zoom-indicator.active {
+    color: #fff;
+    border-color: color-mix(in srgb, var(--accent-2) 60%, var(--border-color) 40%);
+    transform: scale(1.04);
+}
+
 /* ── Settings panel ───────────────────────────────────────────────────────── */
 #settings-panel {
     position: fixed;
@@ -1428,7 +1569,9 @@ body.edge-labels-off .edge-label-text {
 }
 
 @keyframes spin {
-    to { transform: rotate(360deg); }
+    to {
+        transform: rotate(360deg);
+    }
 }
 
 /* ── Settings panel: schema-driven UI ─────────────────────────────────────── */
@@ -1436,6 +1579,7 @@ body.edge-labels-off .edge-label-text {
     padding: 8px 12px 4px;
     border-bottom: 1px solid var(--border-soft);
 }
+
 .settings-search input {
     width: 100%;
     padding: 6px 10px;
@@ -1446,13 +1590,22 @@ body.edge-labels-off .edge-label-text {
     font: inherit;
     outline: none;
 }
+
 .settings-search input:focus {
     border-color: var(--accent);
 }
 
-.settings-section { border-bottom: 1px solid var(--border-soft); }
-.settings-section[data-collapsed="true"] .settings-section-body { display: none; }
-.settings-section.search-empty { display: none; }
+.settings-section {
+    border-bottom: 1px solid var(--border-soft);
+}
+
+.settings-section[data-collapsed="true"] .settings-section-body {
+    display: none;
+}
+
+.settings-section.search-empty {
+    display: none;
+}
 
 .settings-section-header {
     display: flex;
@@ -1467,21 +1620,36 @@ body.edge-labels-off .edge-label-text {
     text-align: left;
     font: inherit;
 }
-.settings-section-header:hover { background: color-mix(in srgb, var(--surface-bg) 60%, transparent); }
-.settings-section-title { font-weight: 600; flex: 1; }
+
+.settings-section-header:hover {
+    background: color-mix(in srgb, var(--surface-bg) 60%, transparent);
+}
+
+.settings-section-title {
+    font-weight: 600;
+    flex: 1;
+}
+
 .settings-section-modified {
     color: var(--accent-2);
     font-weight: 700;
     font-size: 18px;
     line-height: 1;
 }
+
 .settings-section-chevron {
     color: var(--text-muted);
     font-family: monospace;
     width: 14px;
     text-align: center;
 }
-.settings-section-body { padding: 4px 12px 12px; display: flex; flex-direction: column; gap: 8px; }
+
+.settings-section-body {
+    padding: 4px 12px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
 
 .setting-row {
     display: grid;
@@ -1489,14 +1657,38 @@ body.edge-labels-off .edge-label-text {
     align-items: center;
     gap: 8px;
 }
-.setting-row.toggle { grid-template-columns: 1fr auto; }
-.setting-row.color-row { grid-template-columns: minmax(80px, 110px) auto; }
+
+.setting-row.toggle {
+    grid-template-columns: 1fr auto;
+}
+
+.setting-row.color-row {
+    grid-template-columns: minmax(80px, 110px) auto;
+}
+
 .setting-row.relation-row,
-.setting-row.palette-row { grid-template-columns: 1fr; gap: 6px; }
-.setting-row.search-hidden { display: none; }
-.setting-row[hidden] { display: none; }
-.setting-row .setting-label { color: var(--text-muted); font-size: 13px; }
-.setting-row input[type="range"] { width: 100%; }
+.setting-row.palette-row {
+    grid-template-columns: 1fr;
+    gap: 6px;
+}
+
+.setting-row.search-hidden {
+    display: none;
+}
+
+.setting-row[hidden] {
+    display: none;
+}
+
+.setting-row .setting-label {
+    color: var(--text-muted);
+    font-size: 13px;
+}
+
+.setting-row input[type="range"] {
+    width: 100%;
+}
+
 .setting-row select,
 .setting-row input[type="text"] {
     background: var(--surface-bg);
@@ -1506,6 +1698,7 @@ body.edge-labels-off .edge-label-text {
     padding: 4px 8px;
     font: inherit;
 }
+
 .setting-row .setting-value {
     min-width: 36px;
     text-align: right;
@@ -1519,6 +1712,7 @@ body.edge-labels-off .edge-label-text {
     flex-wrap: wrap;
     gap: 6px;
 }
+
 .relation-chip {
     display: inline-flex;
     align-items: center;
@@ -1531,7 +1725,11 @@ body.edge-labels-off .edge-label-text {
     cursor: pointer;
     user-select: none;
 }
-.relation-chip input { accent-color: var(--accent); }
+
+.relation-chip input {
+    accent-color: var(--accent);
+}
+
 .relation-chip:has(input:checked) {
     border-color: var(--accent);
     background: color-mix(in srgb, var(--accent) 16%, var(--surface-bg) 84%);
@@ -1547,6 +1745,7 @@ body.edge-labels-off .edge-label-text {
     margin-top: 6px;
     flex-wrap: wrap;
 }
+
 .profile-row select,
 .profile-row input[type="text"] {
     flex: 1;
@@ -1558,6 +1757,7 @@ body.edge-labels-off .edge-label-text {
     padding: 4px 8px;
     font: inherit;
 }
+
 .profile-row button {
     background: var(--surface-bg);
     color: var(--text-primary);
@@ -1567,7 +1767,11 @@ body.edge-labels-off .edge-label-text {
     cursor: pointer;
     font: inherit;
 }
-.profile-row button:hover { border-color: var(--accent); color: var(--accent); }
+
+.profile-row button:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
 
 /* Display-section scale variables: --node-scale and --label-scale are
  * exposed as CSS custom properties so future rules / mn-* refinements can
@@ -1576,4 +1780,6 @@ body.edge-labels-off .edge-label-text {
  * directly in collapsedNodeSize. */
 .mn-title,
 .mn-summary,
-.mn-tags { font-size: calc(1em * var(--label-scale)); }
+.mn-tags {
+    font-size: calc(1em * var(--label-scale));
+}

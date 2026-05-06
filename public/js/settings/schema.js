@@ -88,6 +88,8 @@
             settings: [
                 { id: 'layoutMode', type: 'select', label: 'Algorithm', default: 'radial',
                   options: [{ value: 'radial', label: 'Radial focus' }, { value: 'force', label: 'Force-directed' }, { value: 'hierarchical', label: 'Hierarchical' }] },
+                { id: 'radialGapMultiplier', type: 'range', label: 'Radial gap multiplier', min: 0.6, max: 2.0, step: 0.05, default: 1, format: (v) => `${Number(v).toFixed(2)}x`, domId: 'setting-radial-gap-multiplier' },
+                { id: 'maxNodesPerRing', type: 'range', label: 'Max nodes per ring', min: 6, max: 64, step: 1, default: 24, format: (v) => `${Math.round(v)} nodes`, domId: 'setting-max-nodes-per-ring' },
             ],
         },
         {
