@@ -1,103 +1,178 @@
 # MCP Shared Memory Server
 
-This project is a small local shared-memory service for agent-like clients. It exposes the original WebSocket protocol and an official stdio MCP adapter for direct MCP tool calls.
+A local shared-memory coordination service for multi-agent systems with built-in semantic search and bidirectional memory graphs. Supports both WebSocket and MCP stdio protocols.
 
-Agents can register an ID, set and get shared keys, subscribe to updates, relate memories through a deterministic graph, request semantic suggestions, and link to other agent IDs for forwarded activity notifications. State uses an in-process SQLite database by default, with optional file-backed SQLite persistence.
+## Overview
 
-## Files
+**sharedMemory** provides agents with a persistent, queryable memory backend featuring:
 
-- `server.js`: startup wrapper for `npm start`.
-- `src/server.js`: Express, HTTP, WebSocket setup, and lifecycle helpers.
-- `src/protocol.js`: JSON message parsing and validation.
-- `src/memory-store.js`: SQLite-backed key/value store, metadata search, TTL, and memory graph.
-- `src/suggestion-engine.js`: semantic memory suggestion queue, ranking, and index orchestration.
-- `src/mcp-tools.js`: transport-independent handlers for official MCP tools.
-- `src/agent-registry.js`: agent IDs, registrations, subscriptions, links, disconnects.
-- `src/delivery.js`: safe WebSocket delivery helpers.
-- `mcp-server.mjs`: official stdio MCP adapter.
-- `scripts/smoke-suggest.js`: manual real-model suggestion smoke client.
-- `example_agent.js`: simple client that registers, subscribes, sets a key, and lists server state.
-- `test/server.test.js`: integration tests for the WebSocket protocol.
-- `test/memory-store.test.js`: focused graph traversal and sorting tests.
-- `test/suggestion-engine.test.js`: semantic suggestion queue, ranking, and index tests.
-- `test/mcp-tools.test.js`: transport-independent MCP tool handler tests.
-- `test/mcp-stdio.test.js`: real stdio MCP protocol integration tests.
+- **Distributed Agent Coordination**: Register agents, subscribe to memory updates, and link agents for forwarded notifications
+- **Semantic Memory Search**: Full-text search with metadata filtering (tags, importance, timestamps)
+- **Memory Graph Relations**: Type-safe edges between memory entries (`depends_on`, `mentions`, `contradicts`, etc.)
+- **TTL & Expiry Management**: Automatic cleanup of temporary memories
+- **Dual Protocol Support**: WebSocket for real-time coordination, MCP stdio for LLM integrations
+- **Optional Persistence**: File-backed SQLite for durability across restarts
+- **Semantic Suggestions**: Optional AI-powered context-aware memory recommendations
+
+All state uses an in-process SQLite database. File persistence is optional via `MEMORY_FILE` environment variable.
+
+## Table of Contents
+
+1. [Quick Start](#quick-start)
+2. [Architecture & Files](#architecture--files)
+3. [Configuration](#configuration)
+4. [WebSocket Protocol](#websocket-protocol)
+5. [Official MCP Adapter](#official-mcp-adapter)
+6. [HTTP Status Endpoint](#http-status-endpoint)
+7. [Persistence](#persistence)
+8. [Snapshot Import/Export](#snapshot-importexport)
+9. [Integration with Claude Desktop](#integrate-with-claude-desktop-or-another-mcp-client)
+10. [Testing](#testing)
+11. [Limitations](#limitations)
+
+## Architecture & Files
+
+### Core Modules
+
+- **`src/server.js`**: Express HTTP server, WebSocket listener, request routing, auth gating, background prune timer, and notification orchestration
+- **`src/memory-store.js`**: SQLite-backed key/value store with metadata, graph relations, TTL expiry, FTS5 full-text search, and persistence helpers
+- **`src/protocol.js`**: JSON message parsing and validation for all command types
+- **`src/agent-registry.js`**: Agent registration, subscriptions, cross-agent links, and disconnection handling
+- **`src/delivery.js`**: Safe WebSocket broadcast and direct-message delivery
+- **`src/suggestion-engine.js`**: Semantic suggestion queue, ranking pipeline, and index orchestration
+- **`src/vector-index.js`**: In-memory vector index for similarity search
+- **`src/embedding-adapter.js`**: Lazy-loading Hugging Face transformer embedder
+
+### Entry Points & Helpers
+
+- **`server.js`**: Startup wrapper for `npm start` (configures persistence)
+- **`mcp-server.mjs`**: Official MCP stdio adapter exposing memory tools
+- **`example_agent.js`**: Simple WebSocket client demonstrating register, subscribe, set, and list
+- **`scripts/smoke-suggest.js`**: Manual smoke test for semantic suggestions with real models
+- **`scripts/claude-mcp.ps1`**: Windows PowerShell launcher for Claude Desktop MCP integration
+
+### Tests
+
+- **`test/server.test.js`**: WebSocket protocol, auth, notifications, request IDs, prune, and suggestions
+- **`test/memory-store.test.js`**: Store operations, graph traversal, SQLite persistence, FTS search, TTL, and prune
+- **`test/suggestion-engine.test.js`**: Suggestion queue, ranking, tombstones, and close behavior
+- **`test/mcp-tools.test.js`**: MCP tool envelopes, validation, search/map responses, and suggestion refresh
+- **`test/mcp-stdio.test.js`**: Real stdio MCP protocol integration (initialize, tools, tool calls)
+
+## Configuration
+
+### Environment Variables
+
+- **`PORT`** (default: `3000`): HTTP/WebSocket listen port
+- **`MEMORY_FILE`** (optional): SQLite database file path for persistence (e.g., `data/memory.db`). Omit for in-memory store
+- **`MEMORY_TOKEN`** (optional): Single static bearer token for WebSocket auth. When set, all clients must authenticate before issuing commands
+- **`MEMORY_SUGGEST_ENABLED`** (default: `false`): Enable semantic memory suggestions
+- **`MEMORY_EMBED_MODEL`** (default: `onnx-community/all-MiniLM-L6-v2-ONNX`): Hugging Face embedding model ID for suggestions
+
+### Requirements
+
+- **Node.js 24.0.0 or newer** (uses `node:sqlite` module)
+- **npm 10+** (for workspace support)
 
 ## Quick Start
 
-Install dependencies:
+### 1. Install Dependencies
 
 ```bash
 npm install
 ```
 
-Use Node.js 24 or newer. Persistence uses Node's built-in `node:sqlite` module, which currently prints an experimental warning.
+> **Note**: The `node:sqlite` module is experimental and will emit a deprecation warning on startup.
 
-Start the server:
+### 2. Start the Server
+
+**Basic (in-memory):**
 
 ```bash
 npm start
 ```
 
-Start with persistent storage:
+**With Persistence:**
 
 ```bash
 MEMORY_FILE=data/memory.db npm start
 ```
 
-Start with token authentication:
+**With Token Authentication:**
 
 ```bash
-MEMORY_TOKEN=secret npm start
+MEMORY_TOKEN=my-secret npm start
 ```
 
-Start with semantic suggestions enabled:
+**With Semantic Suggestions:**
 
 ```bash
 MEMORY_SUGGEST_ENABLED=true npm start
 ```
 
-Run example agents in separate terminals:
+**All Options Combined:**
+
+```bash
+MEMORY_FILE=data/memory.db MEMORY_TOKEN=my-secret MEMORY_SUGGEST_ENABLED=true npm start
+```
+
+### 3. Connect & Test
+
+**Check server health:**
+
+```bash
+curl http://localhost:3000/status
+```
+
+**Run example agents in separate terminals:**
 
 ```bash
 node example_agent.js agentA
 node example_agent.js agentB
 ```
 
-Check server status:
+Each agent will register, subscribe to a key, and display updates in real-time.
 
-```bash
-curl http://localhost:3000/status
-```
-
-Run tests:
+### 4. Run Tests
 
 ```bash
 npm test
 ```
 
-Run the official stdio MCP adapter:
+Or run individual test suites:
+
+```bash
+node --test test/server.test.js
+node --test test/memory-store.test.js
+node --test test/suggestion-engine.test.js
+node --test test/mcp-tools.test.js
+node --test test/mcp-stdio.test.js
+```
+
+### 5. Use the MCP Adapter
+
+**Run the stdio MCP adapter:**
 
 ```bash
 npm run mcp
 ```
 
-Run the manual real-model suggestion smoke test in a second terminal after starting the server with suggestions enabled:
+**Smoke test semantic suggestions (after starting server with suggestions enabled):**
 
 ```bash
 MEMORY_SUGGEST_ENABLED=true npm start
-npm run smoke:suggest
+npm run smoke:suggest  # Run in separate terminal
 ```
 
-## Integrate With Claude Desktop Or Another MCP Client
+## Integrate with Claude Desktop or Another MCP Client
 
-The MCP entry point is [mcp-server.mjs](mcp-server.mjs). It exposes the shared-memory tools over stdio, so Claude Desktop and other MCP clients can talk to this project without using the WebSocket server.
+The MCP entry point is [`mcp-server.mjs`](mcp-server.mjs), which exposes shared-memory tools over stdio. Claude Desktop and other MCP clients can integrate without running the WebSocket server.
 
-For a dynamic Windows setup, use the launcher script in [scripts/claude-mcp.ps1](scripts/claude-mcp.ps1). It resolves the repo path at runtime, so the Claude Desktop config only needs to call PowerShell.
+### Setup on Windows
 
-You can use either the preset option or a custom option.
+For dynamic repo paths, use the launcher script [`scripts/claude-mcp.ps1`](scripts/claude-mcp.ps1). This resolves the repo path at runtime so your Claude Desktop config doesn't require hardcoded paths.
 
-Preset Claude Desktop config example on Windows:
+**Preset Configuration:**
 
 ```json
 {
@@ -119,7 +194,7 @@ Preset Claude Desktop config example on Windows:
 }
 ```
 
-Custom option: set `SHARED_MEMORY_REPO_ROOT` if the repo moves, or set `SHARED_MEMORY_ENTRYPOINT` if you want Claude Desktop to launch a different MCP entry point.
+**Custom Configuration (Recommended for Portability):**
 
 ```json
 {
@@ -142,35 +217,50 @@ Custom option: set `SHARED_MEMORY_REPO_ROOT` if the repo moves, or set `SHARED_M
 }
 ```
 
-Use `MEMORY_FILE` if you want persistence, or omit it for an in-memory store. The MCP server exposes these tools:
+**Environment Variables:**
 
-- `memory_set`
-- `memory_get`
-- `memory_search`
-- `memory_suggest`
-- `memory_map`
-- `memory_export`
-- `memory_validate_import`
-- `memory_import`
+- `SHARED_MEMORY_REPO_ROOT` (optional): Override repo path if the repo moves
+- `SHARED_MEMORY_ENTRYPOINT` (optional): Use a different MCP entry point
+- `MEMORY_FILE` (optional): Enable persistence; omit for in-memory store
+- `MEMORY_TOKEN` (optional): Not used for stdio (local process only)
 
-Snapshot imports support two modes:
+### Available MCP Tools
 
-- `merge` adds new memories and relations into the existing graph, skipping keys and edges that already exist.
-- `replace` is the explicit destructive restore path and remains the default for backward compatibility.
+The stdio adapter exposes these tools:
 
-The dashboard import flow uses `merge` by default, so uploaded JSON adds to the current memory unless you call the lower-level replace mode directly.
-For other MCP clients, launch `node mcp-server.mjs` as a stdio process and register the same tools. If you want the browser UI at the same time, keep `npm start` running separately for the WebSocket dashboard.
+| Tool                     | Description                                                   |
+| ------------------------ | ------------------------------------------------------------- |
+| `memory_set`             | Store a key with optional metadata, tags, importance, and TTL |
+| `memory_get`             | Retrieve full entry for a key                                 |
+| `memory_search`          | Full-text and metadata search                                 |
+| `memory_suggest`         | Semantic suggestions based on context (when enabled)          |
+| `memory_map`             | Get a metadata-only graph neighborhood                        |
+| `memory_export`          | Export full snapshot with all values                          |
+| `memory_validate_import` | Dry-run validate a snapshot                                   |
+| `memory_import`          | Import a snapshot (replace or merge mode)                     |
 
-## HTTP Status
+### Other MCP Clients
 
-`GET /status` returns:
+For non-Claude clients, start the stdio adapter directly:
+
+```bash
+node mcp-server.mjs
+```
+
+Your client can then register the same tools. Keep the WebSocket server (`npm start`) running separately if you also need the browser dashboard.
+
+## HTTP Status Endpoint
+
+### `GET /status`
+
+Returns server health, metrics, and configuration:
 
 ```json
 {
-  "agents": ["agentA"],
+  "agents": ["agentA", "agentB"],
   "connectedAgents": ["agentA"],
-  "memoryKeys": ["greeting"],
-  "memoryCount": 1,
+  "memoryKeys": ["greeting", "project.architecture"],
+  "memoryCount": 2,
   "relationCount": 0,
   "expiredMemoryCount": 0,
   "pruneIntervalMs": 600000,
@@ -201,25 +291,46 @@ For other MCP clients, launch `node mcp-server.mjs` as a stdio process and regis
 }
 ```
 
-- `agents`: all known agent IDs, including offline placeholders.
-- `connectedAgents`: agent IDs with a live WebSocket.
-- `memoryKeys`: non-expired keys currently stored in memory.
-- `memoryCount`: number of non-expired memory entries.
-- `relationCount`: number of graph edges whose endpoints are non-expired.
-- `expiredMemoryCount`: expired entries still waiting for prune.
-- `pruneIntervalMs`: background prune interval in milliseconds. `0` means disabled.
-- `lastPrunedAt`: timestamp of the last explicit or background prune, or `null`.
-- `persistence`: durability status. When `MEMORY_FILE` is unset, `enabled` is `false`.
-- `suggestions`: semantic suggestion status, including active index size and queued embedding work. Suggestions are disabled unless explicitly enabled.
-- `snapshot`: last WebSocket snapshot export/import timestamps and import stats.
+### Field Descriptions
 
-When `MEMORY_TOKEN` is set, `/status` requires:
+| Field                            | Meaning                                              |
+| -------------------------------- | ---------------------------------------------------- |
+| `agents`                         | All known agent IDs (including offline placeholders) |
+| `connectedAgents`                | Agent IDs with active WebSocket connections          |
+| `memoryKeys`                     | Non-expired memory keys currently in store           |
+| `memoryCount`                    | Total non-expired entries                            |
+| `relationCount`                  | Graph edges between non-expired entries              |
+| `expiredMemoryCount`             | Expired entries awaiting prune                       |
+| `pruneIntervalMs`                | Background prune timer interval (0 = disabled)       |
+| `lastPrunedAt`                   | Last prune timestamp or `null`                       |
+| `persistence.enabled`            | `true` if `MEMORY_FILE` is configured                |
+| `persistence.file`               | Path to SQLite database file                         |
+| `persistence.dirty`              | `true` if unflushed writes exist                     |
+| `persistence.lastLoadedAt`       | Timestamp of last database load                      |
+| `persistence.lastFlushedAt`      | Timestamp of last sync to disk                       |
+| `persistence.lastFlushError`     | Last persistence error or `null`                     |
+| `suggestions.enabled`            | `true` if `MEMORY_SUGGEST_ENABLED=true`              |
+| `suggestions.modelLoaded`        | `true` once embedder is ready                        |
+| `suggestions.activeIndexedCount` | Indexed entries in suggestion vector index           |
+| `suggestions.processing`         | `true` if embeddings are being computed              |
+| `snapshot.lastExportedAt`        | Last snapshot export timestamp                       |
+
+### Authentication
+
+When `MEMORY_TOKEN` is configured, `/status` requires a bearer token:
 
 ```http
-Authorization: Bearer secret
+GET /status HTTP/1.1
+Authorization: Bearer my-secret-token
 ```
 
-Missing or invalid bearer tokens return HTTP `401`:
+**Success (200):**
+
+```json
+{ "agents": [...], ... }
+```
+
+**Failure (401):**
 
 ```json
 { "error": "unauthorized" }
@@ -227,528 +338,54 @@ Missing or invalid bearer tokens return HTTP `401`:
 
 ## Persistence
 
-Persistence is optional and controlled by `MEMORY_FILE`.
+Persistence is optional and controlled via the `MEMORY_FILE` environment variable.
+
+### Enable Persistence
 
 ```bash
 MEMORY_FILE=data/memory.db npm start
 ```
 
-The server opens (or creates) a SQLite database at the given path. A missing file starts with an empty graph. An invalid or corrupt file fails startup with a clear error message. Edges that reference missing memory entries are dropped during `importState` to preserve graph integrity.
+The server opens (or creates) a SQLite database at the given path. A missing file starts with an empty graph. An invalid or corrupt file fails startup with a clear error message.
 
-Every write (`set`, `touch`, `relate`, `unrelate`, `delete`, `prune`) is immediately durable; SQLite writes are committed synchronously to WAL before the command response is sent. The dirty flag and debounced flush still exist as a semantic acknowledgment layer; `close()`, `SIGINT`, and `SIGTERM` clear the dirty flag before the process exits.
+### Durability Guarantees
 
-## Snapshot Import
+- Every write (`set`, `touch`, `relate`, `unrelate`, `delete`, `prune`) is **immediately durable**
+- SQLite writes are committed synchronously to WAL before the command response is sent
+- Edges referencing missing entries are dropped during import to preserve graph integrity
+- `SIGINT` and `SIGTERM` flush dirty memory synchronously before process exit
 
-The WebSocket dashboard and MCP tools accept snapshot imports in either `merge` or `replace` mode.
+### Dirty Flag & Debounced Flush
 
-- `merge` validates the incoming snapshot, adds only new entries and edges, and leaves existing memory untouched.
-- `replace` validates the incoming snapshot and replaces the current graph with the imported one.
-- Dashboard uploads default to `merge` so imported files are added to the current memory.
-- Use `replace` only when you want a destructive restore from a backup snapshot.
+The dirty flag and debounced flush act as a semantic acknowledgment layer:
 
-## WebSocket Protocol
+- Writes mark the store as dirty
+- Periodic flushing (configurable, default 600ms) syncs dirty state to disk
+- Shutdown handlers ensure a final synchronous flush
 
-Connect to:
+### Recovery from Corruption
 
-```text
-ws://localhost:3000
-```
+If the database is corrupted:
 
-All messages are JSON objects with a `type` field.
+1. Delete the corrupt file: `rm data/memory.db*`
+2. Restart the server to initialize a fresh database
+3. Use snapshot import to restore memory from a backup
 
-Every command accepts an optional `requestId` string or finite number. Direct responses and direct errors echo the exact value. Broadcasts such as `update`, `relation-update`, cross-agent `linked`, and `welcome` do not include `requestId`.
+## Snapshot Import/Export
 
-Example:
+The WebSocket and MCP protocols support full graph snapshots with optional merge or replace modes.
 
-```json
-{ "type": "get", "key": "greeting", "requestId": "get-1" }
-```
+### Export
 
-Response:
+Export the complete graph including all values:
 
-```json
-{
-  "type": "result",
-  "key": "greeting",
-  "entry": null,
-  "requestId": "get-1"
-}
-```
-
-### `auth`
-
-Authenticates a WebSocket connection when `MEMORY_TOKEN` is configured.
-
-```json
-{ "type": "auth", "token": "secret", "requestId": "auth-1" }
-```
-
-Success:
-
-```json
-{ "type": "authenticated", "requestId": "auth-1" }
-```
-
-Failure:
-
-```json
-{ "type": "error", "message": "unauthorized", "requestId": "auth-1" }
-```
-
-When auth is enabled, only `auth` is allowed before successful authentication. Protected commands return `unauthorized` and the socket remains open so clients can authenticate and retry. When auth is disabled, sockets behave as authenticated and `auth` is accepted as a no-op success.
-
-### `register`
-
-Registers or confirms an agent ID.
-
-```json
-{ "type": "register", "agentId": "agentA" }
-```
-
-Response:
-
-```json
-{ "type": "registered", "agentId": "agentA" }
-```
-
-If another live connection already owns that ID, the server returns:
-
-```json
-{ "type": "error", "message": "duplicate-agent" }
-```
-
-Offline agent IDs can be reclaimed by a later connection.
-
-### `set`
-
-Stores a memory value.
-
-```json
-{ "type": "set", "key": "greeting", "value": "hello from agentA" }
-```
-
-Optional graph metadata can be included for low-token recall:
-
-```json
-{
-  "type": "set",
-  "key": "project.architecture",
-  "value": "Full details...",
-  "summary": "Server is split into focused modules.",
-  "tags": ["architecture", "server"],
-  "importance": 8
-}
-```
-
-Temporary memories can expire by passing either `ttlMs` or `expiresAt`, but not both:
-
-```json
-{
-  "type": "set",
-  "key": "session.note",
-  "value": "Temporary task context",
-  "summary": "Temporary task context",
-  "ttlMs": 600000
-}
-```
-
-`ttlMs` is converted to an absolute `expiresAt` timestamp by the server clock. `expiresAt` must be a positive integer timestamp in milliseconds. Missing expiry means the entry does not expire.
-
-Response:
-
-```json
-{ "type": "ok", "action": "set", "key": "greeting", "revision": 1 }
-```
-
-The stored entry has this shape:
-
-```json
-{
-  "value": "hello from agentA",
-  "summary": "hello from agentA",
-  "tags": [],
-  "importance": 0,
-  "revision": 1,
-  "expiresAt": null,
-  "updatedAt": 1714694400000,
-  "updatedBy": "agentA"
-}
-```
-
-If `summary` is omitted, the server generates a compact fallback by stringifying the value, collapsing whitespace, and capping length. `importance` must be an integer from `0` to `10`.
-
-Expired entries are hidden from `get`, `list`, `map`, and `search` without deleting or flushing them. Expired entries are removed only by `prune` or the background prune interval.
-
-Safer clients can add `ifRevision` to prevent stale overwrites:
-
-```json
-{ "type": "set", "key": "greeting", "value": "new value", "ifRevision": 1 }
-```
-
-Omitting `ifRevision` keeps legacy last-write-wins behavior. `ifRevision: null` is create-only: it succeeds only when the key is absent or expired from the visible memory view. Stale writes return:
-
-```json
-{
-  "type": "error",
-  "message": "revision-conflict",
-  "key": "greeting",
-  "currentRevision": 2
-}
-```
-
-### `get`
-
-Reads a memory key.
-
-```json
-{ "type": "get", "key": "greeting" }
-```
-
-Response:
-
-```json
-{
-  "type": "result",
-  "key": "greeting",
-  "entry": {
-    "value": "hello from agentA",
-    "summary": "hello from agentA",
-    "tags": [],
-    "importance": 0,
-    "revision": 1,
-    "expiresAt": null,
-    "updatedAt": 1714694400000,
-    "updatedBy": "agentA"
-  }
-}
-```
-
-If the key does not exist or is expired, `entry` is `null`.
-
-### `touch`
-
-Updates expiry and metadata timestamps without changing the stored value.
-
-```json
-{
-  "type": "touch",
-  "key": "session.note",
-  "ttlMs": 600000,
-  "requestId": "touch-1"
-}
-```
-
-Response:
-
-```json
-{
-  "type": "touched",
-  "key": "session.note",
-  "entry": {
-    "value": "Temporary task context",
-    "summary": "Temporary task context",
-    "tags": [],
-    "importance": 0,
-    "revision": 2,
-    "expiresAt": 1714695000000,
-    "updatedAt": 1714694400000,
-    "updatedBy": "agentA"
-  },
-  "requestId": "touch-1"
-}
-```
-
-`touch` accepts either `ttlMs` or `expiresAt`, but not both. If both expiry fields are omitted, the existing expiry is cleared and the memory becomes non-expiring. `touch` also accepts positive integer `ifRevision`; stale checks return `revision-conflict`.
-
-### `subscribe`
-
-Subscribes to updates for a key.
-
-```json
-{ "type": "subscribe", "key": "greeting" }
-```
-
-Response:
-
-```json
-{ "type": "subscribed", "key": "greeting" }
-```
-
-If the key already has a value, the server immediately sends an `update`. Future `set` calls for the same key also send `update` messages to subscribers.
-
-```json
-{
-  "type": "update",
-  "key": "greeting",
-  "entry": {
-    "value": "new value",
-    "revision": 2,
-    "updatedAt": 1714694400000,
-    "updatedBy": "agentB"
-  }
-}
-```
-
-If a subscribed key is deleted, subscribers receive:
-
-```json
-{
-  "type": "update",
-  "key": "greeting",
-  "entry": null,
-  "action": "deleted"
-}
-```
-
-### `unsubscribe`
-
-Stops updates for a key.
-
-```json
-{ "type": "unsubscribe", "key": "greeting" }
-```
-
-Response:
-
-```json
-{ "type": "unsubscribed", "key": "greeting" }
-```
-
-### `relate`
-
-Creates or updates a typed edge between two existing memory keys.
-
-```json
-{
-  "type": "relate",
-  "from": "project.database",
-  "to": "project.architecture",
-  "relation": "depends_on",
-  "reason": "Database choices affect architecture.",
-  "weight": 0.8
-}
-```
-
-Response:
-
-```json
-{
-  "type": "related",
-  "action": "created",
-  "edge": {
-    "from": "project.database",
-    "to": "project.architecture",
-    "relation": "depends_on",
-    "reason": "Database choices affect architecture.",
-    "weight": 0.8,
-    "updatedAt": 1714694400000,
-    "updatedBy": "agentA"
-  }
-}
-```
-
-Supported relations are `related_to`, `depends_on`, `supports`, `contradicts`, `mentions`, `derived_from`, and `next_step`. Duplicate `from + relation + to` edges update the existing edge and return `action: "updated"`.
-
-### `unrelate`
-
-Removes a typed edge. This is idempotent.
-
-```json
-{
-  "type": "unrelate",
-  "from": "project.database",
-  "to": "project.architecture",
-  "relation": "depends_on"
-}
-```
-
-Response:
-
-```json
-{
-  "type": "unrelated",
-  "from": "project.database",
-  "to": "project.architecture",
-  "relation": "depends_on"
-}
-```
-
-### `delete`
-
-Deletes a memory key and cascades all inbound and outbound graph edges.
-
-```json
-{ "type": "delete", "key": "project.architecture" }
-```
-
-Response:
-
-```json
-{
-  "type": "deleted",
-  "key": "project.architecture",
-  "removed": true,
-  "revision": 3
-}
-```
-
-Deleting a missing key is safe and returns `removed: false` with `revision: null`. `delete` accepts positive integer `ifRevision`; stale checks return `revision-conflict`.
-
-### `prune`
-
-Removes all expired memory entries and cascades their inbound and outbound graph edges.
-
-```json
-{ "type": "prune", "requestId": "prune-1" }
-```
-
-Response:
-
-```json
-{
-  "type": "pruned",
-  "keys": ["session.note"],
-  "count": 1,
-  "requestId": "prune-1"
-}
-```
-
-Subscribers to pruned keys receive:
-
-```json
-{
-  "type": "update",
-  "key": "session.note",
-  "entry": null,
-  "action": "expired"
-}
-```
-
-Incident edges removed by expiry emit `relation-update` with `action: "cascade-deleted"`.
-
-### `map`
-
-Returns a deterministic metadata-only graph neighborhood for low-token recall.
-
-```json
-{ "type": "map", "key": "project.architecture", "depth": 1, "limit": 10 }
-```
-
-Response:
-
-```json
-{
-  "type": "map-result",
-  "key": "project.architecture",
-  "nodes": [
-    {
-      "key": "project.architecture",
-      "summary": "Server is split into focused modules.",
-      "tags": ["architecture", "server"],
-      "importance": 8,
-      "revision": 1,
-      "updatedAt": 1714694400000,
-      "updatedBy": "agentA"
-    }
-  ],
-  "edges": []
-}
-```
-
-`map` uses bidirectional breadth-first search with a visited set, so cycles cannot duplicate nodes or loop forever. Returned edges preserve original `from`, `to`, and `relation`. The root key is included first; the remaining nodes are sorted by importance descending, `updatedAt` descending, then key ascending before applying `limit`. Expired nodes and edges touching expired nodes are skipped.
-
-### `search`
-
-Searches memory metadata without returning full values.
-
-```json
-{
-  "type": "search",
-  "query": "architecture",
-  "tags": ["server"],
-  "minImportance": 5,
-  "limit": 10
-}
-```
-
-Filters compose with AND semantics:
-
-- `query`: optional non-empty string matched case-insensitively against key, summary, and tags.
-- `tags`: optional array of non-empty strings; every requested tag must be present.
-- `minImportance`: optional integer `0` to `10`.
-- `limit`: optional integer `1` to `100`, default `20`.
-
-At least one of `query`, non-empty `tags`, or `minImportance` is required.
-
-Response:
-
-```json
-{
-  "type": "search-result",
-  "results": [
-    {
-      "key": "project.architecture",
-      "summary": "Server is split into focused modules.",
-      "tags": ["architecture", "server"],
-      "importance": 8,
-      "revision": 1,
-      "updatedAt": 1714694400000,
-      "updatedBy": "agentA"
-    }
-  ],
-  "total": 1
-}
-```
-
-`results` are metadata-only. Use `get` to retrieve full `value`. `total` is the pre-limit match count. Expired entries are not searched.
-
-### `suggest`
-
-Suggests relevant memory metadata for the agent's current task or prompt. Suggestions are semantic and metadata-only; use `get` to load full values for selected keys.
-
-```json
-{
-  "type": "suggest",
-  "context": "implement the database migration plan",
-  "tags": ["database"],
-  "limit": 5,
-  "requestId": "suggest-1"
-}
-```
-
-Response:
-
-```json
-{
-  "type": "suggest-result",
-  "suggestions": [
-    {
-      "key": "project.database",
-      "summary": "Database migration approach.",
-      "tags": ["database"],
-      "importance": 8,
-      "revision": 1,
-      "score": 0.87,
-      "reasons": ["semantic-match", "high-importance"]
-    }
-  ],
-  "requestId": "suggest-1"
-}
-```
-
-`context` must be a non-empty string, `limit` must be `1` to `20`, and `tags` uses AND semantics. Suggestions are disabled by default; disabled servers return `suggest-result` with an empty `suggestions` array and do not load the embedding model. Enable them with `MEMORY_SUGGEST_ENABLED=true` or `createSharedMemoryServer({ suggestions: { enabled: true } })`. When enabled, the semantic index is eventually consistent: `set`, `touch`, `delete`, and `prune` enqueue index updates instead of blocking the write path. `/status.suggestions.modelLoaded` becomes `true` after the embedder has loaded.
-
-### Snapshots
-
-Snapshots export and restore the full graph, including memory values. Public import supports both merge and replace modes: merge is additive by default in the dashboard, while replace remains the explicit destructive restore path.
-
-Export:
+**WebSocket:**
 
 ```json
 { "type": "export", "requestId": "export-1" }
 ```
 
-Response:
+**Response:**
 
 ```json
 {
@@ -773,7 +410,24 @@ Response:
 }
 ```
 
-Dry-run validation:
+### Snapshot Formats
+
+**Merge Mode:**
+
+- Adds only new entries and edges
+- Leaves existing memory untouched
+- Idempotent and safe for repeated imports
+- Default for dashboard uploads
+
+**Replace Mode:**
+
+- Replaces the entire graph with the imported snapshot
+- Destructive—use only for deliberate restores
+- Remains default for backward compatibility
+
+### Import Validation
+
+Dry-run validation without mutation:
 
 ```json
 {
@@ -783,60 +437,438 @@ Dry-run validation:
 }
 ```
 
-Successful import:
+### Import Execution
 
 ```json
 {
   "type": "import",
   "snapshot": { "entries": {}, "edges": [] },
+  "mode": "merge",
   "requestId": "import-1"
 }
 ```
+
+**Response:**
 
 ```json
 {
   "type": "import-result",
   "ok": true,
-  "mode": "replace",
+  "mode": "merge",
   "stats": { "entryCount": 0, "edgeCount": 0 },
   "requestId": "import-1"
 }
 ```
 
-Invalid import returns `ok: false`, `error: "invalid-snapshot"`, and an `errors` array. Snapshot exports always include `revision`; strict import accepts older snapshots without `revision` as revision `1`. Successful imports broadcast `{ "type": "snapshot-update", "action": "imported", "mode": "replace", "stats": { ... } }` without `requestId`.
+### Failure Handling
 
-## Official MCP Adapter
-
-The project also ships an official stdio MCP adapter:
-
-```bash
-npm run mcp
-```
-
-The adapter uses the same store modules directly; it does not require the WebSocket server to be running. It honors `MEMORY_FILE` for SQLite persistence. `MEMORY_TOKEN` is not used for stdio because the MCP process is local to the client that spawns it.
-
-Exposed tools:
-
-- `memory_set`: store a JSON value plus optional `summary`, `tags`, `importance`, `ttlMs`, `expiresAt`, and `ifRevision`.
-- `memory_get`: load the full entry for a key.
-- `memory_search`: return metadata-only search results and `total`.
-- `memory_suggest`: return semantic suggestions; disabled suggestions return an empty list without loading the model.
-- `memory_map`: return a metadata-only graph neighborhood.
-- `memory_export`: export the full snapshot with values.
-- `memory_validate_import`: validate a snapshot without mutating.
-- `memory_import`: strictly validate and replace the current graph.
-
-MCP tool responses are JSON text payloads with stable envelopes: `{ "ok": true, ... }` for success and `{ "ok": false, "error": "..." }` for domain failures.
-
-### `relation-update`
-
-Subscribers receive relation notifications when an edge touches a subscribed key.
+Invalid imports return detailed errors:
 
 ```json
 {
-  "type": "relation-update",
+  "ok": false,
+  "error": "invalid-snapshot",
+  "errors": [
+    "Entry 'key1' has invalid expiry",
+    "Relation from 'missing_key' to 'key2' not allowed"
+  ]
+}
+```
+
+### Snapshot Versioning
+
+- Snapshot exports always include `revision` for each entry
+- Strict import accepts older snapshots without `revision` as revision `1`
+- Successful imports broadcast `{ "type": "snapshot-update", "action": "imported", "mode": "replace" }` without `requestId`
+
+## WebSocket Protocol
+
+The WebSocket server is the primary real-time coordination interface. Connect to `ws://localhost:3000` (or with auth token if configured).
+
+### Request/Response Model
+
+All WebSocket messages are JSON objects with a required `type` field.
+
+**Request IDs:**
+
+- All commands accept an optional `requestId` (string or finite number)
+- Direct responses and errors echo the exact `requestId`
+- Broadcasts (`update`, `relation-update`, `linked`, `welcome`) do not include `requestId`
+
+**Example Request:**
+
+```json
+{ "type": "get", "key": "greeting", "requestId": "get-1" }
+```
+
+**Example Response:**
+
+```json
+{
+  "type": "result",
+  "key": "greeting",
+  "entry": {
+    "value": "hello from agentA",
+    "summary": "hello from agentA",
+    "tags": [],
+    "importance": 0,
+    "revision": 1,
+    "expiresAt": null,
+    "updatedAt": 1714694400000,
+    "updatedBy": "agentA"
+  },
+  "requestId": "get-1"
+}
+```
+
+---
+
+### Authentication: `auth`
+
+Authenticate when `MEMORY_TOKEN` is configured.
+
+**Request:**
+
+```json
+{ "type": "auth", "token": "secret", "requestId": "auth-1" }
+```
+
+**Success:**
+
+```json
+{ "type": "authenticated", "requestId": "auth-1" }
+```
+
+**Failure:**
+
+```json
+{ "type": "error", "message": "unauthorized", "requestId": "auth-1" }
+```
+
+**Behavior:**
+
+- When auth is enabled, only `auth` is allowed before successful authentication
+- Protected commands return `unauthorized` but keep the socket open for retry
+- When auth is disabled, sockets behave as pre-authenticated and `auth` is a no-op success
+
+---
+
+### Agent Registration: `register`
+
+Register or confirm an agent ID.
+
+**Request:**
+
+```json
+{ "type": "register", "agentId": "agentA", "requestId": "reg-1" }
+```
+
+**Success:**
+
+```json
+{ "type": "registered", "agentId": "agentA", "requestId": "reg-1" }
+```
+
+**Duplicate ID (another live connection owns it):**
+
+```json
+{ "type": "error", "message": "duplicate-agent" }
+```
+
+**Note:** Offline agent IDs can be reclaimed by a later connection.
+
+---
+
+### Memory Operations: `set` / `get` / `delete`
+
+#### `set` — Store a Memory Entry
+
+**Basic:**
+
+```json
+{
+  "type": "set",
+  "key": "greeting",
+  "value": "hello from agentA",
+  "requestId": "set-1"
+}
+```
+
+**With Metadata:**
+
+```json
+{
+  "type": "set",
+  "key": "project.architecture",
+  "value": "Full architectural details...",
+  "summary": "Server is split into focused modules.",
+  "tags": ["architecture", "server"],
+  "importance": 8,
+  "requestId": "set-1"
+}
+```
+
+**With TTL (temporary memory):**
+
+```json
+{
+  "type": "set",
+  "key": "session.note",
+  "value": "Temporary task context",
+  "ttlMs": 600000,
+  "requestId": "set-1"
+}
+```
+
+Alternatively, use absolute `expiresAt` (milliseconds):
+
+```json
+{
+  "type": "set",
+  "key": "session.note",
+  "value": "Expires at a specific time",
+  "expiresAt": 1714695000000,
+  "requestId": "set-1"
+}
+```
+
+**Response:**
+
+```json
+{
+  "type": "ok",
+  "action": "set",
+  "key": "greeting",
+  "revision": 1,
+  "requestId": "set-1"
+}
+```
+
+**Stored Entry Shape:**
+
+```json
+{
+  "value": "hello from agentA",
+  "summary": "hello from agentA",
+  "tags": [],
+  "importance": 0,
+  "revision": 1,
+  "expiresAt": null,
+  "updatedAt": 1714694400000,
+  "updatedBy": "agentA"
+}
+```
+
+**Automatic Summary:** If `summary` is omitted, the server generates a compact fallback by stringifying the value, collapsing whitespace, and capping length.
+
+**Importance:** Must be an integer from `0` to `10`.
+
+**Expiry:**
+
+- Expired entries are hidden from `get`, `list`, `map`, and `search` without deleting them
+- Only `prune` or background prune removes expired entries
+
+**Revision Control (Optimistic Locking):**
+
+```json
+{
+  "type": "set",
+  "key": "greeting",
+  "value": "new value",
+  "ifRevision": 1,
+  "requestId": "set-1"
+}
+```
+
+- `ifRevision: null` = create-only (succeeds only if key is absent or expired)
+- Positive integer = must match current revision or fail
+
+**Revision Conflict:**
+
+```json
+{
+  "type": "error",
+  "message": "revision-conflict",
+  "key": "greeting",
+  "currentRevision": 2,
+  "requestId": "set-1"
+}
+```
+
+#### `get` — Retrieve a Memory Entry
+
+**Request:**
+
+```json
+{ "type": "get", "key": "greeting", "requestId": "get-1" }
+```
+
+**Response:**
+
+```json
+{
+  "type": "result",
+  "key": "greeting",
+  "entry": { ... },
+  "requestId": "get-1"
+}
+```
+
+If the key does not exist or is expired, `entry` is `null`.
+
+#### `delete` — Remove a Memory Entry
+
+**Request:**
+
+```json
+{ "type": "delete", "key": "project.architecture", "requestId": "del-1" }
+```
+
+**Response:**
+
+```json
+{
+  "type": "deleted",
+  "key": "project.architecture",
+  "removed": true,
+  "revision": 3,
+  "requestId": "del-1"
+}
+```
+
+**Behavior:**
+
+- Cascades all inbound and outbound graph edges
+- Deleting a missing key is safe; returns `removed: false` and `revision: null`
+- Supports `ifRevision` for optimistic locking
+
+---
+
+### Subscription & Updates: `subscribe` / `unsubscribe` / `update`
+
+#### `subscribe` — Watch for Memory Changes
+
+**Request:**
+
+```json
+{ "type": "subscribe", "key": "greeting", "requestId": "sub-1" }
+```
+
+**Response:**
+
+```json
+{ "type": "subscribed", "key": "greeting", "requestId": "sub-1" }
+```
+
+**Immediate Update (if key exists):**
+
+```json
+{
+  "type": "update",
+  "key": "greeting",
+  "entry": { "value": "hello", "revision": 1, ... }
+}
+```
+
+**Future Updates (when others modify the key):**
+
+```json
+{
+  "type": "update",
+  "key": "greeting",
+  "entry": { "value": "new value", "revision": 2, ... },
+  "requestId": null
+}
+```
+
+**Deletion Update:**
+
+```json
+{
+  "type": "update",
+  "key": "greeting",
+  "entry": null,
+  "action": "deleted"
+}
+```
+
+#### `unsubscribe` — Stop Watching
+
+**Request:**
+
+```json
+{ "type": "unsubscribe", "key": "greeting" }
+```
+
+**Response:**
+
+```json
+{ "type": "unsubscribed", "key": "greeting" }
+```
+
+---
+
+### Touch (Refresh Expiry): `touch`
+
+Update expiry and metadata timestamps without changing the stored value.
+
+**Request:**
+
+```json
+{
+  "type": "touch",
+  "key": "session.note",
+  "ttlMs": 600000,
+  "requestId": "touch-1"
+}
+```
+
+**Response:**
+
+```json
+{
+  "type": "touched",
+  "key": "session.note",
+  "entry": { ... },
+  "requestId": "touch-1"
+}
+```
+
+**Behavior:**
+
+- Accepts either `ttlMs` or `expiresAt`, but not both
+- Omitting both expiry fields clears expiry (memory becomes permanent)
+- Supports `ifRevision` for optimistic locking
+- Stale checks return `revision-conflict`
+
+---
+
+### Memory Graph: `relate` / `unrelate` / `relation-update`
+
+Create typed edges between memory entries for rich context.
+
+#### `relate` — Create/Update an Edge
+
+**Request:**
+
+```json
+{
+  "type": "relate",
+  "from": "project.database",
+  "to": "project.architecture",
+  "relation": "depends_on",
+  "reason": "Database choices affect architecture.",
+  "weight": 0.8,
+  "requestId": "rel-1"
+}
+```
+
+**Response:**
+
+```json
+{
+  "type": "related",
   "action": "created",
-  "keys": ["project.database", "project.architecture"],
   "edge": {
     "from": "project.database",
     "to": "project.architecture",
@@ -845,27 +877,288 @@ Subscribers receive relation notifications when an edge touches a subscribed key
     "weight": 0.8,
     "updatedAt": 1714694400000,
     "updatedBy": "agentA"
-  }
+  },
+  "requestId": "rel-1"
 }
 ```
 
-Actions are `created`, `updated`, `deleted`, and `cascade-deleted`. If a client subscribes to both endpoints, it receives exactly one relation notification.
+**Supported Relations:**
 
-### `link`
+- `related_to`
+- `depends_on`
+- `supports`
+- `contradicts`
+- `mentions`
+- `derived_from`
+- `next_step`
 
-Creates a one-way logical link from the current agent to a target agent ID.
+**Behavior:**
+
+- Duplicate `from + relation + to` edges update the existing edge (action: "updated")
+- Both endpoints must exist as memory entries
+- Self-relations are not allowed
+
+#### `unrelate` — Remove an Edge
+
+**Request:**
 
 ```json
-{ "type": "link", "target": "agentB" }
+{
+  "type": "unrelate",
+  "from": "project.database",
+  "to": "project.architecture",
+  "relation": "depends_on",
+  "requestId": "unrel-1"
+}
 ```
 
-Response:
+**Response:**
 
 ```json
-{ "type": "linked", "target": "agentB" }
+{
+  "type": "unrelated",
+  "from": "project.database",
+  "to": "project.architecture",
+  "relation": "depends_on",
+  "requestId": "unrel-1"
+}
 ```
 
-When the source agent performs a `set`, the live linked target receives:
+**Behavior:** Idempotent—removing a non-existent edge succeeds without error.
+
+#### `relation-update` — Broadcast on Graph Changes
+
+Subscribers to either endpoint receive notifications:
+
+```json
+{
+  "type": "relation-update",
+  "action": "created",
+  "keys": ["project.database", "project.architecture"],
+  "edge": { ... }
+}
+```
+
+**Actions:** `created`, `updated`, `deleted`, `cascade-deleted` (edge deleted due to endpoint expiry/deletion)
+
+---
+
+### Graph Navigation: `map`
+
+Get a deterministic metadata-only neighborhood for low-token recall.
+
+**Request:**
+
+```json
+{
+  "type": "map",
+  "key": "project.architecture",
+  "depth": 2,
+  "limit": 10,
+  "requestId": "map-1"
+}
+```
+
+**Response:**
+
+```json
+{
+  "type": "map-result",
+  "key": "project.architecture",
+  "nodes": [
+    {
+      "key": "project.architecture",
+      "summary": "Server is split into focused modules.",
+      "tags": ["architecture", "server"],
+      "importance": 8,
+      "revision": 1,
+      "updatedAt": 1714694400000,
+      "updatedBy": "agentA"
+    }
+  ],
+  "edges": [],
+  "requestId": "map-1"
+}
+```
+
+**Behavior:**
+
+- Uses bidirectional breadth-first search with a visited set (no cycles)
+- Root key included first
+- Remaining nodes sorted by: importance (desc), updatedAt (desc), key (asc)
+- Expired nodes and edges touching expired nodes are skipped
+- `depth` defaults to `1`, `limit` defaults to `20`
+
+---
+
+### Search: `search`
+
+Full-text search on memory metadata (no values).
+
+**Request:**
+
+```json
+{
+  "type": "search",
+  "query": "architecture",
+  "tags": ["server"],
+  "minImportance": 5,
+  "limit": 10,
+  "requestId": "search-1"
+}
+```
+
+**Response:**
+
+```json
+{
+  "type": "search-result",
+  "results": [
+    {
+      "key": "project.architecture",
+      "summary": "Server is split into focused modules.",
+      "tags": ["architecture", "server"],
+      "importance": 8,
+      "revision": 1,
+      "updatedAt": 1714694400000,
+      "updatedBy": "agentA"
+    }
+  ],
+  "total": 1,
+  "requestId": "search-1"
+}
+```
+
+**Filters (AND semantics):**
+
+- `query`: Case-insensitive match against key, summary, tags
+- `tags`: All requested tags must be present
+- `minImportance`: `0` to `10`
+- `limit`: `1` to `100` (default: `20`)
+
+**Requirements:** At least one of `query`, non-empty `tags`, or `minImportance` must be provided.
+
+**FTS Limitation:** Queries shorter than 3 characters return no results.
+
+---
+
+### Semantic Suggestions: `suggest`
+
+Get context-aware memory recommendations (when suggestions are enabled).
+
+**Request:**
+
+```json
+{
+  "type": "suggest",
+  "context": "implement the database migration plan",
+  "tags": ["database"],
+  "limit": 5,
+  "requestId": "suggest-1"
+}
+```
+
+**Response:**
+
+```json
+{
+  "type": "suggest-result",
+  "suggestions": [
+    {
+      "key": "project.database",
+      "summary": "Database migration approach.",
+      "tags": ["database"],
+      "importance": 8,
+      "revision": 1,
+      "score": 0.87,
+      "reasons": ["semantic-match", "high-importance"]
+    }
+  ],
+  "requestId": "suggest-1"
+}
+```
+
+**Behavior:**
+
+- `context` must be a non-empty string
+- `limit` must be `1` to `20`
+- `tags` uses AND semantics
+- Disabled servers return empty `suggestions` array without loading the model
+- Enable with `MEMORY_SUGGEST_ENABLED=true`
+
+---
+
+### Pruning: `prune`
+
+Remove all expired memory entries and cascade their edges.
+
+**Request:**
+
+```json
+{ "type": "prune", "requestId": "prune-1" }
+```
+
+**Response:**
+
+```json
+{
+  "type": "pruned",
+  "keys": ["session.note"],
+  "count": 1,
+  "requestId": "prune-1"
+}
+```
+
+**Subscriber Notifications:**
+
+```json
+{
+  "type": "update",
+  "key": "session.note",
+  "entry": null,
+  "action": "expired"
+}
+```
+
+Cascaded edges emit `relation-update` with `action: "cascade-deleted"`.
+
+---
+
+### Agent Links: `link` / `unlink` / `linked`
+
+Create one-way logical links for cross-agent notifications.
+
+#### `link` — Create a Link
+
+**Request:**
+
+```json
+{ "type": "link", "target": "agentB", "requestId": "link-1" }
+```
+
+**Response:**
+
+```json
+{ "type": "linked", "target": "agentB", "requestId": "link-1" }
+```
+
+#### `unlink` — Remove a Link
+
+**Request:**
+
+```json
+{ "type": "unlink", "target": "agentB" }
+```
+
+**Response:**
+
+```json
+{ "type": "unlinked", "target": "agentB" }
+```
+
+#### `linked` — Forwarded Notifications
+
+When the source agent performs a `set`, live linked targets receive:
 
 ```json
 {
@@ -883,70 +1176,140 @@ When the source agent performs a `set`, the live linked target receives:
 }
 ```
 
-Offline linked targets are skipped safely.
+**Note:** Offline linked targets are skipped safely.
 
-### `unlink`
+---
 
-Removes a one-way link.
+### Utility: `list`
 
-```json
-{ "type": "unlink", "target": "agentB" }
-```
+List known agent IDs and memory keys.
 
-Response:
+**Request:**
 
 ```json
-{ "type": "unlinked", "target": "agentB" }
+{ "type": "list", "requestId": "list-1" }
 ```
 
-### `list`
-
-Lists known agent IDs and memory keys.
-
-```json
-{ "type": "list" }
-```
-
-Response:
+**Response:**
 
 ```json
 {
   "type": "list",
   "agents": ["agentA", "agentB"],
-  "memoryKeys": ["greeting"]
+  "memoryKeys": ["greeting"],
+  "requestId": "list-1"
 }
 ```
 
-Expired keys are omitted from `memoryKeys`.
+**Note:** Expired keys are omitted from `memoryKeys`.
 
-## Validation
+---
 
-The server returns `{ "type": "error", "message": "..." }` for invalid input.
+### Error Handling
 
-- Invalid JSON: `invalid-json`
-- JSON that is not an object: `invalid-message`
-- Invalid request ID: `invalid-requestId`
-- Unknown or missing command type: `unknown-type`
-- Unauthorized command or auth failure: `unauthorized`
-- Missing or blank `key`: `missing-key`
-- Missing or blank `target`: `missing-target`
-- Missing or blank `from`: `missing-from`
-- Missing or blank `to`: `missing-to`
-- Blank `agentId`: `missing-agentId`
-- Duplicate live agent ID: `duplicate-agent`
-- Invalid metadata: `invalid-summary`, `invalid-tags`, `invalid-importance`, `invalid-expiry`, `invalid-ifRevision`
-- Invalid graph request: `invalid-relation`, `invalid-reason`, `invalid-weight`, `invalid-depth`, `invalid-limit`
-- Invalid search request: `invalid-query`, `missing-filter`
-- Invalid suggest request: `missing-context`, `invalid-context`
-- Invalid snapshot request: `missing-snapshot`, `invalid-snapshot`
-- Stale versioned write: `revision-conflict`
-- Relation endpoint does not exist: `missing-node`
-- Self-relation: `self-relation-not-allowed`
+Invalid input returns:
+
+```json
+{ "type": "error", "message": "error-code", "requestId": "..." }
+```
+
+| Error Code                  | Meaning                                            |
+| --------------------------- | -------------------------------------------------- |
+| `invalid-json`              | JSON parse error                                   |
+| `invalid-message`           | JSON is not an object                              |
+| `invalid-requestId`         | Request ID is not a string or finite number        |
+| `unknown-type`              | Unknown or missing `type` field                    |
+| `unauthorized`              | Auth failure or protected command before auth      |
+| `missing-key`               | Missing or blank `key` field                       |
+| `missing-target`            | Missing or blank `target` field                    |
+| `missing-from`              | Missing or blank `from` field                      |
+| `missing-to`                | Missing or blank `to` field                        |
+| `missing-agentId`           | Missing or blank `agentId` field                   |
+| `duplicate-agent`           | Live connection already owns this agent ID         |
+| `invalid-summary`           | Summary failed validation                          |
+| `invalid-tags`              | Tags failed validation                             |
+| `invalid-importance`        | Importance is not 0–10                             |
+| `invalid-expiry`            | `ttlMs` or `expiresAt` is invalid                  |
+| `invalid-ifRevision`        | `ifRevision` is not a positive integer or null     |
+| `invalid-relation`          | Relation type not in allowed list                  |
+| `invalid-reason`            | Reason failed validation                           |
+| `invalid-weight`            | Weight is not 0–1                                  |
+| `invalid-depth`             | Depth is not a positive integer                    |
+| `invalid-limit`             | Limit is not 1–100                                 |
+| `invalid-query`             | Query failed validation                            |
+| `missing-filter`            | Search has no filters                              |
+| `missing-context`           | Suggest has no context                             |
+| `invalid-context`           | Context failed validation                          |
+| `missing-snapshot`          | Import missing snapshot object                     |
+| `invalid-snapshot`          | Snapshot structure is invalid                      |
+| `revision-conflict`         | Versioned write failed (current revision mismatch) |
+| `missing-node`              | Relation endpoint does not exist                   |
+| `self-relation-not-allowed` | From and to are the same key                       |
 
 ## Limitations
 
-- State is lost on restart unless `MEMORY_FILE` is configured (SQLite file path).
-- Authentication is a single static token when `MEMORY_TOKEN` is configured; it is not a multi-user identity system.
-- The WebSocket protocol is project-specific; official MCP access is available through `npm run mcp`.
-- Concurrent writes are last-write-wins unless clients use `ifRevision`.
-- The FTS5 search index uses trigram tokenization; queries shorter than 3 characters will return no results.
+- **No Persistence by Default**: State is lost on restart unless `MEMORY_FILE` is configured. File persistence uses SQLite WAL for atomic writes
+- **Single Static Token**: `MEMORY_TOKEN` is a single bearer token, not a multi-user identity system
+- **WebSocket is Project-Specific**: The WebSocket protocol is custom; use `npm run mcp` for official MCP tool access
+- **Last-Write-Wins by Default**: Concurrent writes overwrite unless clients use `ifRevision` for optimistic locking
+- **FTS Search Limitation**: Queries shorter than 3 characters return no results due to trigram tokenization
+
+## Testing
+
+Tests use Node.js built-in `node:test` and `node:assert/strict` (no external test framework).
+
+### Run All Tests
+
+```bash
+npm test
+```
+
+This runs all test files in the `test/` directory.
+
+### Run Individual Test Suites
+
+```bash
+node --test test/server.test.js           # WebSocket protocol, auth, notifications
+node --test test/memory-store.test.js     # Store operations, graph traversal, persistence
+node --test test/suggestion-engine.test.js # Suggestions, embeddings, ranking
+node --test test/mcp-tools.test.js        # MCP tool validation and responses
+node --test test/mcp-stdio.test.js        # Real stdio MCP JSON-RPC integration
+```
+
+### Test Coverage
+
+| Suite                       | Focus                                                                                              |
+| --------------------------- | -------------------------------------------------------------------------------------------------- |
+| `server.test.js`            | WebSocket protocol, command routing, auth, subscriptions, broadcasts, request IDs, error handling  |
+| `memory-store.test.js`      | CRUD operations, graph relations, FTS search, TTL expiry, prune, SQLite persistence, import/export |
+| `suggestion-engine.test.js` | Suggestion queue, semantic ranking, model loading, tombstones, close behavior                      |
+| `mcp-tools.test.js`         | MCP tool envelopes, parameter validation, response formatting, search/map results                  |
+| `mcp-stdio.test.js`         | Real child process MCP JSON-RPC, initialize handshake, tool discovery, tool calls                  |
+
+### Test Patterns
+
+Tests use dependency injection for determinism:
+
+- Inject clock or `now` function for time control
+- Inject schedulers for async operations
+- Inject fake suggestion engines instead of loading real models
+- Deterministic graph traversal with reproducible sort order
+
+### Example: Writing a Test
+
+```javascript
+import test from "node:test";
+import assert from "node:assert/strict";
+import { createMemoryStore } from "../src/memory-store.js";
+
+test("memory store set and get", async (t) => {
+  const store = createMemoryStore();
+
+  // Set a value
+  await store.set("greeting", "hello", {});
+
+  // Get it back
+  const entry = await store.get("greeting");
+  assert.equal(entry.value, "hello");
+});
+```
