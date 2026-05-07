@@ -26,6 +26,65 @@ function hasValidTags(tags) {
     return Array.isArray(tags) && tags.every(isNonEmptyString);
 }
 
+// Coerce helpers — handle type mismatches from MCP JSON-RPC transport
+function coerceArray(v) {
+    if (Array.isArray(v)) return v;
+    if (typeof v === 'string') {
+        try { const p = JSON.parse(v); if (Array.isArray(p)) return p; } catch {}
+    }
+    return v;
+}
+
+function coerceInt(v) {
+    if (typeof v === 'number') return v;
+    if (typeof v === 'string') { const n = Math.round(Number(v)); if (Number.isFinite(n)) return n; }
+    return v;
+}
+
+function coerceFloat(v) {
+    if (typeof v === 'number') return v;
+    if (typeof v === 'string') { const n = Number(v); if (Number.isFinite(n)) return n; }
+    return v;
+}
+
+function normalizeSetInput(input) {
+    const o = { ...input };
+    if (hasOwn(o, 'tags'))       o.tags       = coerceArray(o.tags);
+    if (hasOwn(o, 'importance')) o.importance = coerceInt(o.importance);
+    if (hasOwn(o, 'ttlMs'))      o.ttlMs      = coerceInt(o.ttlMs);
+    if (hasOwn(o, 'expiresAt'))  o.expiresAt  = coerceInt(o.expiresAt);
+    if (hasOwn(o, 'ifRevision')) o.ifRevision = coerceInt(o.ifRevision);
+    return o;
+}
+
+function normalizeSearchInput(input) {
+    const o = { ...input };
+    if (hasOwn(o, 'tags'))          o.tags          = coerceArray(o.tags);
+    if (hasOwn(o, 'minImportance')) o.minImportance = coerceInt(o.minImportance);
+    if (hasOwn(o, 'limit'))         o.limit         = coerceInt(o.limit);
+    return o;
+}
+
+function normalizeSuggestInput(input) {
+    const o = { ...input };
+    if (hasOwn(o, 'tags'))  o.tags  = coerceArray(o.tags);
+    if (hasOwn(o, 'limit')) o.limit = coerceInt(o.limit);
+    return o;
+}
+
+function normalizeMapInput(input) {
+    const o = { ...input };
+    if (hasOwn(o, 'depth')) o.depth = coerceInt(o.depth);
+    if (hasOwn(o, 'limit')) o.limit = coerceInt(o.limit);
+    return o;
+}
+
+function normalizeRelateInput(input) {
+    const o = { ...input };
+    if (hasOwn(o, 'weight')) o.weight = coerceFloat(o.weight);
+    return o;
+}
+
 function metadataOnly(entry) {
     if (!entry) return null;
     return {
@@ -198,6 +257,7 @@ function createSharedMemoryToolHandlers(options) {
 
     return {
         async memory_set(input = {}) {
+            input = normalizeSetInput(input);
             const error = validateSetInput(input);
             if (error) return fail(error);
 
@@ -232,6 +292,7 @@ function createSharedMemoryToolHandlers(options) {
         },
 
         async memory_search(input = {}) {
+            input = normalizeSearchInput(input);
             const error = validateSearchInput(input);
             if (error) return fail(error);
             const { results, total } = memory.search({
@@ -244,6 +305,7 @@ function createSharedMemoryToolHandlers(options) {
         },
 
         async memory_suggest(input = {}) {
+            input = normalizeSuggestInput(input);
             const error = validateSuggestInput(input);
             if (error) return fail(error);
 
@@ -267,6 +329,7 @@ function createSharedMemoryToolHandlers(options) {
         },
 
         async memory_map(input = {}) {
+            input = normalizeMapInput(input);
             const error = validateMapInput(input);
             if (error) return fail(error);
             const graph = memory.map(input.key, {
@@ -277,6 +340,7 @@ function createSharedMemoryToolHandlers(options) {
         },
 
         async memory_relate(input = {}) {
+            input = normalizeRelateInput(input);
             const error = validateRelateInput(input);
             if (error) return fail(error);
 

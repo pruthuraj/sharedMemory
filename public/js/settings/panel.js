@@ -97,8 +97,8 @@
       <div class="settings-section" data-section="${escAttr(section.id)}" ${isCollapsed ? 'data-collapsed="true"' : ''}>
         <button class="settings-section-header" type="button" data-section-toggle="${escAttr(section.id)}" aria-expanded="${!isCollapsed}">
           <span class="settings-section-title">${escAttr(section.title)}</span>
-          <span class="settings-section-modified" data-section-modified="${escAttr(section.id)}" aria-label="Modified" hidden>·</span>
-          <span class="settings-section-chevron" aria-hidden="true">${isCollapsed ? '+' : '−'}</span>
+          <span class="settings-section-modified" data-section-modified="${escAttr(section.id)}" aria-label="Modified" hidden></span>
+          <span class="settings-section-chevron" aria-hidden="true">${isCollapsed ? '▸' : '▾'}</span>
         </button>
         <div class="settings-section-body">${rows}</div>
       </div>`;
@@ -282,7 +282,7 @@
             secEl.setAttribute('data-collapsed', String(next));
             toggle.setAttribute('aria-expanded', String(!next));
             const chevron = toggle.querySelector('.settings-section-chevron');
-            if (chevron) chevron.textContent = next ? '+' : '−';
+            if (chevron) chevron.textContent = next ? '▸' : '▾';
             const collapsed = loadCollapsed();
             if (next) collapsed.add(id); else collapsed.delete(id);
             saveCollapsed(collapsed);

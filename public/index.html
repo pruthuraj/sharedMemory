@@ -46,7 +46,10 @@
     <div class="dp-bar" id="dp-bar"></div>
     <div class="dp-header">
       <div class="dp-label" id="dp-label">Memory Entry</div>
-      <button class="dp-close" id="dp-close">x</button>
+      <div class="dp-actions">
+        <button class="dp-copy" id="dp-copy" title="Copy entry value">Copy</button>
+        <button class="dp-close" id="dp-close">x</button>
+      </div>
     </div>
     <div class="dp-body" id="dp-body"></div>
   </div>
@@ -97,6 +100,14 @@
     </div>
   </div>
 
+  <div id="peek-strip" aria-live="polite" hidden>
+    <span class="peek-dot"></span>
+    <div class="peek-key"></div>
+    <div class="peek-imp" title="Importance"><span class="peek-imp-fill"></span></div>
+    <div class="peek-tags"></div>
+    <div class="peek-summary"></div>
+  </div>
+
   <div id="controls">
     <button id="zoom-in-btn" title="Zoom in">+</button>
     <button id="zoom-out-btn" title="Zoom out">-</button>
@@ -110,7 +121,18 @@
   <script src="js/settings/apply.js"></script>
   <script src="js/settings/panel.js"></script>
   <script src="js/settings/index.js"></script>
-  <script src="js/dashboard.js"></script>
+  <script src="js/dashboard/state.js"></script>
+  <script src="js/dashboard/utils.js"></script>
+  <script src="js/dashboard/layout.js"></script>
+  <script src="js/dashboard/edges.js"></script>
+  <script src="js/dashboard/nodes.js"></script>
+  <script src="js/dashboard/identity.js"></script>
+  <script src="js/dashboard/import.js"></script>
+  <script src="js/dashboard/graph-detail.js"></script>
+  <script src="js/dashboard/viewport.js"></script>
+  <script src="js/dashboard/realtime.js"></script>
+  <script src="js/dashboard/settings-palette.js"></script>
+  <script src="js/dashboard/main.js"></script>
 </body>
 
 </html>
