@@ -1,117 +1,314 @@
 'use strict';
 
-// ── Detail panel ───────────────────────────────────────────────────────
-function openDetail(key, entry) {
-    const previousSelected = selectedKey;
-    const currentBox = nodePositions[key] ? nodeVisualBox(key, nodePositions[key], entry) : null;
-    const focusCenter = currentBox ? nodeCenter(currentBox) : null;
-    collapseOtherNodes(key);
+// ── Detail Panel Helpers ───────────────────────────────────────────────
 
-    // Deselect previous
-    if (selectedKey) {
-        const prev = scene.querySelector(`[data-key="${CSS.escape(selectedKey)}"]`);
-        if (prev) {
-            const c = nodeIdentityColor(selectedKey);
-            prev.style.borderColor = `${c}44`;
-            prev.style.boxShadow = '0 2px 14px #00000055';
+function getDetailEl(id) {
+    return document.getElementById(id);
+}
+
+function getSelectedNodeEl() {
+    if (!selectedKey || !scene) return null;
+
+    return scene.querySelector(`[data-key="${CSS.escape(selectedKey)}"]`);
+}
+
+function getNodeElByKey(key) {
+    if (!key || !scene) return null;
+
+    return scene.querySelector(`[data-key="${CSS.escape(key)}"]`);
+}
+
+function stringifyEntryValue(entry) {
+    if (!entry) return '';
+
+    return typeof entry.value === 'object'
+        ? JSON.stringify(entry.value, null, 2)
+        : String(entry.value ?? '');
+}
+
+function formatEntryDate(timestamp) {
+    return timestamp ? new Date(timestamp).toLocaleString() : '-';
+}
+
+function buildDetailTagsHtml(entry) {
+    const tags = entry?.tags || [];
+
+    if (!tags.length) {
+        return '<span style="color:#374151">-</span>';
+    }
+
+    return `
+<div class="dp-tags">
+  ${tags.map((tag) => `<span class="dp-tag">${esc(tag)}</span>`).join('')}
+</div>`;
+}
+
+function buildExpiryHtml(entry) {
+    if (!entry?.expiresAt) return '';
+
+    return `
+<div class="dp-row">
+  <span class="dp-rl">Expires</span>
+  <span class="dp-rv" style="color:#f59e0b">
+    ${esc(new Date(entry.expiresAt).toLocaleString())}
+  </span>
+</div>`;
+}
+
+function buildDetailBodyHtml(key, entry, recencyColor) {
+    const value = stringifyEntryValue(entry);
+    const date = formatEntryDate(entry.updatedAt);
+    const age = entry.updatedAt ? ageLabel(entry.updatedAt) : '';
+    const tagsHtml = buildDetailTagsHtml(entry);
+    const expiryHtml = buildExpiryHtml(entry);
+
+    return `
+<div class="dp-key">${esc(key)}</div>
+
+<div class="dp-ts" style="color:${recencyColor}">
+  ${esc(date)}${age ? ` - ${esc(age)}` : ''}
+</div>
+
+<div class="dp-value">${esc(value)}</div>
+
+<div class="dp-row">
+  <span class="dp-rl">Summary</span>
+  <span class="dp-rv">${esc(entry.summary || '-')}</span>
+</div>
+
+<div class="dp-row">
+  <span class="dp-rl">Tags</span>
+  <span class="dp-rv">${tagsHtml}</span>
+</div>
+
+<div class="dp-row">
+  <span class="dp-rl">Importance</span>
+  <span class="dp-rv" style="color:#a5b4fc">${entry.importance ?? '-'}</span>
+</div>
+
+<div class="dp-row">
+  <span class="dp-rl">Revision</span>
+  <span class="dp-rv">${entry.revision ?? '-'}</span>
+</div>
+
+<div class="dp-row">
+  <span class="dp-rl">Updated by</span>
+  <span class="dp-rv">${esc(entry.updatedBy || '-')}</span>
+</div>
+
+${expiryHtml}`;
+}
+
+// ── Selection Styling ──────────────────────────────────────────────────
+
+function resetNodeSelectionStyle(key) {
+    const nodeEl = getNodeElByKey(key);
+
+    if (!nodeEl) return;
+
+    const color = nodeIdentityColor(key);
+
+    nodeEl.classList.remove('selected');
+    nodeEl.style.borderColor = `${color}44`;
+    nodeEl.style.boxShadow = '0 2px 14px #00000055';
+}
+
+function applyNodeSelectionStyle(key) {
+    const nodeEl = getNodeElByKey(key);
+
+    if (!nodeEl) return;
+
+    const color = nodeIdentityColor(key);
+
+    nodeEl.classList.add('selected');
+    nodeEl.style.borderColor = color;
+    nodeEl.style.boxShadow = `0 0 0 3px ${color}33, 0 4px 24px #00000077`;
+}
+
+function resetPreviousSelection() {
+    if (!selectedKey) return;
+
+    resetNodeSelectionStyle(selectedKey);
+}
+
+function closeSelectedNodeVisualState() {
+    if (!selectedKey) return;
+
+    const nodeEl = getSelectedNodeEl();
+
+    if (!nodeEl) return;
+
+    expandedNodes.delete(selectedKey);
+    setNodePresentation(selectedKey, nodeEl);
+    resetNodeSelectionStyle(selectedKey);
+}
+
+// ── Detail Panel Rendering ─────────────────────────────────────────────
+
+function updateDetailPanelChrome(key, entry) {
+    const color = nodeIdentityColor(key);
+
+    const barEl = getDetailEl('dp-bar');
+    const labelEl = getDetailEl('dp-label');
+
+    if (barEl) {
+        barEl.style.background = `linear-gradient(90deg, ${color}, ${color}44)`;
+    }
+
+    if (labelEl) {
+        labelEl.style.color = color;
+        labelEl.textContent = 'Memory Entry';
+    }
+
+    detailPanel.style.borderColor = `${color}44`;
+}
+
+function updateDetailPanelBody(key, entry) {
+    const bodyEl = getDetailEl('dp-body');
+
+    if (!bodyEl) return;
+
+    const recencyColor = ageColor(entry.updatedAt);
+
+    bodyEl.innerHTML = buildDetailBodyHtml(key, entry, recencyColor);
+}
+
+function showDetailPanel() {
+    detailPanel.classList.add('visible');
+    document.body.classList.add('inspector-open');
+}
+
+function closeDetailPanel() {
+    detailPanel.classList.remove('visible');
+    document.body.classList.remove('inspector-open');
+}
+
+// ── Focus Layout ───────────────────────────────────────────────────────
+
+function getCurrentNodeFocusCenter(key, entry) {
+    const position = nodePositions[key];
+
+    if (!position) return null;
+
+    const box = nodeVisualBox(key, position, entry);
+
+    return nodeCenter(box);
+}
+
+function updateGraphFocusLayout(key, entry, previousSelected, focusCenter) {
+    if (previousSelected !== key) {
+        nodePositions = computeLayout(currentEntries, currentEdges);
+
+        if (focusCenter) {
+            setSlotCenter(key, focusCenter.x, focusCenter.y);
         }
     }
+
+    applyRadialFocusLayout(key, {
+        center: focusCenter,
+    });
+}
+
+// ── Detail Panel Public Action ─────────────────────────────────────────
+
+function openDetail(key, entry) {
+    if (!key || !entry) return;
+
+    const previousSelected = selectedKey;
+    const focusCenter = getCurrentNodeFocusCenter(key, entry);
+
+    collapseOtherNodes(key);
+    resetPreviousSelection();
 
     selectedKey = key;
     focusedKey = key;
     lastFocusedKey = key;
-    const color = nodeIdentityColor(key);
-    const recencyColor = ageColor(entry.updatedAt);
 
-    const nodeEl = scene.querySelector(`[data-key="${CSS.escape(key)}"]`);
-    if (nodeEl) {
-        nodeEl.classList.add('selected');
-        nodeEl.style.borderColor = color;
-        nodeEl.style.boxShadow = `0 0 0 3px ${color}33, 0 4px 24px #00000077`;
-    }
+    applyNodeSelectionStyle(key);
+    updateGraphFocusLayout(key, entry, previousSelected, focusCenter);
 
-    if (previousSelected !== key) {
-        nodePositions = computeLayout(currentEntries, currentEdges);
-        if (focusCenter) setSlotCenter(key, focusCenter.x, focusCenter.y);
-    }
-    applyRadialFocusLayout(key, { center: focusCenter });
+    updateDetailPanelChrome(key, entry);
+    updateDetailPanelBody(key, entry);
+    showDetailPanel();
 
-    document.getElementById('dp-bar').style.background = `linear-gradient(90deg, ${color}, ${color}44)`;
-    document.getElementById('dp-label').style.color = color;
-    document.getElementById('dp-label').textContent = 'Memory Entry';
-    detailPanel.style.borderColor = `${color}44`;
-
-    const val = typeof entry.value === 'object'
-        ? JSON.stringify(entry.value, null, 2)
-        : String(entry.value ?? '');
-
-    const tagsHtml = entry.tags && entry.tags.length
-        ? `<div class="dp-tags">${entry.tags.map(t => `<span class="dp-tag">${esc(t)}</span>`).join('')}</div>`
-        : '<span style="color:#374151">-</span>';
-
-    const date = entry.updatedAt ? new Date(entry.updatedAt).toLocaleString() : '-';
-    const age = entry.updatedAt ? ageLabel(entry.updatedAt) : '';
-    const exp = entry.expiresAt
-        ? `<div class="dp-row"><span class="dp-rl">Expires</span><span class="dp-rv" style="color:#f59e0b">${new Date(entry.expiresAt).toLocaleString()}</span></div>`
-        : '';
-
-    document.getElementById('dp-body').innerHTML = `
-<div class="dp-key">${esc(key)}</div>
-<div class="dp-ts" style="color:${recencyColor}">${esc(date)}${age ? ` - ${esc(age)}` : ''}</div>
-<div class="dp-value">${esc(val)}</div>
-<div class="dp-row"><span class="dp-rl">Summary</span><span class="dp-rv">${esc(entry.summary || '-')}</span></div>
-<div class="dp-row"><span class="dp-rl">Tags</span><span class="dp-rv">${tagsHtml}</span></div>
-<div class="dp-row"><span class="dp-rl">Importance</span><span class="dp-rv" style="color:#a5b4fc">${entry.importance ?? '-'}</span></div>
-<div class="dp-row"><span class="dp-rl">Revision</span><span class="dp-rv">${entry.revision ?? '-'}</span></div>
-<div class="dp-row"><span class="dp-rl">Updated by</span><span class="dp-rv">${esc(entry.updatedBy || '-')}</span></div>
-${exp}`;
-
-    detailPanel.classList.add('visible');
-    document.body.classList.add('inspector-open');
     renderIdentityPanel();
     applyFocusState();
 }
 
-document.getElementById('dp-copy').addEventListener('click', async (e) => {
-    const btn = e.currentTarget;
+// ── Copy Action ────────────────────────────────────────────────────────
+
+async function copySelectedEntryValue(buttonEl) {
     if (!selectedKey) return;
+
     const entry = currentEntries[selectedKey];
+
     if (!entry) return;
-    const text = typeof entry.value === 'object'
-        ? JSON.stringify(entry.value, null, 2)
-        : String(entry.value ?? '');
+
+    const text = stringifyEntryValue(entry);
+    const originalText = buttonEl.textContent;
+
     try {
         await navigator.clipboard.writeText(text);
-        const original = btn.textContent;
-        btn.textContent = 'Copied';
-        btn.classList.add('copied');
-        setTimeout(() => {
-            btn.textContent = original;
-            btn.classList.remove('copied');
+
+        buttonEl.textContent = 'Copied';
+        buttonEl.classList.add('copied');
+
+        window.setTimeout(() => {
+            buttonEl.textContent = originalText;
+            buttonEl.classList.remove('copied');
         }, 1200);
     } catch {
-        btn.textContent = 'Failed';
-        setTimeout(() => { btn.textContent = 'Copy'; }, 1200);
-    }
-});
+        buttonEl.textContent = 'Failed';
 
-document.getElementById('dp-close').addEventListener('click', () => {
-    if (selectedKey) {
-        const el = scene.querySelector(`[data-key="${CSS.escape(selectedKey)}"]`);
-        if (el) {
-            const c = nodeIdentityColor(selectedKey);
-            expandedNodes.delete(selectedKey);
-            setNodePresentation(selectedKey, el);
-            el.classList.remove('selected');
-            el.style.borderColor = `${c}44`;
-            el.style.boxShadow = '0 2px 14px #00000055';
-        }
+        window.setTimeout(() => {
+            buttonEl.textContent = originalText || 'Copy';
+        }, 1200);
     }
+}
+
+function setupCopyButton() {
+    const copyBtn = getDetailEl('dp-copy');
+
+    if (!copyBtn) return;
+
+    copyBtn.addEventListener('click', async (event) => {
+        await copySelectedEntryValue(event.currentTarget);
+    });
+}
+
+// ── Close Action ───────────────────────────────────────────────────────
+
+function closeActiveDetail() {
+    closeSelectedNodeVisualState();
+    closeDetailPanel();
     clearActiveSelection({ resetLayout: true });
-});
+}
 
-viewport.addEventListener('click', e => {
-    if (e.target === viewport || e.target === scene || e.target === edgesSvg) {
-        document.getElementById('dp-close').click();
-    }
-});
+function setupCloseButton() {
+    const closeBtn = getDetailEl('dp-close');
+
+    if (!closeBtn) return;
+
+    closeBtn.addEventListener('click', closeActiveDetail);
+}
+
+function setupViewportCloseHandler() {
+    if (!viewport) return;
+
+    viewport.addEventListener('click', (event) => {
+        const clickedGraphBackground =
+            event.target === viewport ||
+            event.target === scene ||
+            event.target === edgesSvg;
+
+        if (!clickedGraphBackground) return;
+
+        closeActiveDetail();
+    });
+}
+
+// ── Event Setup ────────────────────────────────────────────────────────
+
+setupCopyButton();
+setupCloseButton();
+setupViewportCloseHandler();

@@ -1,46 +1,150 @@
 'use strict';
 
-// Apply graph-side effects whenever a setting changes. The panel writes back
-// through window.Settings.set, which runs apply.js (CSS vars + body classes)
-// and then calls every subscriber registered here.
-function handleSettingsChange({ settings, changed }) {
-    graphSettings = settings;
-    relationColors = window.SettingsApply.relationColors(settings.palette, settings.customPalette || {});
+// ── Settings / Palette Side Effects ────────────────────────────────────
 
-    const paletteTouched = changed.has('palette')
-        || changed.has('customPalette.appBg')
-        || changed.has('customPalette.panelBg')
-        || changed.has('customPalette.accent');
-    if (paletteTouched) rerenderEdgesForCurrentPositions();
+function hasAnyChanged(changed, keys) {
+    return keys.some((key) => changed.has(key));
+}
 
-    if (changed.has('liveRefresh')) {
-        if (settings.liveRefresh) {
-            if (ws && ws.readyState === WebSocket.OPEN && !liveRefreshTimer) startLiveRefresh();
-        } else {
-            stopLiveRefresh();
+function isSocketOpen() {
+    return ws && ws.readyState === WebSocket.OPEN;
+}
+
+function refreshRelationColors(settings) {
+    relationColors = window.SettingsApply.relationColors(
+        settings.palette,
+        settings.customPalette || {}
+    );
+}
+
+// ── Change Detection ───────────────────────────────────────────────────
+
+function didPaletteChange(changed) {
+    return hasAnyChanged(changed, [
+        'palette',
+        'customPalette.appBg',
+        'customPalette.panelBg',
+        'customPalette.accent',
+    ]);
+}
+
+function didFocusChange(changed) {
+    return hasAnyChanged(changed, [
+        'focusDepth',
+        'focusIntensity',
+        'edgeLabelMode',
+    ]);
+}
+
+function didFilterChange(changed) {
+    return hasAnyChanged(changed, [
+        'minImportance',
+        'relationFilters',
+    ]);
+}
+
+function didVisualScaleChange(changed) {
+    return hasAnyChanged(changed, [
+        'nodeScale',
+        'labelScale',
+        'edgeThickness',
+    ]);
+}
+
+// ── Effect Handlers ────────────────────────────────────────────────────
+
+function handlePaletteChange(changed) {
+    if (!didPaletteChange(changed)) return;
+
+    rerenderEdgesForCurrentPositions();
+}
+
+function handleLiveRefreshChange(settings, changed) {
+    if (!changed.has('liveRefresh')) return;
+
+    if (settings.liveRefresh) {
+        if (isSocketOpen() && !liveRefreshTimer) {
+            startLiveRefresh();
         }
+
+        return;
     }
 
-    if (changed.has('focusDepth') || changed.has('focusIntensity') || changed.has('edgeLabelMode')) {
-        if (selectedKey) applyRadialFocusLayout(selectedKey);
-        else applyFocusState();
-    }
+    stopLiveRefresh();
+}
 
-    if (changed.has('layoutMode')) {
-        renderGraph(currentEntries, currentEdges, { preserveSelection: false, preservePositions: false, fit: true });
-    }
+function handleFocusChange(changed) {
+    if (!didFocusChange(changed)) return;
 
-    if (changed.has('minImportance') || changed.has('relationFilters')) {
-        // Filters are applied at render time via filteredGraph(); just re-render
-        // from the current snapshot without hitting the network.
-        renderGraph(currentEntries, currentEdges, { preserveSelection: true, preservePositions: true, fit: false });
-    }
-
-    if (changed.has('nodeScale') || changed.has('labelScale') || changed.has('edgeThickness')) {
-        rerenderEdgesForCurrentPositions();
+    if (selectedKey) {
+        applyRadialFocusLayout(selectedKey);
+    } else {
+        applyFocusState();
     }
 }
 
-window.Settings.init({ onChange: handleSettingsChange });
-fitFocusedBtn = document.getElementById('fit-focused-btn');
-if (fitFocusedBtn) fitFocusedBtn.addEventListener('click', fitFocusedNeighborhood);
+function handleLayoutModeChange(changed) {
+    if (!changed.has('layoutMode')) return;
+
+    renderGraph(currentEntries, currentEdges, {
+        preserveSelection: false,
+        preservePositions: false,
+        fit: true,
+    });
+}
+
+function handleFilterChange(changed) {
+    if (!didFilterChange(changed)) return;
+
+    // Filters are applied at render time via filteredGraph().
+    // Re-render from the current snapshot without hitting the network.
+    renderGraph(currentEntries, currentEdges, {
+        preserveSelection: true,
+        preservePositions: true,
+        fit: false,
+    });
+}
+
+function handleVisualScaleChange(changed) {
+    if (!didVisualScaleChange(changed)) return;
+
+    rerenderEdgesForCurrentPositions();
+}
+
+// ── Main Settings Subscriber ───────────────────────────────────────────
+
+function handleSettingsChange({ settings, changed }) {
+    if (!settings || !changed) return;
+
+    graphSettings = settings;
+
+    refreshRelationColors(settings);
+
+    handlePaletteChange(changed);
+    handleLiveRefreshChange(settings, changed);
+    handleFocusChange(changed);
+    handleLayoutModeChange(changed);
+    handleFilterChange(changed);
+    handleVisualScaleChange(changed);
+}
+
+// ── Init ───────────────────────────────────────────────────────────────
+
+function initSettingsPaletteBridge() {
+    if (!window.Settings || typeof window.Settings.init !== 'function') {
+        console.warn('Settings module is not available.');
+        return;
+    }
+
+    window.Settings.init({
+        onChange: handleSettingsChange,
+    });
+
+    fitFocusedBtn = document.getElementById('fit-focused-btn');
+
+    if (fitFocusedBtn) {
+        fitFocusedBtn.addEventListener('click', fitFocusedNeighborhood);
+    }
+}
+
+initSettingsPaletteBridge();

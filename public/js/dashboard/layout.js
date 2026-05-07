@@ -1,168 +1,386 @@
 'use strict';
 
-// ── Layout ─────────────────────────────────────────────────────────────
-function computeLayout(entries, edges) {
-    const mode = (graphSettings && graphSettings.layoutMode) || 'radial';
-    if (mode === 'force') return computeForceLayout(entries, edges);
-    if (mode === 'hierarchical') return computeHierarchicalLayout(entries, edges);
-    return computeRadialLayout(entries, edges);
+// ── Layout Constants ───────────────────────────────────────────────────
+
+const DEFAULT_LAYOUT_MODE = 'radial';
+
+const HIERARCHICAL_LAYOUT_OPTIONS = {
+    rankdir: 'LR',
+    ranksep: 90,
+    nodesep: 20,
+    marginx: 60,
+    marginy: 60,
+};
+
+const RADIAL_MIN_RADIUS = 320;
+const RADIAL_RADIUS_PER_NODE = 38;
+
+const FORCE_MIN_SPREAD = 380;
+const FORCE_SPREAD_PER_NODE = 55;
+const FORCE_ITERATIONS = 300;
+const FORCE_REPULSION = 9000;
+const FORCE_SPRING_K = 0.05;
+const FORCE_SPRING_LEN = 260;
+const FORCE_CENTER_K = 0.007;
+const FORCE_DAMPING = 0.82;
+
+const SCENE_PADDING = 80;
+
+// ── Layout Selection ───────────────────────────────────────────────────
+
+function getLayoutMode() {
+    return graphSettings?.layoutMode || DEFAULT_LAYOUT_MODE;
 }
+
+function computeLayout(entries, edges) {
+    const mode = getLayoutMode();
+
+    switch (mode) {
+        case 'force':
+            return computeForceLayout(entries, edges);
+
+        case 'hierarchical':
+            return computeHierarchicalLayout(entries, edges);
+
+        case 'radial':
+        default:
+            return computeRadialLayout(entries, edges);
+    }
+}
+
+// ── Shared Helpers ─────────────────────────────────────────────────────
+
+function getEntryKeys(entries) {
+    return Object.keys(entries || {});
+}
+
+function hasEntry(entries, key) {
+    return Boolean(entries && key && entries[key]);
+}
+
+function getNodeSize(entry) {
+    return {
+        w: NODE_W,
+        h: nodeHeight(entry),
+    };
+}
+
+function createPosition(x, y, entry) {
+    const { w, h } = getNodeSize(entry);
+
+    return {
+        x: x - w / 2,
+        y: y - h / 2,
+        w,
+        h,
+    };
+}
+
+function isUsableEdge(edge, entries) {
+    return Boolean(
+        edge &&
+        edge.from &&
+        edge.to &&
+        hasEntry(entries, edge.from) &&
+        hasEntry(entries, edge.to)
+    );
+}
+
+function getEdgeIdentity(edge) {
+    return `${edge.from}||${edge.relation || ''}||${edge.to}`;
+}
+
+// ── Hierarchical Layout ────────────────────────────────────────────────
 
 function computeHierarchicalLayout(entries, edges) {
     const g = new dagre.graphlib.Graph({ multigraph: true });
-    g.setGraph({ rankdir: 'LR', ranksep: 90, nodesep: 20, marginx: 60, marginy: 60 });
+
+    g.setGraph(HIERARCHICAL_LAYOUT_OPTIONS);
     g.setDefaultEdgeLabel(() => ({}));
+
     for (const [key, entry] of Object.entries(entries)) {
-        g.setNode(key, { width: NODE_W, height: nodeHeight(entry) });
+        const { w, h } = getNodeSize(entry);
+
+        g.setNode(key, {
+            width: w,
+            height: h,
+        });
     }
-    const seen = new Set();
+
+    const seenEdges = new Set();
+
     for (const edge of edges) {
-        if (!entries[edge.from] || !entries[edge.to]) continue;
-        const id = `${edge.from}||${edge.relation}||${edge.to}`;
-        if (seen.has(id)) continue;
-        seen.add(id);
+        if (!isUsableEdge(edge, entries)) continue;
+
+        const id = getEdgeIdentity(edge);
+
+        if (seenEdges.has(id)) continue;
+
+        seenEdges.add(id);
         g.setEdge(edge.from, edge.to, {}, id);
     }
+
     dagre.layout(g);
+
     const positions = {};
+
     for (const key of g.nodes()) {
-        const n = g.node(key);
-        if (n) positions[key] = { x: n.x - n.width / 2, y: n.y - n.height / 2, w: n.width, h: n.height };
+        const node = g.node(key);
+
+        if (!node) continue;
+
+        positions[key] = {
+            x: node.x - node.width / 2,
+            y: node.y - node.height / 2,
+            w: node.width,
+            h: node.height,
+        };
     }
+
     return positions;
+}
+
+// ── Radial Layout ──────────────────────────────────────────────────────
+
+function getNamespace(key) {
+    return String(key).split('.')[0] || 'default';
+}
+
+function groupKeysByNamespace(keys) {
+    const groups = {};
+
+    for (const key of keys) {
+        const namespace = getNamespace(key);
+
+        if (!groups[namespace]) {
+            groups[namespace] = [];
+        }
+
+        groups[namespace].push(key);
+    }
+
+    return groups;
+}
+
+function sortNamespacesBySize(namespaceGroups) {
+    return Object.keys(namespaceGroups).sort((a, b) => {
+        return namespaceGroups[b].length - namespaceGroups[a].length;
+    });
+}
+
+function sortKeysByImportance(keys, entries) {
+    return [...keys].sort((a, b) => {
+        return (entries[b]?.importance || 0) - (entries[a]?.importance || 0);
+    });
 }
 
 function computeRadialLayout(entries, edges) {
-    const keys = Object.keys(entries);
+    const keys = getEntryKeys(entries);
+
     if (!keys.length) return {};
 
-    // Group by namespace (prefix before first '.')
-    const nsMap = {};
-    for (const key of keys) {
-        const ns = key.split('.')[0];
-        if (!nsMap[ns]) nsMap[ns] = [];
-        nsMap[ns].push(key);
-    }
-    const namespaces = Object.keys(nsMap).sort((a, b) => nsMap[b].length - nsMap[a].length);
-    const total = keys.length;
-    const BASE_RADIUS = Math.max(320, total * 38);
+    const namespaceGroups = groupKeysByNamespace(keys);
+    const namespaces = sortNamespacesBySize(namespaceGroups);
+
+    const totalNodes = keys.length;
+    const baseRadius = Math.max(
+        RADIAL_MIN_RADIUS,
+        totalNodes * RADIAL_RADIUS_PER_NODE
+    );
+
     const positions = {};
     let angleStart = -Math.PI / 2;
 
-    for (const ns of namespaces) {
-        const nsKeys = nsMap[ns];
-        // Higher importance → inner ring
-        nsKeys.sort((a, b) => (entries[b].importance || 0) - (entries[a].importance || 0));
-        const sectorAngle = (nsKeys.length / total) * Math.PI * 2;
-        const rings = Math.max(1, Math.ceil(Math.sqrt(nsKeys.length)));
-        nsKeys.forEach((key, i) => {
-            const ring = Math.floor(i / rings);
-            const posInRing = i % rings;
-            const totalRings = Math.ceil(nsKeys.length / rings);
-            const ringCount = Math.min(rings, nsKeys.length - ring * rings);
-            const radiusFrac = totalRings <= 1 ? 0.6 : 0.35 + 0.65 * (ring / (totalRings - 1));
-            const radius = BASE_RADIUS * radiusFrac;
-            const angle = angleStart + (posInRing + 0.5) / ringCount * sectorAngle;
-            const w = NODE_W;
-            const h = nodeHeight(entries[key]);
-            positions[key] = { x: Math.cos(angle) * radius - w / 2, y: Math.sin(angle) * radius - h / 2, w, h };
+    for (const namespace of namespaces) {
+        const namespaceKeys = sortKeysByImportance(
+            namespaceGroups[namespace],
+            entries
+        );
+
+        const sectorAngle = (namespaceKeys.length / totalNodes) * Math.PI * 2;
+        const ringCapacity = Math.max(1, Math.ceil(Math.sqrt(namespaceKeys.length)));
+        const totalRings = Math.ceil(namespaceKeys.length / ringCapacity);
+
+        namespaceKeys.forEach((key, index) => {
+            const ringIndex = Math.floor(index / ringCapacity);
+            const indexInRing = index % ringCapacity;
+            const remainingInRing = namespaceKeys.length - ringIndex * ringCapacity;
+            const nodesInRing = Math.min(ringCapacity, remainingInRing);
+
+            const radiusFraction = totalRings <= 1
+                ? 0.6
+                : 0.35 + 0.65 * (ringIndex / (totalRings - 1));
+
+            const radius = baseRadius * radiusFraction;
+            const angle = angleStart + ((indexInRing + 0.5) / nodesInRing) * sectorAngle;
+
+            positions[key] = createPosition(
+                Math.cos(angle) * radius,
+                Math.sin(angle) * radius,
+                entries[key]
+            );
         });
+
         angleStart += sectorAngle;
     }
+
     return positions;
 }
 
-function computeForceLayout(entries, edges) {
-    const keys = Object.keys(entries);
-    if (!keys.length) return {};
-    const n = keys.length;
-    const spread = Math.max(380, n * 55);
+// ── Force Layout ───────────────────────────────────────────────────────
 
-    // Seed on a circle so the layout is deterministic
-    const pos = {}, vel = {};
-    keys.forEach((key, i) => {
-        const angle = (i / n) * Math.PI * 2;
-        pos[key] = { x: Math.cos(angle) * spread * 0.45, y: Math.sin(angle) * spread * 0.45 };
-        vel[key] = { x: 0, y: 0 };
+function createInitialForceState(keys) {
+    const count = keys.length;
+    const spread = Math.max(FORCE_MIN_SPREAD, count * FORCE_SPREAD_PER_NODE);
+
+    const positions = {};
+    const velocities = {};
+
+    keys.forEach((key, index) => {
+        const angle = (index / count) * Math.PI * 2;
+
+        positions[key] = {
+            x: Math.cos(angle) * spread * 0.45,
+            y: Math.sin(angle) * spread * 0.45,
+        };
+
+        velocities[key] = {
+            x: 0,
+            y: 0,
+        };
     });
 
-    // Build adjacency list (undirected)
-    const adj = {};
-    for (const e of edges) {
-        if (!pos[e.from] || !pos[e.to]) continue;
-        (adj[e.from] = adj[e.from] || []).push(e.to);
-        (adj[e.to] = adj[e.to] || []).push(e.from);
+    return { positions, velocities };
+}
+
+function buildAdjacencyList(edges, positions) {
+    const adjacency = {};
+
+    for (const edge of edges) {
+        if (!positions[edge.from] || !positions[edge.to]) continue;
+
+        if (!adjacency[edge.from]) adjacency[edge.from] = new Set();
+        if (!adjacency[edge.to]) adjacency[edge.to] = new Set();
+
+        adjacency[edge.from].add(edge.to);
+        adjacency[edge.to].add(edge.from);
     }
 
-    const REPULSION = 9000;
-    const SPRING_K = 0.05;
-    const SPRING_LEN = 260;
-    const CENTER_K = 0.007;
-    const DAMPING = 0.82;
+    return adjacency;
+}
 
-    for (let iter = 0; iter < 300; iter++) {
-        const force = {};
-        for (const k of keys) force[k] = { x: 0, y: 0 };
+function createForceMap(keys) {
+    const forces = {};
 
-        // O(n²) repulsion
-        for (let i = 0; i < keys.length; i++) {
-            for (let j = i + 1; j < keys.length; j++) {
-                const a = keys[i], b = keys[j];
-                const dx = pos[b].x - pos[a].x;
-                const dy = pos[b].y - pos[a].y;
-                const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-                const f = REPULSION / (dist * dist);
-                const ux = dx / dist, uy = dy / dist;
-                force[a].x -= ux * f; force[a].y -= uy * f;
-                force[b].x += ux * f; force[b].y += uy * f;
-            }
+    for (const key of keys) {
+        forces[key] = {
+            x: 0,
+            y: 0,
+        };
+    }
+
+    return forces;
+}
+
+function applyRepulsionForces(keys, positions, forces) {
+    for (let i = 0; i < keys.length; i += 1) {
+        for (let j = i + 1; j < keys.length; j += 1) {
+            const a = keys[i];
+            const b = keys[j];
+
+            const dx = positions[b].x - positions[a].x;
+            const dy = positions[b].y - positions[a].y;
+            const distance = Math.sqrt(dx * dx + dy * dy) || 1;
+
+            const force = FORCE_REPULSION / (distance * distance);
+            const ux = dx / distance;
+            const uy = dy / distance;
+
+            forces[a].x -= ux * force;
+            forces[a].y -= uy * force;
+
+            forces[b].x += ux * force;
+            forces[b].y += uy * force;
         }
+    }
+}
 
-        // Spring attraction along edges
-        for (const [from, targets] of Object.entries(adj)) {
-            for (const to of targets) {
-                const dx = pos[to].x - pos[from].x;
-                const dy = pos[to].y - pos[from].y;
-                const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-                const f = SPRING_K * (dist - SPRING_LEN);
-                force[from].x += (dx / dist) * f;
-                force[from].y += (dy / dist) * f;
-            }
-        }
+function applySpringForces(adjacency, positions, forces) {
+    for (const [from, targets] of Object.entries(adjacency)) {
+        for (const to of targets) {
+            const dx = positions[to].x - positions[from].x;
+            const dy = positions[to].y - positions[from].y;
+            const distance = Math.sqrt(dx * dx + dy * dy) || 1;
 
-        // Weak center gravity
-        for (const k of keys) {
-            force[k].x -= pos[k].x * CENTER_K;
-            force[k].y -= pos[k].y * CENTER_K;
-        }
+            const force = FORCE_SPRING_K * (distance - FORCE_SPRING_LEN);
 
-        // Integrate
-        for (const k of keys) {
-            vel[k].x = (vel[k].x + force[k].x) * DAMPING;
-            vel[k].y = (vel[k].y + force[k].y) * DAMPING;
-            pos[k].x += vel[k].x;
-            pos[k].y += vel[k].y;
+            forces[from].x += (dx / distance) * force;
+            forces[from].y += (dy / distance) * force;
         }
+    }
+}
+
+function applyCenterGravity(keys, positions, forces) {
+    for (const key of keys) {
+        forces[key].x -= positions[key].x * FORCE_CENTER_K;
+        forces[key].y -= positions[key].y * FORCE_CENTER_K;
+    }
+}
+
+function integrateForces(keys, positions, velocities, forces) {
+    for (const key of keys) {
+        velocities[key].x = (velocities[key].x + forces[key].x) * FORCE_DAMPING;
+        velocities[key].y = (velocities[key].y + forces[key].y) * FORCE_DAMPING;
+
+        positions[key].x += velocities[key].x;
+        positions[key].y += velocities[key].y;
+    }
+}
+
+function computeForceLayout(entries, edges) {
+    const keys = getEntryKeys(entries);
+
+    if (!keys.length) return {};
+
+    const { positions, velocities } = createInitialForceState(keys);
+    const adjacency = buildAdjacencyList(edges, positions);
+
+    for (let iteration = 0; iteration < FORCE_ITERATIONS; iteration += 1) {
+        const forces = createForceMap(keys);
+
+        applyRepulsionForces(keys, positions, forces);
+        applySpringForces(adjacency, positions, forces);
+        applyCenterGravity(keys, positions, forces);
+        integrateForces(keys, positions, velocities, forces);
     }
 
     const result = {};
+
     for (const key of keys) {
-        const w = NODE_W;
-        const h = nodeHeight(entries[key]);
-        result[key] = { x: pos[key].x - w / 2, y: pos[key].y - h / 2, w, h };
+        result[key] = createPosition(
+            positions[key].x,
+            positions[key].y,
+            entries[key]
+        );
     }
+
     return result;
 }
 
+// ── Node Presentation ──────────────────────────────────────────────────
+
 function setNodePresentation(key, nodeEl) {
+    if (!nodeEl) return;
+
     const isExpanded = expandedNodes.has(key);
+
     nodeEl.classList.toggle('expanded', isExpanded);
     nodeEl.classList.toggle('round', !isExpanded);
     nodeEl.setAttribute('aria-expanded', isExpanded ? 'true' : 'false');
+
     applyNodePlacement(nodeEl, key);
 }
 
-// Toggle node between round and expanded state with animation.
 function toggleNodeExpanded(key, nodeEl) {
     if (expandedNodes.has(key)) {
         expandedNodes.delete(key);
@@ -172,29 +390,43 @@ function toggleNodeExpanded(key, nodeEl) {
 
     setNodePresentation(key, nodeEl);
     rerenderEdgesForCurrentPositions();
+
     window.setTimeout(rerenderEdgesForCurrentPositions, NODE_TRANSITION_MS);
 }
 
-// ── Graph render orchestration ─────────────────────────────────────────
-function mergePreservedPositions(nextPositions, previousPositions) {
+// ── Graph Render Helpers ───────────────────────────────────────────────
+
+function mergePreservedPositions(nextPositions, previousPositions = {}) {
     const merged = {};
-    for (const [key, pos] of Object.entries(nextPositions)) {
-        merged[key] = previousPositions[key]
-            ? { ...pos, x: previousPositions[key].x, y: previousPositions[key].y }
-            : pos;
+
+    for (const [key, position] of Object.entries(nextPositions)) {
+        const previous = previousPositions[key];
+
+        merged[key] = previous
+            ? {
+                ...position,
+                x: previous.x,
+                y: previous.y,
+            }
+            : position;
     }
+
     return merged;
 }
 
 function sizeSceneToPositions(positions) {
-    let maxX = 0, maxY = 0;
-    for (const [key, p] of Object.entries(positions)) {
-        const box = nodeVisualBox(key, p);
+    let maxX = 0;
+    let maxY = 0;
+
+    for (const [key, position] of Object.entries(positions)) {
+        const box = nodeVisualBox(key, position);
+
         maxX = Math.max(maxX, box.x + box.w);
         maxY = Math.max(maxY, box.y + box.h);
     }
-    edgesSvg.setAttribute('width', maxX + 80);
-    edgesSvg.setAttribute('height', maxY + 80);
+
+    edgesSvg.setAttribute('width', maxX + SCENE_PADDING);
+    edgesSvg.setAttribute('height', maxY + SCENE_PADDING);
 }
 
 function rerenderEdgesForCurrentPositions() {
@@ -203,70 +435,129 @@ function rerenderEdgesForCurrentPositions() {
     applyFocusState();
 }
 
-// Apply settings-driven filters (min importance, relation-type toggles) to a
-// raw entry/edge pair. Edges referencing filtered-out entries are dropped.
-function filteredGraph(entries, edges) {
-    const minImportance = Number(graphSettings.minImportance) || 0;
-    const relFilters = graphSettings.relationFilters || {};
-    const visibleEntries = {};
-    for (const [key, entry] of Object.entries(entries)) {
-        if ((entry.importance ?? 0) < minImportance) continue;
-        visibleEntries[key] = entry;
+function removeRenderedNodes() {
+    for (const nodeEl of scene.querySelectorAll('.mem-node')) {
+        nodeEl.remove();
     }
-    const visibleEdges = edges.filter((e) => {
-        if (relFilters[e.relation] === false) return false;
-        return visibleEntries[e.from] && visibleEntries[e.to];
-    });
-    return { entries: visibleEntries, edges: visibleEdges };
 }
 
-function renderGraph(rawEntries, rawEdges, options = {}) {
-    const filtered = filteredGraph(rawEntries, rawEdges);
-    const entries = filtered.entries;
-    const edges = filtered.edges;
-    const previousSelected = options.preserveSelection ? selectedKey : null;
-    const previousPositions = options.preservePositions ? nodePositions : {};
-    for (const el of scene.querySelectorAll('.mem-node')) el.remove();
+function resetGraphUiState() {
     selectedKey = null;
     focusedKey = null;
     lastFocusedKey = null;
+
     detailPanel.classList.remove('visible');
     document.body.classList.remove('inspector-open');
+}
 
-    const keys = Object.keys(entries);
+function pruneExpandedNodes(entries) {
     for (const key of Array.from(expandedNodes)) {
-        if (!entries[key]) expandedNodes.delete(key);
+        if (!entries[key]) {
+            expandedNodes.delete(key);
+        }
     }
-    emptyState.classList.toggle('visible', keys.length === 0);
-    updateLegend();
-    renderIdentityPanel();
+}
 
-    if (!keys.length) {
-        nodePositions = {};
-        renderEdges([], {}, {});
-        return;
+// ── Filtering ──────────────────────────────────────────────────────────
+
+function passesImportanceFilter(entry, minImportance) {
+    return (entry?.importance ?? 0) >= minImportance;
+}
+
+function passesRelationFilter(edge, relationFilters) {
+    return relationFilters[edge.relation] !== false;
+}
+
+function filteredGraph(entries, edges) {
+    const minImportance = Number(graphSettings?.minImportance) || 0;
+    const relationFilters = graphSettings?.relationFilters || {};
+
+    const visibleEntries = {};
+
+    for (const [key, entry] of Object.entries(entries || {})) {
+        if (!passesImportanceFilter(entry, minImportance)) continue;
+
+        visibleEntries[key] = entry;
     }
 
-    const computedPositions = computeLayout(entries, edges);
-    const positions = options.preservePositions
-        ? mergePreservedPositions(computedPositions, previousPositions)
-        : computedPositions;
-    nodePositions = positions;
+    const visibleEdges = (edges || []).filter((edge) => {
+        return (
+            isUsableEdge(edge, visibleEntries) &&
+            passesRelationFilter(edge, relationFilters)
+        );
+    });
 
-    sizeSceneToPositions(positions);
+    return {
+        entries: visibleEntries,
+        edges: visibleEdges,
+    };
+}
 
-    renderEdges(edges, positions, entries);
+// ── Graph Render Orchestration ─────────────────────────────────────────
 
+function renderEmptyGraph() {
+    nodePositions = {};
+    renderEdges([], {}, {});
+}
+
+function renderGraphNodes(entries, positions) {
     for (const [key, entry] of Object.entries(entries)) {
-        if (positions[key]) scene.appendChild(buildNodeEl(key, entry, positions[key]));
+        const position = positions[key];
+
+        if (!position) continue;
+
+        scene.appendChild(buildNodeEl(key, entry, position));
     }
+}
 
-    if (options.fit !== false) fitView(positions);
-    else applyTransform();
-
+function restoreSelectionIfPossible(previousSelected, entries) {
     if (previousSelected && entries[previousSelected]) {
         openDetail(previousSelected, entries[previousSelected]);
     } else {
         applyFocusState();
     }
+}
+
+function renderGraph(rawEntries, rawEdges, options = {}) {
+    const { entries, edges } = filteredGraph(rawEntries, rawEdges);
+
+    const previousSelected = options.preserveSelection ? selectedKey : null;
+    const previousPositions = options.preservePositions ? nodePositions : {};
+
+    removeRenderedNodes();
+    resetGraphUiState();
+
+    const keys = getEntryKeys(entries);
+
+    pruneExpandedNodes(entries);
+
+    emptyState.classList.toggle('visible', keys.length === 0);
+
+    updateLegend();
+    renderIdentityPanel();
+
+    if (!keys.length) {
+        renderEmptyGraph();
+        return;
+    }
+
+    const computedPositions = computeLayout(entries, edges);
+
+    const positions = options.preservePositions
+        ? mergePreservedPositions(computedPositions, previousPositions)
+        : computedPositions;
+
+    nodePositions = positions;
+
+    sizeSceneToPositions(positions);
+    renderEdges(edges, positions, entries);
+    renderGraphNodes(entries, positions);
+
+    if (options.fit !== false) {
+        fitView(positions);
+    } else {
+        applyTransform();
+    }
+
+    restoreSelectionIfPossible(previousSelected, entries);
 }

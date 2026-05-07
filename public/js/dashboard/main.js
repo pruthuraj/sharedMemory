@@ -1,105 +1,288 @@
 'use strict';
 
-// ── Application bootstrapping and event bindings ───────────────────────
-viewport.addEventListener('mousedown', e => {
-    if (e.target.closest('.mem-node')) return;
+// ── Application Bootstrapping / Event Bindings ─────────────────────────
+
+// ── DOM Helpers ────────────────────────────────────────────────────────
+
+function getEl(id) {
+    return document.getElementById(id);
+}
+
+function on(el, eventName, handler, options) {
+    if (!el) return;
+
+    el.addEventListener(eventName, handler, options);
+}
+
+function isPanelOpen(panelEl) {
+    return Boolean(panelEl?.classList.contains('visible'));
+}
+
+function clickedOutsidePanel(event, panelEl, triggerEl) {
+    return (
+        panelEl &&
+        triggerEl &&
+        !panelEl.contains(event.target) &&
+        !triggerEl.contains(event.target)
+    );
+}
+
+// ── Viewport Pan / Drag / Zoom ─────────────────────────────────────────
+
+function handleViewportMouseDown(event) {
+    if (event.target.closest('.mem-node')) return;
     if (nodeDrag) return;
+
     isPanning = true;
-    panStartX = e.clientX; panStartY = e.clientY;
-    panStartPanX = panX; panStartPanY = panY;
+
+    panStartX = event.clientX;
+    panStartY = event.clientY;
+    panStartPanX = panX;
+    panStartPanY = panY;
+
     viewport.classList.add('grabbing');
-    e.preventDefault();
-});
-document.addEventListener('mousemove', e => {
+
+    event.preventDefault();
+}
+
+function handleDocumentMouseMove(event) {
     if (nodeDrag) return;
     if (!isPanning) return;
-    panX = panStartPanX + (e.clientX - panStartX);
-    panY = panStartPanY + (e.clientY - panStartY);
-    applyTransform();
-});
-document.addEventListener('mouseup', () => {
-    if (isPanning) { isPanning = false; viewport.classList.remove('grabbing'); }
-});
-document.addEventListener('pointermove', moveDraggedNode);
-document.addEventListener('pointerup', endNodeDrag);
-document.addEventListener('pointercancel', endNodeDrag);
-viewport.addEventListener('wheel', e => {
-    e.preventDefault();
-    const cappedDelta = Math.max(-120, Math.min(120, e.deltaY));
-    const factor = Math.exp(-cappedDelta * DEFAULT_WHEEL_ZOOM_INTENSITY * graphSettings.zoomSpeed);
-    const rect = viewport.getBoundingClientRect();
-    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-    zoomAt(mx, my, scale * factor);
-}, { passive: false });
 
-document.getElementById('zoom-in-btn').addEventListener('click', () => {
-    zoomAtCenter(scale * zoomButtonFactor());
-});
-document.getElementById('zoom-out-btn').addEventListener('click', () => {
-    zoomAtCenter(scale / zoomButtonFactor());
-});
-document.getElementById('fit-btn').addEventListener('click', () => fitView(nodePositions));
-// fit-focused-btn is bound after Settings.init() once the panel renders it.
-identityBtn.addEventListener('click', toggleIdentityPanel);
-identityClose.addEventListener('click', closeIdentityPanel);
-identitySearch.addEventListener('input', renderIdentityPanel);
-identityList.addEventListener('click', (event) => {
+    panX = panStartPanX + (event.clientX - panStartX);
+    panY = panStartPanY + (event.clientY - panStartY);
+
+    applyTransform();
+}
+
+function stopViewportPanning() {
+    if (!isPanning) return;
+
+    isPanning = false;
+    viewport.classList.remove('grabbing');
+}
+
+function handleViewportWheel(event) {
+    event.preventDefault();
+
+    const cappedDelta = Math.max(-120, Math.min(120, event.deltaY));
+    const factor = Math.exp(
+        -cappedDelta * DEFAULT_WHEEL_ZOOM_INTENSITY * graphSettings.zoomSpeed
+    );
+
+    const rect = viewport.getBoundingClientRect();
+    const mouseX = event.clientX - rect.left;
+    const mouseY = event.clientY - rect.top;
+
+    zoomAt(mouseX, mouseY, scale * factor);
+}
+
+function bindViewportControls() {
+    on(viewport, 'mousedown', handleViewportMouseDown);
+
+    on(document, 'mousemove', handleDocumentMouseMove);
+    on(document, 'mouseup', stopViewportPanning);
+
+    on(document, 'pointermove', moveDraggedNode);
+    on(document, 'pointerup', endNodeDrag);
+    on(document, 'pointercancel', endNodeDrag);
+
+    on(viewport, 'wheel', handleViewportWheel, {
+        passive: false,
+    });
+}
+
+// ── Zoom / Fit Controls ────────────────────────────────────────────────
+
+function bindZoomControls() {
+    on(getEl('zoom-in-btn'), 'click', () => {
+        zoomAtCenter(scale * zoomButtonFactor());
+    });
+
+    on(getEl('zoom-out-btn'), 'click', () => {
+        zoomAtCenter(scale / zoomButtonFactor());
+    });
+
+    on(getEl('fit-btn'), 'click', () => {
+        fitView(nodePositions);
+    });
+
+    // fit-focused-btn is bound after Settings.init()
+    // once the settings panel renders it.
+}
+
+// ── Identity Panel Controls ────────────────────────────────────────────
+
+function handleIdentityListClick(event) {
     const item = event.target.closest('.identity-item');
+
     if (!item) return;
+
     focusIdentityNode(item.dataset.key);
-});
-importBtn.addEventListener('click', openImportPanel);
-importClose.addEventListener('click', closeImportPanel);
-importCancelBtn.addEventListener('click', () => {
+}
+
+function bindIdentityControls() {
+    on(identityBtn, 'click', toggleIdentityPanel);
+    on(identityClose, 'click', closeIdentityPanel);
+    on(identitySearch, 'input', renderIdentityPanel);
+    on(identityList, 'click', handleIdentityListClick);
+}
+
+// ── Import Panel Controls ──────────────────────────────────────────────
+
+function cancelImportPanel() {
     resetImportPanel();
     closeImportPanel();
-});
-importFile.addEventListener('change', () => handleImportFile(importFile.files?.[0]));
-importConfirmBtn.addEventListener('click', importValidatedSnapshot);
-settingsBtn.addEventListener('click', () => toggleSettingsPanel());
-settingsClose.addEventListener('click', () => toggleSettingsPanel(false));
+}
 
-document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') {
+function handleImportFileChange() {
+    handleImportFile(importFile.files?.[0]);
+}
+
+function bindImportControls() {
+    on(importBtn, 'click', openImportPanel);
+    on(importClose, 'click', closeImportPanel);
+    on(importCancelBtn, 'click', cancelImportPanel);
+    on(importFile, 'change', handleImportFileChange);
+    on(importConfirmBtn, 'click', importValidatedSnapshot);
+}
+
+// ── Export Panel Controls ──────────────────────────────────────────────
+
+function bindExportControls() {
+    on(exportBtn, 'click', exportSnapshot);
+}
+
+// ── Settings Panel Controls ────────────────────────────────────────────
+
+function bindSettingsControls() {
+    on(settingsBtn, 'click', () => {
+        toggleSettingsPanel();
+    });
+
+    on(settingsClose, 'click', () => {
         toggleSettingsPanel(false);
+    });
+}
+
+// ── Global Close Handlers ──────────────────────────────────────────────
+
+function closeFloatingPanels() {
+    toggleSettingsPanel(false);
+    closeIdentityPanel();
+    closeImportPanel();
+}
+
+function handleGlobalKeydown(event) {
+    if (event.key !== 'Escape') return;
+
+    closeFloatingPanels();
+}
+
+function handleGlobalMouseDown(event) {
+    if (
+        isPanelOpen(settingsPanel) &&
+        clickedOutsidePanel(event, settingsPanel, settingsBtn)
+    ) {
+        toggleSettingsPanel(false);
+    }
+
+    if (
+        isPanelOpen(identityPanel) &&
+        clickedOutsidePanel(event, identityPanel, identityBtn)
+    ) {
         closeIdentityPanel();
+    }
+
+    if (
+        isPanelOpen(importPanel) &&
+        clickedOutsidePanel(event, importPanel, importBtn)
+    ) {
         closeImportPanel();
     }
-});
-document.addEventListener('mousedown', e => {
-    if (settingsPanel.classList.contains('visible')) {
-        if (!settingsPanel.contains(e.target) && !settingsBtn.contains(e.target)) {
-            toggleSettingsPanel(false);
-        }
+}
+
+function bindGlobalCloseHandlers() {
+    on(document, 'keydown', handleGlobalKeydown);
+    on(document, 'mousedown', handleGlobalMouseDown);
+}
+
+// ── Fullscreen Controls ────────────────────────────────────────────────
+
+function getFullscreenButton() {
+    return getEl('fullscreen-btn');
+}
+
+function toggleFullscreen() {
+    if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen().catch(() => { });
+        return;
     }
 
-    if (identityPanel.classList.contains('visible')) {
-        if (!identityPanel.contains(e.target) && !identityBtn.contains(e.target)) {
-            closeIdentityPanel();
-        }
+    document.exitFullscreen().catch(() => { });
+}
+
+function updateFullscreenButton() {
+    const fullscreenBtn = getFullscreenButton();
+
+    if (!fullscreenBtn) return;
+
+    fullscreenBtn.textContent = document.fullscreenElement ? '[]' : '[ ]';
+}
+
+function handleFullscreenChange() {
+    updateFullscreenButton();
+
+    window.setTimeout(() => {
+        fitView(nodePositions);
+    }, 80);
+}
+
+function bindFullscreenControls() {
+    on(getFullscreenButton(), 'click', toggleFullscreen);
+    on(document, 'fullscreenchange', handleFullscreenChange);
+}
+
+// ── Connection Controls ────────────────────────────────────────────────
+
+function handleTokenInputKeydown(event) {
+    if (event.key === 'Enter') {
+        connect();
+    }
+}
+
+function bindConnectionControls() {
+    on(connectBtn, 'click', connect);
+    on(refreshBtn, 'click', loadGraph);
+    on(tokenInput, 'keydown', handleTokenInputKeydown);
+}
+
+// ── Initial Graph State ────────────────────────────────────────────────
+
+function applyInitialGraphState() {
+    if (selectedKey) {
+        applyRadialFocusLayout(selectedKey);
+    } else {
+        applyFocusState();
     }
 
-    if (importPanel.classList.contains('visible')) {
-        if (!importPanel.contains(e.target) && !importBtn.contains(e.target)) {
-            closeImportPanel();
-        }
-    }
-});
-document.getElementById('fullscreen-btn').addEventListener('click', () => {
-    if (!document.fullscreenElement) document.documentElement.requestFullscreen().catch(() => { });
-    else document.exitFullscreen().catch(() => { });
-});
-document.addEventListener('fullscreenchange', () => {
-    document.getElementById('fullscreen-btn').textContent = document.fullscreenElement ? '[]' : '[ ]';
-    setTimeout(() => fitView(nodePositions), 80);
-});
+    applyTransform();
+}
 
-connectBtn.addEventListener('click', connect);
-refreshBtn.addEventListener('click', loadGraph);
-tokenInput.addEventListener('keydown', e => { if (e.key === 'Enter') connect(); });
+// ── Main Init ──────────────────────────────────────────────────────────
 
-// Initial palette/edge-label/CSS-vars apply happens inside Settings.init().
-// Run focus-state once the snapshot is in hand so the radial layout matches.
-if (selectedKey) applyRadialFocusLayout(selectedKey);
-else applyFocusState();
-applyTransform();
+function initAppBindings() {
+    bindViewportControls();
+    bindZoomControls();
+    bindIdentityControls();
+    bindImportControls();
+    bindExportControls();
+    bindSettingsControls();
+    bindGlobalCloseHandlers();
+    bindFullscreenControls();
+    bindConnectionControls();
+
+    applyInitialGraphState();
+}
+
+initAppBindings();

@@ -23,6 +23,7 @@
     <button id="identity-btn" title="Node identity legend" aria-expanded="false"
       aria-controls="identity-panel">Identity</button>
     <button id="import-btn" title="Import memory snapshot JSON" disabled>Import JSON</button>
+    <button id="export-btn" title="Export memory snapshot as JSON" disabled>Export JSON</button>
     <button id="settings-btn" title="Graph settings" aria-expanded="false"
       aria-controls="settings-panel">Settings</button>
     <button id="fullscreen-btn" title="Fullscreen">[ ]</button>
@@ -78,7 +79,8 @@
     </div>
     <div class="import-body">
       <input id="import-file" type="file" accept="application/json,.json" />
-      <div class="import-note">Uploads add to the current memory by default. Existing memories will not be deleted or overwritten.</div>
+      <div class="import-note">Uploads add to the current memory by default. Existing memories will not be deleted or
+        overwritten.</div>
       <div class="import-result" id="import-result"></div>
       <div class="import-actions">
         <button id="import-confirm-btn" class="primary" disabled>Add to Memory</button>
@@ -128,6 +130,7 @@
   <script src="js/dashboard/nodes.js"></script>
   <script src="js/dashboard/identity.js"></script>
   <script src="js/dashboard/import.js"></script>
+  <script src="js/dashboard/export.js"></script>
   <script src="js/dashboard/graph-detail.js"></script>
   <script src="js/dashboard/viewport.js"></script>
   <script src="js/dashboard/realtime.js"></script>

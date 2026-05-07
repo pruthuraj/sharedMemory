@@ -1,105 +1,289 @@
 'use strict';
 
-// ── Edge rendering ─────────────────────────────────────────────────────
-function renderEdges(edges, positions, entries) {
-    while (edgesSvg.firstChild) edgesSvg.removeChild(edgesSvg.firstChild);
+// ── Edge Rendering Constants ───────────────────────────────────────────
 
-    // Arrow markers
-    const defs = svgEl('defs');
-    for (const [rel, color] of Object.entries(relationColors)) {
-        const m = svgEl('marker');
-        m.setAttribute('id', `arr-${rel}`);
-        m.setAttribute('markerWidth', '8');
-        m.setAttribute('markerHeight', '6');
-        m.setAttribute('refX', '7');
-        m.setAttribute('refY', '3');
-        m.setAttribute('orient', 'auto');
-        const poly = svgEl('polygon');
-        poly.setAttribute('points', '0 0, 8 3, 0 6');
-        poly.setAttribute('fill', color);
-        poly.setAttribute('opacity', '0.75');
-        m.appendChild(poly);
-        defs.appendChild(m);
+const EDGE_DEFAULT_COLOR = '#6366f1';
+const EDGE_LABEL_MIN_WIDTH = 72;
+const EDGE_LABEL_CHAR_WIDTH = 6;
+const EDGE_LABEL_HORIZONTAL_PADDING = 18;
+const EDGE_LABEL_HEIGHT = 18;
+const EDGE_LABEL_RADIUS = 5;
+
+const EDGE_MIN_BEND = 18;
+const EDGE_MAX_BEND = 80;
+const EDGE_BEND_FACTOR = 0.09;
+
+// ── SVG Helpers ────────────────────────────────────────────────────────
+
+function clearEdgesSvg() {
+    while (edgesSvg.firstChild) {
+        edgesSvg.removeChild(edgesSvg.firstChild);
     }
+}
+
+function setSvgAttrs(el, attrs) {
+    for (const [key, value] of Object.entries(attrs)) {
+        el.setAttribute(key, String(value));
+    }
+
+    return el;
+}
+
+// ── Marker Rendering ───────────────────────────────────────────────────
+
+function getMarkerId(relation) {
+    return `arr-${relation}`;
+}
+
+function createArrowMarker(relation, color) {
+    const marker = svgEl('marker');
+
+    setSvgAttrs(marker, {
+        id: getMarkerId(relation),
+        markerWidth: 8,
+        markerHeight: 6,
+        refX: 7,
+        refY: 3,
+        orient: 'auto',
+    });
+
+    const polygon = svgEl('polygon');
+
+    setSvgAttrs(polygon, {
+        points: '0 0, 8 3, 0 6',
+        fill: color,
+        opacity: 0.75,
+    });
+
+    marker.appendChild(polygon);
+
+    return marker;
+}
+
+function renderArrowMarkers() {
+    const defs = svgEl('defs');
+
+    for (const [relation, color] of Object.entries(relationColors || {})) {
+        defs.appendChild(createArrowMarker(relation, color));
+    }
+
     edgesSvg.appendChild(defs);
+}
 
-    for (const edge of edges) {
-        const sourceSlot = positions[edge.from];
-        const targetSlot = positions[edge.to];
-        if (!sourceSlot || !targetSlot) continue;
+// ── Edge Data Helpers ──────────────────────────────────────────────────
 
-        const sp = nodeVisualBox(edge.from, sourceSlot, entries[edge.from]);
-        const tp = nodeVisualBox(edge.to, targetSlot, entries[edge.to]);
+function getRelationColor(relation) {
+    return (
+        relationColors?.[relation] ||
+        relationColors?.related_to ||
+        EDGE_DEFAULT_COLOR
+    );
+}
 
-        const color = relationColors[edge.relation] || relationColors.related_to || '#6366f1';
-        const edgeScale = Number(graphSettings.edgeThickness) || 1;
-        const sw = ((1.5 + (edge.weight || 0) * 2.5) * edgeScale).toFixed(2);
+function getEdgeStrokeWidth(edge) {
+    const edgeScale = Number(graphSettings?.edgeThickness) || 1;
+    const weight = Number(edge?.weight) || 0;
 
-        const sourceCenter = nodeCenter(sp);
-        const targetCenter = nodeCenter(tp);
-        const sourceAnchor = edgeAnchor(sp, targetCenter, !expandedNodes.has(edge.from));
-        const targetAnchor = edgeAnchor(tp, sourceCenter, !expandedNodes.has(edge.to));
-        const sx = sourceAnchor.x;
-        const sy = sourceAnchor.y;
-        const tx = targetAnchor.x;
-        const ty = targetAnchor.y;
-        const edgeDx = tx - sx;
-        const edgeDy = ty - sy;
-        const span = Math.hypot(edgeDx, edgeDy) || 1;
-        const normalX = -edgeDy / span;
-        const normalY = edgeDx / span;
-        const bendDirection = stableHash(edgeKey(edge)) % 2 === 0 ? 1 : -1;
-        const bend = bendDirection * Math.min(80, Math.max(18, span * 0.09));
-        const cx = (sx + tx) / 2 + normalX * bend;
-        const cy = (sy + ty) / 2 + normalY * bend;
-        const d = `M ${sx} ${sy} Q ${cx} ${cy} ${tx} ${ty}`;
+    return ((1.5 + weight * 2.5) * edgeScale).toFixed(2);
+}
 
-        const g = svgEl('g');
-        g.classList.add('edge-group');
-        g.dataset.from = edge.from;
-        g.dataset.to = edge.to;
-        g.dataset.relation = edge.relation;
+function getEdgeLabel(edge) {
+    return String(edge?.relation || 'related_to').replace(/_/g, ' ');
+}
 
-        const path = svgEl('path');
-        path.setAttribute('d', d);
-        path.setAttribute('fill', 'none');
-        path.setAttribute('stroke', color);
-        path.setAttribute('stroke-width', sw);
-        path.setAttribute('stroke-opacity', '0.6');
-        path.setAttribute('marker-end', `url(#arr-${edge.relation})`);
-        g.appendChild(path);
+function isRenderableEdge(edge, positions, entries) {
+    return Boolean(
+        edge &&
+        edge.from &&
+        edge.to &&
+        positions?.[edge.from] &&
+        positions?.[edge.to] &&
+        entries?.[edge.from] &&
+        entries?.[edge.to]
+    );
+}
 
-        const mx = 0.25 * sx + 0.5 * cx + 0.25 * tx;
-        const my = 0.25 * sy + 0.5 * cy + 0.25 * ty;
+// ── Edge Geometry ──────────────────────────────────────────────────────
 
-        const labelText = edge.relation.replace(/_/g, ' ');
-        const labelWidth = Math.max(72, labelText.length * 6 + 18);
+function getEdgeBoxes(edge, positions, entries) {
+    const sourceSlot = positions[edge.from];
+    const targetSlot = positions[edge.to];
 
-        const bg = svgEl('rect');
-        bg.classList.add('edge-label-bg');
-        bg.setAttribute('x', String(mx - labelWidth / 2));
-        bg.setAttribute('y', String(my - 10));
-        bg.setAttribute('width', String(labelWidth));
-        bg.setAttribute('height', '18');
-        bg.setAttribute('rx', '5');
-        bg.setAttribute('fill', '#05050e');
-        bg.setAttribute('opacity', '0.94');
-        g.appendChild(bg);
+    return {
+        sourceBox: nodeVisualBox(edge.from, sourceSlot, entries[edge.from]),
+        targetBox: nodeVisualBox(edge.to, targetSlot, entries[edge.to]),
+    };
+}
 
-        const lbl = svgEl('text');
-        lbl.classList.add('edge-label-text');
-        lbl.setAttribute('x', String(mx));
-        lbl.setAttribute('y', String(my + 1));
-        lbl.setAttribute('text-anchor', 'middle');
-        lbl.setAttribute('dominant-baseline', 'middle');
-        lbl.setAttribute('font-size', '10');
-        lbl.setAttribute('fill', color);
-        lbl.setAttribute('font-family', 'system-ui, sans-serif');
-        lbl.setAttribute('font-weight', '700');
-        lbl.setAttribute('opacity', '0.9');
-        lbl.textContent = labelText;
-        g.appendChild(lbl);
+function getEdgeAnchors(edge, sourceBox, targetBox) {
+    const sourceCenter = nodeCenter(sourceBox);
+    const targetCenter = nodeCenter(targetBox);
 
-        edgesSvg.appendChild(g);
+    return {
+        sourceAnchor: edgeAnchor(
+            sourceBox,
+            targetCenter,
+            !expandedNodes.has(edge.from)
+        ),
+        targetAnchor: edgeAnchor(
+            targetBox,
+            sourceCenter,
+            !expandedNodes.has(edge.to)
+        ),
+    };
+}
+
+function getBendDirection(edge) {
+    return stableHash(edgeKey(edge)) % 2 === 0 ? 1 : -1;
+}
+
+function calculateEdgeGeometry(edge, positions, entries) {
+    const { sourceBox, targetBox } = getEdgeBoxes(edge, positions, entries);
+    const { sourceAnchor, targetAnchor } = getEdgeAnchors(edge, sourceBox, targetBox);
+
+    const sx = sourceAnchor.x;
+    const sy = sourceAnchor.y;
+    const tx = targetAnchor.x;
+    const ty = targetAnchor.y;
+
+    const dx = tx - sx;
+    const dy = ty - sy;
+    const span = Math.hypot(dx, dy) || 1;
+
+    const normalX = -dy / span;
+    const normalY = dx / span;
+
+    const bend = getBendDirection(edge) * Math.min(
+        EDGE_MAX_BEND,
+        Math.max(EDGE_MIN_BEND, span * EDGE_BEND_FACTOR)
+    );
+
+    const cx = (sx + tx) / 2 + normalX * bend;
+    const cy = (sy + ty) / 2 + normalY * bend;
+
+    return {
+        sx,
+        sy,
+        tx,
+        ty,
+        cx,
+        cy,
+        path: `M ${sx} ${sy} Q ${cx} ${cy} ${tx} ${ty}`,
+        labelX: 0.25 * sx + 0.5 * cx + 0.25 * tx,
+        labelY: 0.25 * sy + 0.5 * cy + 0.25 * ty,
+    };
+}
+
+// ── Edge Element Builders ──────────────────────────────────────────────
+
+function createEdgeGroup(edge) {
+    const group = svgEl('g');
+
+    group.classList.add('edge-group');
+    group.dataset.from = edge.from;
+    group.dataset.to = edge.to;
+    group.dataset.relation = edge.relation || 'related_to';
+
+    return group;
+}
+
+function createEdgePath(edge, geometry, color) {
+    const path = svgEl('path');
+
+    setSvgAttrs(path, {
+        d: geometry.path,
+        fill: 'none',
+        stroke: color,
+        'stroke-width': getEdgeStrokeWidth(edge),
+        'stroke-opacity': 0.6,
+        'marker-end': `url(#${getMarkerId(edge.relation || 'related_to')})`,
+    });
+
+    return path;
+}
+
+function getEdgeLabelWidth(labelText) {
+    return Math.max(
+        EDGE_LABEL_MIN_WIDTH,
+        labelText.length * EDGE_LABEL_CHAR_WIDTH + EDGE_LABEL_HORIZONTAL_PADDING
+    );
+}
+
+function createEdgeLabelBackground(x, y, width) {
+    const rect = svgEl('rect');
+
+    rect.classList.add('edge-label-bg');
+
+    setSvgAttrs(rect, {
+        x: x - width / 2,
+        y: y - 10,
+        width,
+        height: EDGE_LABEL_HEIGHT,
+        rx: EDGE_LABEL_RADIUS,
+        fill: '#05050e',
+        opacity: 0.94,
+    });
+
+    return rect;
+}
+
+function createEdgeLabelText(x, y, labelText, color) {
+    const text = svgEl('text');
+
+    text.classList.add('edge-label-text');
+
+    setSvgAttrs(text, {
+        x,
+        y: y + 1,
+        'text-anchor': 'middle',
+        'dominant-baseline': 'middle',
+        'font-size': 10,
+        fill: color,
+        'font-family': 'system-ui, sans-serif',
+        'font-weight': 700,
+        opacity: 0.9,
+    });
+
+    text.textContent = labelText;
+
+    return text;
+}
+
+function appendEdgeLabel(group, edge, geometry, color) {
+    const labelText = getEdgeLabel(edge);
+    const labelWidth = getEdgeLabelWidth(labelText);
+
+    group.appendChild(
+        createEdgeLabelBackground(geometry.labelX, geometry.labelY, labelWidth)
+    );
+
+    group.appendChild(
+        createEdgeLabelText(geometry.labelX, geometry.labelY, labelText, color)
+    );
+}
+
+function createEdgeElement(edge, positions, entries) {
+    const color = getRelationColor(edge.relation);
+    const geometry = calculateEdgeGeometry(edge, positions, entries);
+    const group = createEdgeGroup(edge);
+
+    group.appendChild(createEdgePath(edge, geometry, color));
+    appendEdgeLabel(group, edge, geometry, color);
+
+    return group;
+}
+
+// ── Public Renderer ────────────────────────────────────────────────────
+
+function renderEdges(edges, positions, entries) {
+    clearEdgesSvg();
+    renderArrowMarkers();
+
+    for (const edge of edges || []) {
+        if (!isRenderableEdge(edge, positions, entries)) continue;
+
+        edgesSvg.appendChild(
+            createEdgeElement(edge, positions, entries)
+        );
     }
 }

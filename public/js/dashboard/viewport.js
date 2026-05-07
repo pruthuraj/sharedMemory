@@ -1,120 +1,276 @@
 'use strict';
 
-// ── Pan / zoom ─────────────────────────────────────────────────────────
+// ── Pan / Zoom Constants ───────────────────────────────────────────────
+
+const VIEWPORT_GRID_SIZE = 32;
+const FIT_VIEW_PADDING = 60;
+const FIT_VIEW_MAX_SCALE = 1.2;
+
+// ── Transform Helpers ─────────────────────────────────────────────────
+
 function applyTransform() {
-    scene.style.transform = `translate(${panX}px,${panY}px) scale(${scale})`;
-    viewport.style.backgroundSize = `${32 * scale}px ${32 * scale}px`;
+    if (!scene || !viewport) return;
+
+    scene.style.transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
+
+    viewport.style.backgroundSize = `${VIEWPORT_GRID_SIZE * scale}px ${VIEWPORT_GRID_SIZE * scale}px`;
     viewport.style.backgroundPosition = `${panX}px ${panY}px`;
+}
+
+function getViewportCenter() {
+    return {
+        x: viewport.clientWidth / 2,
+        y: viewport.clientHeight / 2,
+    };
 }
 
 function zoomAt(viewportX, viewportY, nextScale) {
     const newScale = clampScale(nextScale);
-    const sx = (viewportX - panX) / scale;
-    const sy = (viewportY - panY) / scale;
+
+    const sceneX = (viewportX - panX) / scale;
+    const sceneY = (viewportY - panY) / scale;
+
     scale = newScale;
-    panX = viewportX - sx * scale;
-    panY = viewportY - sy * scale;
+
+    panX = viewportX - sceneX * scale;
+    panY = viewportY - sceneY * scale;
+
     applyTransform();
 }
 
 function zoomAtCenter(nextScale) {
-    zoomAt(viewport.clientWidth / 2, viewport.clientHeight / 2, nextScale);
+    const center = getViewportCenter();
+
+    zoomAt(center.x, center.y, nextScale);
 }
 
-function beginNodeDrag(e, key, nodeEl) {
-    if (e.button !== 0 || !nodePositions[key]) return;
-    e.stopPropagation();
+// ── Node Drag Helpers ─────────────────────────────────────────────────
 
-    const pos = nodePositions[key];
+function canStartNodeDrag(event, key) {
+    return Boolean(
+        event.button === 0 &&
+        key &&
+        nodePositions?.[key]
+    );
+}
+
+function beginNodeDrag(event, key, nodeEl) {
+    if (!canStartNodeDrag(event, key)) return;
+
+    event.stopPropagation();
+
+    const position = nodePositions[key];
+
     nodeDrag = {
         key,
         nodeEl,
-        pointerId: e.pointerId,
-        startClientX: e.clientX,
-        startClientY: e.clientY,
-        startX: pos.x,
-        startY: pos.y,
+        pointerId: event.pointerId,
+        startClientX: event.clientX,
+        startClientY: event.clientY,
+        startX: position.x,
+        startY: position.y,
         moved: false,
     };
-    nodeEl.setPointerCapture(e.pointerId);
+
+    try {
+        nodeEl.setPointerCapture(event.pointerId);
+    } catch {
+        // Pointer capture can fail if the pointer is already released.
+    }
 }
 
-function moveDraggedNode(e) {
+function hasDraggedPastThreshold(clientDx, clientDy) {
+    return Math.hypot(clientDx, clientDy) >= DRAG_THRESHOLD_PX;
+}
+
+function updateDraggedNodePosition(clientDx, clientDy) {
+    const position = nodePositions[nodeDrag.key];
+
+    if (!position) return;
+
+    position.x = nodeDrag.startX + clientDx / scale;
+    position.y = nodeDrag.startY + clientDy / scale;
+}
+
+function moveDraggedNode(event) {
     if (!nodeDrag) return;
 
-    const clientDx = e.clientX - nodeDrag.startClientX;
-    const clientDy = e.clientY - nodeDrag.startClientY;
-    const movedEnough = Math.hypot(clientDx, clientDy) >= DRAG_THRESHOLD_PX;
-    if (!nodeDrag.moved && !movedEnough) return;
+    const clientDx = event.clientX - nodeDrag.startClientX;
+    const clientDy = event.clientY - nodeDrag.startClientY;
+
+    if (!nodeDrag.moved && !hasDraggedPastThreshold(clientDx, clientDy)) {
+        return;
+    }
 
     nodeDrag.moved = true;
     nodeDrag.nodeEl.classList.add('dragging');
-    const pos = nodePositions[nodeDrag.key];
-    pos.x = nodeDrag.startX + clientDx / scale;
-    pos.y = nodeDrag.startY + clientDy / scale;
+
+    updateDraggedNodePosition(clientDx, clientDy);
     applyNodePlacement(nodeDrag.nodeEl, nodeDrag.key);
     rerenderEdgesForCurrentPositions();
-    e.preventDefault();
+
+    event.preventDefault();
 }
 
-function endNodeDrag(e) {
+function releaseNodePointerCapture(event) {
+    if (!nodeDrag?.nodeEl) return;
+
+    try {
+        nodeDrag.nodeEl.releasePointerCapture(nodeDrag.pointerId);
+    } catch {
+        // Ignore release errors.
+    }
+}
+
+function endNodeDrag(event) {
     if (!nodeDrag) return false;
 
     const wasMoved = nodeDrag.moved;
-    try {
-        nodeDrag.nodeEl.releasePointerCapture(nodeDrag.pointerId);
-    } catch { }
-    nodeDrag.nodeEl.classList.remove('dragging');
-    if (wasMoved) suppressClickKey = nodeDrag.key;
-    nodeDrag = null;
+    const draggedKey = nodeDrag.key;
+    const draggedNodeEl = nodeDrag.nodeEl;
+
+    releaseNodePointerCapture(event);
+
+    if (draggedNodeEl) {
+        draggedNodeEl.classList.remove('dragging');
+    }
 
     if (wasMoved) {
-        e.preventDefault();
-        e.stopPropagation();
+        suppressClickKey = draggedKey;
     }
+
+    nodeDrag = null;
+
+    if (wasMoved && event) {
+        event.preventDefault();
+        event.stopPropagation();
+    }
+
     return wasMoved;
 }
 
-function fitView(positions) {
-    const keys = Object.keys(positions);
-    if (!keys.length) return;
-    const vw = viewport.clientWidth;
-    const vh = viewport.clientHeight;
+// ── Fit View Helpers ──────────────────────────────────────────────────
 
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const [key, p] of Object.entries(positions)) {
-        const box = nodeVisualBox(key, p);
-        minX = Math.min(minX, box.x); minY = Math.min(minY, box.y);
-        maxX = Math.max(maxX, box.x + box.w); maxY = Math.max(maxY, box.y + box.h);
+function getPositionKeys(positions) {
+    return Object.keys(positions || {});
+}
+
+function getBoundsForPositions(positions) {
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+
+    for (const [key, position] of Object.entries(positions || {})) {
+        if (!position) continue;
+
+        const box = nodeVisualBox(key, position);
+
+        minX = Math.min(minX, box.x);
+        minY = Math.min(minY, box.y);
+        maxX = Math.max(maxX, box.x + box.w);
+        maxY = Math.max(maxY, box.y + box.h);
     }
 
-    const pad = 60;
-    scale = Math.max(ZOOM_MIN, Math.min(1.2,
-        Math.min((vw - pad * 2) / (maxX - minX), (vh - pad * 2) / (maxY - minY))
-    ));
-    panX = (vw - (maxX - minX) * scale) / 2 - minX * scale;
-    panY = (vh - (maxY - minY) * scale) / 2 - minY * scale;
+    if (!Number.isFinite(minX) || !Number.isFinite(minY)) {
+        return null;
+    }
+
+    return {
+        minX,
+        minY,
+        maxX,
+        maxY,
+        width: Math.max(1, maxX - minX),
+        height: Math.max(1, maxY - minY),
+    };
+}
+
+function calculateFitScale(bounds) {
+    const viewportWidth = viewport.clientWidth;
+    const viewportHeight = viewport.clientHeight;
+
+    const availableWidth = Math.max(1, viewportWidth - FIT_VIEW_PADDING * 2);
+    const availableHeight = Math.max(1, viewportHeight - FIT_VIEW_PADDING * 2);
+
+    return Math.max(
+        ZOOM_MIN,
+        Math.min(
+            FIT_VIEW_MAX_SCALE,
+            availableWidth / bounds.width,
+            availableHeight / bounds.height
+        )
+    );
+}
+
+function applyFitTransform(bounds, nextScale) {
+    const viewportWidth = viewport.clientWidth;
+    const viewportHeight = viewport.clientHeight;
+
+    scale = nextScale;
+
+    panX = (viewportWidth - bounds.width * scale) / 2 - bounds.minX * scale;
+    panY = (viewportHeight - bounds.height * scale) / 2 - bounds.minY * scale;
+
     applyTransform();
 }
 
+function fitView(positions) {
+    const keys = getPositionKeys(positions);
+
+    if (!keys.length) return;
+
+    const bounds = getBoundsForPositions(positions);
+
+    if (!bounds) return;
+
+    const nextScale = calculateFitScale(bounds);
+
+    applyFitTransform(bounds, nextScale);
+}
+
+// ── Focused Fit ───────────────────────────────────────────────────────
+
+function getFocusedRootKey() {
+    return focusedKey || selectedKey || lastFocusedKey;
+}
+
+function getFocusedPositions(rootKey) {
+    const distances = focusDistances(rootKey);
+    const focusedPositions = {};
+
+    for (const key of distances.keys()) {
+        if (nodePositions[key]) {
+            focusedPositions[key] = nodePositions[key];
+        }
+    }
+
+    return focusedPositions;
+}
+
 function fitFocusedNeighborhood() {
-    const root = focusedKey || selectedKey || lastFocusedKey;
-    if (!root || !nodePositions[root]) {
+    const rootKey = getFocusedRootKey();
+
+    if (!rootKey || !nodePositions[rootKey]) {
         fitView(nodePositions);
         return;
     }
 
-    const distances = focusDistances(root);
-    const focusedPositions = {};
-    for (const key of distances.keys()) {
-        if (nodePositions[key]) focusedPositions[key] = nodePositions[key];
-    }
-    fitView(Object.keys(focusedPositions).length ? focusedPositions : nodePositions);
+    const focusedPositions = getFocusedPositions(rootKey);
+    const hasFocusedPositions = Object.keys(focusedPositions).length > 0;
+
+    fitView(hasFocusedPositions ? focusedPositions : nodePositions);
 }
 
+// ── Settings Panel Visibility ─────────────────────────────────────────
+
 function toggleSettingsPanel(force) {
+    if (!settingsPanel || !settingsBtn) return;
+
     const nextVisible = force ?? !settingsPanel.classList.contains('visible');
+
     settingsPanel.classList.toggle('visible', nextVisible);
     settingsPanel.setAttribute('aria-hidden', nextVisible ? 'false' : 'true');
+
     settingsBtn.setAttribute('aria-expanded', nextVisible ? 'true' : 'false');
 }
