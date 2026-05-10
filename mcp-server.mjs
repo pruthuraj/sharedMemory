@@ -160,6 +160,39 @@ function registerSharedMemoryTools(server, handlers) {
         },
         async (input) => mcpToolResult(await handlers.memory_import(input)),
     );
+
+    server.registerTool(
+        'memory_audit',
+        {
+            title: 'Audit Memory',
+            description: 'Return zombie, orphan, duplicate, stale, and expired entry lists plus summary counts.',
+            inputSchema: z.object({ staleMs: looseInput }),
+            outputSchema,
+        },
+        async (input) => mcpToolResult(await handlers.memory_audit(input)),
+    );
+
+    server.registerTool(
+        'memory_bulk_set',
+        {
+            title: 'Bulk Set Memory',
+            description: 'Store multiple memory entries in one call with per-item failure isolation.',
+            inputSchema: z.object({ entries: looseInput }),
+            outputSchema,
+        },
+        async (input) => mcpToolResult(await handlers.memory_bulk_set(input)),
+    );
+
+    server.registerTool(
+        'memory_bulk_relate',
+        {
+            title: 'Bulk Relate Memory',
+            description: 'Create or update multiple graph edges in one call with per-item failure isolation.',
+            inputSchema: z.object({ relations: looseInput }),
+            outputSchema,
+        },
+        async (input) => mcpToolResult(await handlers.memory_bulk_relate(input)),
+    );
 }
 
 export function createSharedMemoryMcpServer(options = {}) {

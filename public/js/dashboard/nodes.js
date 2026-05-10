@@ -85,7 +85,7 @@ function toggleNodeAndSelection(key, nodeEl, fallbackEntry = null) {
 
 // ── Radial Focus Layout ────────────────────────────────────────────────
 
-function getLargestVisualWidth(keys) {
+function getLargestVisualDimension(keys) {
     return keys.reduce((largest, key) => {
         const position = nodePositions[key];
 
@@ -93,13 +93,13 @@ function getLargestVisualWidth(keys) {
 
         const box = nodeVisualBox(key, position);
 
-        return Math.max(largest, box.w);
+        return Math.max(largest, box.w, box.h);
     }, 0);
 }
 
 function radialRingRadius(distance, keys) {
-    const maxSize = getLargestVisualWidth(keys);
-    const minSpacing = Math.max(maxSize + 64, 150);
+    const maxSize = getLargestVisualDimension(keys);
+    const minSpacing = Math.max(maxSize + 96, 180);
     const circumferenceRadius = (keys.length * minSpacing) / (Math.PI * 2);
     const distanceRadius = RADIAL_RING_GAP * distance;
     const extraGap = RADIAL_RING_GAP * (distance - 1) * 0.35;
@@ -179,6 +179,10 @@ function applyRadialFocusLayout(rootKey, options = {}) {
 
         placeFocusRing(keys, distance, centerX, centerY);
     }
+
+    nodePositions = resolveNodeCollisions(nodePositions, currentEntries, {
+        pinnedKey: rootKey,
+    });
 
     applyNodePlacementsFromPositions();
     rerenderEdgesForCurrentPositions();

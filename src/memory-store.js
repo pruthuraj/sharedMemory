@@ -1181,6 +1181,70 @@ function createMemoryStore(options = {}) {
         return { results, total: matched.length };
     }
 
+    // Returns zombie/orphan/duplicate/stale/expired lists plus summary counts.
+    function audit(options = {}) {
+        const staleMs = (typeof options.staleMs === 'number' && Number.isInteger(options.staleMs) && options.staleMs > 0)
+            ? options.staleMs
+            : 7 * 24 * 60 * 60 * 1000;
+        const t = now();
+        const staleThreshold = t - staleMs;
+
+        const allEntryRows = stmts.allEntries.all();
+        const allTagRows = stmts.allTags.all();
+        const allEdgeRows = stmts.allEdges.all();
+
+        const tagsByKey = {};
+        for (const row of allTagRows) {
+            if (!tagsByKey[row.key]) tagsByKey[row.key] = [];
+            tagsByKey[row.key].push(row.tag);
+        }
+
+        const zombies = [];
+        for (const row of allEntryRows) {
+            const tags = tagsByKey[row.key] || [];
+            if (row.importance === 0 || tags.length === 0 || !row.summary || row.summary.trim() === '') {
+                zombies.push(row.key);
+            }
+        }
+
+        const keysWithEdges = new Set();
+        for (const row of allEdgeRows) {
+            keysWithEdges.add(row.from_key);
+            keysWithEdges.add(row.to_key);
+        }
+        const orphans = allEntryRows.filter((row) => !keysWithEdges.has(row.key)).map((row) => row.key);
+
+        const summaryGroups = {};
+        for (const row of allEntryRows) {
+            const s = row.summary ? row.summary.trim().toLowerCase() : '';
+            if (!s) continue;
+            if (!summaryGroups[s]) summaryGroups[s] = [];
+            summaryGroups[s].push(row.key);
+        }
+        const duplicates = Object.values(summaryGroups).filter((keys) => keys.length > 1);
+
+        const stale = allEntryRows.filter((row) => row.updated_at < staleThreshold).map((row) => row.key);
+        const expired = allEntryRows
+            .filter((row) => row.expires_at !== null && row.expires_at !== undefined && row.expires_at <= t)
+            .map((row) => row.key);
+
+        return {
+            zombies,
+            orphans,
+            duplicates,
+            stale,
+            expired,
+            counts: {
+                total: allEntryRows.length,
+                zombieCount: zombies.length,
+                orphanCount: orphans.length,
+                duplicateGroupCount: duplicates.length,
+                staleCount: stale.length,
+                expiredCount: expired.length,
+            },
+        };
+    }
+
     return {
         // metadata fields: summary, tags, importance (0-10), ttlMs (ms from now), expiresAt (absolute ms).
         set(key, value, updatedBy, metadata = {}) {
@@ -1367,6 +1431,53 @@ function createMemoryStore(options = {}) {
         importState(state) {
             doImport(state);
         },
+
+        // Applies many set calls in one round-trip with per-item failure isolation.
+        bulkSet(entries, updatedBy) {
+            if (!Array.isArray(entries)) return [];
+            return entries.map((item) => {
+                if (!item || typeof item !== 'object' || Array.isArray(item)) {
+                    return { ok: false, error: 'invalid-item' };
+                }
+                const metadata = {};
+                if (item.summary !== undefined) metadata.summary = item.summary;
+                if (item.tags !== undefined) metadata.tags = item.tags;
+                if (item.importance !== undefined) metadata.importance = item.importance;
+                if (item.ttlMs !== undefined) metadata.ttlMs = item.ttlMs;
+                if (item.expiresAt !== undefined) metadata.expiresAt = item.expiresAt;
+                if (hasOwn(item, 'ifRevision')) metadata.ifRevision = item.ifRevision;
+
+                try {
+                    const result = this.set(item.key, item.value, updatedBy, metadata);
+                    if (result && result.ok === false) {
+                        return { key: item.key, ok: false, error: result.error, currentRevision: result.currentRevision };
+                    }
+                    return { key: item.key, ok: true, revision: result.revision };
+                } catch (error) {
+                    return { key: item.key, ok: false, error: error.message };
+                }
+            });
+        },
+
+        // Applies many relate calls in one round-trip with per-item failure isolation.
+        bulkRelate(relations, updatedBy) {
+            if (!Array.isArray(relations)) return [];
+            return relations.map((item) => {
+                if (!item || typeof item !== 'object' || Array.isArray(item)) {
+                    return { ok: false, error: 'invalid-item' };
+                }
+                const result = this.relate(item.from, item.to, item.relation, updatedBy, {
+                    reason: item.reason,
+                    weight: item.weight,
+                });
+                if (!result.ok) {
+                    return { from: item.from, to: item.to, relation: item.relation, ok: false, error: result.error };
+                }
+                return { from: item.from, to: item.to, relation: item.relation, ok: true, action: result.action, edge: result.edge };
+            });
+        },
+
+        audit,
 
         // Async flush; returns Promise<boolean> (true if acknowledged). Coalesces concurrent calls.
         flush,

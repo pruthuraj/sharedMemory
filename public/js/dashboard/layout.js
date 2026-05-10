@@ -26,6 +26,11 @@ const FORCE_DAMPING = 0.82;
 
 const SCENE_PADDING = 80;
 
+const COLLISION_PADDING = 32;
+const COLLISION_HOVER_MARGIN = 18;
+const COLLISION_MAX_ITERATIONS = 80;
+const COLLISION_EPSILON = 0.5;
+
 // ── Layout Performance Optimization ───────────────────────────────────
 
 const FORCE_LAYOUT_MAX_NODES = 100;
@@ -63,6 +68,8 @@ function buildLayoutCacheKey(entries, edges) {
 
     return JSON.stringify({
         layoutMode: getLayoutMode(),
+        nodeScale: Number(graphSettings?.nodeScale) || 1,
+        expandedKeys: Array.from(expandedNodes || []).sort().join('|'),
         entrySignature,
         edgeSignature,
     });
@@ -76,6 +83,137 @@ function clonePositions(positions = {}) {
     }
 
     return clone;
+}
+
+function expandedBox(box, padding) {
+    return {
+        x: box.x - padding,
+        y: box.y - padding,
+        w: box.w + padding * 2,
+        h: box.h + padding * 2,
+    };
+}
+
+function boxesOverlap(a, b) {
+    return (
+        a.x < b.x + b.w &&
+        a.x + a.w > b.x &&
+        a.y < b.y + b.h &&
+        a.y + a.h > b.y
+    );
+}
+
+function layoutBoxForKey(key, positions, entries, options = {}) {
+    const position = positions?.[key];
+    const entry = entries?.[key] || currentEntries?.[key];
+
+    if (!position || !entry) return null;
+
+    const padding = options.padding ?? (COLLISION_PADDING + COLLISION_HOVER_MARGIN);
+
+    return expandedBox(nodeVisualBox(key, position, entry), padding);
+}
+
+function moveLayoutSlot(key, positions, dx, dy) {
+    if (!positions?.[key]) return;
+
+    positions[key].x += dx;
+    positions[key].y += dy;
+}
+
+function getSeparationVector(a, b) {
+    const aCenter = nodeCenter(a);
+    const bCenter = nodeCenter(b);
+
+    const overlapX = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+    const overlapY = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+
+    if (overlapX <= 0 || overlapY <= 0) {
+        return { dx: 0, dy: 0 };
+    }
+
+    if (overlapX < overlapY) {
+        const direction = aCenter.x <= bCenter.x ? -1 : 1;
+
+        return {
+            dx: direction * (overlapX + COLLISION_EPSILON),
+            dy: 0,
+        };
+    }
+
+    const direction = aCenter.y <= bCenter.y ? -1 : 1;
+
+    return {
+        dx: 0,
+        dy: direction * (overlapY + COLLISION_EPSILON),
+    };
+}
+
+function sortedPositionKeys(positions, entries) {
+    return Object.keys(positions || {})
+        .filter((key) => entries?.[key])
+        .sort();
+}
+
+function separateNodePair(aKey, bKey, positions, entries, pinnedKey) {
+    const aBox = layoutBoxForKey(aKey, positions, entries);
+    const bBox = layoutBoxForKey(bKey, positions, entries);
+
+    if (!aBox || !bBox || !boxesOverlap(aBox, bBox)) {
+        return false;
+    }
+
+    const { dx, dy } = getSeparationVector(aBox, bBox);
+
+    if (dx === 0 && dy === 0) return false;
+
+    const aPinned = aKey === pinnedKey;
+    const bPinned = bKey === pinnedKey;
+
+    if (aPinned && bPinned) return false;
+
+    if (aPinned) {
+        moveLayoutSlot(bKey, positions, -dx, -dy);
+        return true;
+    }
+
+    if (bPinned) {
+        moveLayoutSlot(aKey, positions, dx, dy);
+        return true;
+    }
+
+    moveLayoutSlot(aKey, positions, dx / 2, dy / 2);
+    moveLayoutSlot(bKey, positions, -dx / 2, -dy / 2);
+
+    return true;
+}
+
+function resolveNodeCollisions(positions, entries, options = {}) {
+    const resolved = clonePositions(positions);
+    const keys = sortedPositionKeys(resolved, entries);
+    const pinnedKey = options.pinnedKey || null;
+
+    if (keys.length < 2) return resolved;
+
+    for (let iteration = 0; iteration < COLLISION_MAX_ITERATIONS; iteration += 1) {
+        let changed = false;
+
+        for (let i = 0; i < keys.length; i += 1) {
+            for (let j = i + 1; j < keys.length; j += 1) {
+                changed = separateNodePair(
+                    keys[i],
+                    keys[j],
+                    resolved,
+                    entries,
+                    pinnedKey
+                ) || changed;
+            }
+        }
+
+        if (!changed) break;
+    }
+
+    return resolved;
 }
 
 function computeLayout(entries, edges) {
@@ -109,6 +247,8 @@ function computeLayout(entries, edges) {
             result = computeRadialLayout(entries, edges);
             break;
     }
+
+    result = resolveNodeCollisions(result, entries);
 
     cachedLayoutKey = cacheKey;
     cachedPositions = clonePositions(result);

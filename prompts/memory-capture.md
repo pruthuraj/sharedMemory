@@ -72,6 +72,18 @@ memory_set(
 )
 ```
 
+**Files affected rule:** Whenever a memory entry records a code change (decision, fix, refactor, implementation), include a `filesChanged` array in `value` listing every file that was modified. This lets future sessions know exactly where to look without re-grepping.
+
+```json
+{
+  "summary": "what was done and why",
+  "filesChanged": ["src/foo.js", "test/foo.test.js"],
+  "...": "other fields"
+}
+```
+
+Only include files that were substantively changed (not just read). Omit `filesChanged` entirely for non-code memories (decisions, preferences, references).
+
 **Importance scale:**
 
 - `9–10` — core project identity, fundamental architecture
@@ -103,6 +115,8 @@ A new entry should typically have **2–4 relations**: at minimum link it to its
 ### Step 5 — Update the session log
 
 At the end of every session (or every ~10 substantive turns), write/update a `session.<YYYY-MM-DD>` entry summarizing what was discussed and what new memories were created. Link it via `derived_from` to all new entries from that session.
+
+If any code was changed during the session, include a top-level `filesChanged` array in the session entry value listing every modified file across all changes made in that session.
 
 ---
 

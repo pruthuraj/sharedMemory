@@ -241,6 +241,14 @@ test('register, set, get, list, and status remain compatible', async () => {
                 lastImportedAt: null,
                 lastImportStats: null,
             },
+            audit: {
+                total: 1,
+                zombieCount: 1,
+                orphanCount: 1,
+                duplicateGroupCount: 0,
+                staleCount: 0,
+                expiredCount: 0,
+            },
         });
     } finally {
         await appServer.close();
@@ -439,10 +447,10 @@ test('auth disabled keeps existing flow open and accepts auth as no-op', async (
         await client.waitFor((message) => message.type === 'welcome');
 
         client.send({ type: 'auth', requestId: 'auth-disabled' });
-        assert.deepEqual(await client.waitFor((message) => message.type === 'authenticated'), {
-            type: 'authenticated',
-            requestId: 'auth-disabled',
-        });
+        const authDisabledMsg = await client.waitFor((message) => message.type === 'authenticated');
+        assert.equal(authDisabledMsg.type, 'authenticated');
+        assert.equal(authDisabledMsg.requestId, 'auth-disabled');
+        assert.equal(typeof authDisabledMsg.agentId, 'string');
 
         client.send({ type: 'register', agentId: 'agentA' });
         assert.deepEqual(await client.waitFor((message) => message.type === 'registered'), {
@@ -469,10 +477,10 @@ test('auth enabled blocks protected commands until valid auth unlocks the socket
         });
 
         client.send({ type: 'auth', token: 'secret', requestId: 'auth-ok' });
-        assert.deepEqual(await client.waitFor((message) => message.type === 'authenticated'), {
-            type: 'authenticated',
-            requestId: 'auth-ok',
-        });
+        const authOkMsg = await client.waitFor((message) => message.type === 'authenticated');
+        assert.equal(authOkMsg.type, 'authenticated');
+        assert.equal(authOkMsg.requestId, 'auth-ok');
+        assert.equal(typeof authOkMsg.agentId, 'string');
 
         client.send({ type: 'set', key: 'allowed', value: true, requestId: 'allowed-1' });
         assert.deepEqual(await client.waitFor((message) => message.type === 'ok'), {
@@ -516,10 +524,10 @@ test('invalid or missing auth token returns unauthorized but allows later recove
         });
 
         client.send({ type: 'auth', token: 'secret', requestId: 'recovered' });
-        assert.deepEqual(await client.waitFor((message) => message.type === 'authenticated'), {
-            type: 'authenticated',
-            requestId: 'recovered',
-        });
+        const authedMsg = await client.waitFor((message) => message.type === 'authenticated');
+        assert.equal(authedMsg.type, 'authenticated');
+        assert.equal(authedMsg.requestId, 'recovered');
+        assert.equal(typeof authedMsg.agentId, 'string');
 
         client.send({ type: 'register', agentId: 'agentA', requestId: 'register-after-auth' });
         assert.deepEqual(await client.waitFor((message) => message.type === 'registered'), {
