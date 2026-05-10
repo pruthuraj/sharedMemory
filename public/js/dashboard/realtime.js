@@ -6,18 +6,35 @@ const RPC_TIMEOUT_MS = 10000;
 const GRAPH_RELOAD_DELAY_MS = 120;
 const NODE_UPDATE_ANIMATION_MS = 750;
 
+// ── Connection Resilience ──────────────────────────────────────────────
+
+const RECONNECT_INITIAL_DELAY_MS = 1000;
+const RECONNECT_MAX_DELAY_MS = 16000;
+const RECONNECT_MAX_ATTEMPTS = 10;
+const WELCOME_TIMEOUT_MS = 5000;
+
+let reconnectDelayMs = RECONNECT_INITIAL_DELAY_MS;
+let reconnectAttempts = 0;
+let reconnectTimer = null;
+let isReconnecting = false;
+let connectInFlight = false;
+
 function isWsOpen() {
     return ws && ws.readyState === WebSocket.OPEN;
+}
+
+function isSocketOpen(socket) {
+    return socket && socket.readyState === WebSocket.OPEN;
 }
 
 function setConnectionUiState(state) {
     const connected = state === 'connected';
     const connecting = state === 'connecting';
 
-    connectBtn.disabled = connecting;
-    refreshBtn.disabled = !connected;
-    importBtn.disabled = !connected;
-    exportBtn.disabled = !connected;
+    if (connectBtn) connectBtn.disabled = connecting;
+    if (refreshBtn) refreshBtn.disabled = !connected;
+    if (importBtn) importBtn.disabled = !connected;
+    if (exportBtn) exportBtn.disabled = !connected;
 }
 
 function safeJsonParse(raw) {
@@ -78,8 +95,12 @@ function drainQueue(type) {
     return msgQueue.splice(idx, 1)[0];
 }
 
-function closeCurrentSocket() {
+function closeCurrentSocket(options = {}) {
     if (!ws) return;
+
+    if (options.suppressReconnect) {
+        ws.__skipReconnect = true;
+    }
 
     try {
         ws.close();
@@ -88,6 +109,24 @@ function closeCurrentSocket() {
     }
 
     ws = null;
+}
+
+function clearPendingRequests() {
+    Object.keys(pending).forEach((key) => {
+        const resolve = pending[key];
+
+        if (typeof resolve === 'function') {
+            resolve({
+                type: 'error',
+                error: 'connection-closed',
+                requestId: key,
+            });
+        }
+    });
+
+    Object.keys(pending).forEach((key) => {
+        delete pending[key];
+    });
 }
 
 function subscribeToKey(key) {
@@ -328,13 +367,30 @@ function handleSocketMessage(event) {
 
 // ── Connection ─────────────────────────────────────────────────────────
 
-async function waitForSocketOpen() {
+async function waitForSocketOpen(socket) {
     return new Promise((resolve) => {
-        ws.onopen = () => resolve(true);
+        let settled = false;
 
-        ws.onerror = () => {
-            resolve(false);
+        const cleanup = () => {
+            socket.removeEventListener('open', handleOpen);
+            socket.removeEventListener('error', handleFailure);
+            socket.removeEventListener('close', handleFailure);
         };
+
+        const settle = (value) => {
+            if (settled) return;
+
+            settled = true;
+            cleanup();
+            resolve(value);
+        };
+
+        const handleOpen = () => settle(true);
+        const handleFailure = () => settle(false);
+
+        socket.addEventListener('open', handleOpen);
+        socket.addEventListener('error', handleFailure);
+        socket.addEventListener('close', handleFailure);
     });
 }
 
@@ -344,7 +400,20 @@ async function waitForWelcome() {
     if (queuedWelcome) return queuedWelcome;
 
     return new Promise((resolve) => {
-        pending.__welcome__ = resolve;
+        const timer = window.setTimeout(() => {
+            delete pending.__welcome__;
+
+            resolve({
+                type: 'error',
+                error: 'timeout',
+                requestId: '__welcome__',
+            });
+        }, WELCOME_TIMEOUT_MS);
+
+        pending.__welcome__ = (msg) => {
+            window.clearTimeout(timer);
+            resolve(msg);
+        };
     });
 }
 
@@ -360,47 +429,130 @@ async function authenticateIfNeeded(token) {
     return response.type !== 'error';
 }
 
-function handleSocketClose() {
+function handleSocketClose(event) {
+    const closedSocket = event?.currentTarget || null;
+
+    if (closedSocket && closedSocket !== ws) {
+        return;
+    }
+
     stopLiveRefresh();
     subscribedKeys.clear();
+    clearPendingRequests();
+    ws = null;
 
     setStatus('Disconnected', 'error');
     setConnectionUiState('disconnected');
+
+    if (closedSocket?.__skipReconnect) {
+        return;
+    }
+
+    // Attempt automatic reconnect unless we've exceeded max attempts.
+    if (reconnectAttempts < RECONNECT_MAX_ATTEMPTS) {
+        scheduleReconnect();
+    }
 }
 
-function handleSocketError() {
+function scheduleReconnect() {
+    if (reconnectTimer || isReconnecting || !tokenInput) return;
+
+    isReconnecting = true;
+
+    window.clearTimeout(reconnectTimer);
+
+    setStatus(`Reconnecting in ${Math.round(reconnectDelayMs / 1000)}s...`, 'warning');
+
+    reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null;
+        isReconnecting = false;
+        reconnectAttempts += 1;
+
+        setStatus(`Reconnect attempt ${reconnectAttempts}/${RECONNECT_MAX_ATTEMPTS}...`);
+
+        connect({ reconnect: true });
+
+        // Exponential backoff with cap.
+        reconnectDelayMs = Math.min(
+            reconnectDelayMs * 1.5,
+            RECONNECT_MAX_DELAY_MS
+        );
+    }, reconnectDelayMs);
+}
+
+function resetReconnectState() {
+    window.clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+    reconnectAttempts = 0;
+    reconnectDelayMs = RECONNECT_INITIAL_DELAY_MS;
+    isReconnecting = false;
+}
+
+function handleSocketError(event) {
+    if (event?.currentTarget && event.currentTarget !== ws) return;
+
     setStatus('Connection failed', 'error');
     setConnectionUiState('disconnected');
 }
 
-async function connect() {
-    const token = tokenInput.value.trim();
+function createDashboardSocket() {
+    const socket = new WebSocket(`ws://${location.host}/`);
+
+    ws = socket;
+
+    socket.onmessage = handleSocketMessage;
+    socket.onerror = handleSocketError;
+    socket.onclose = handleSocketClose;
+
+    return socket;
+}
+
+async function connect(options = {}) {
+    if (connectInFlight && options.reconnect) return;
+
+    connectInFlight = true;
+
+    if (!options.reconnect) {
+        resetReconnectState();
+    }
+
+    const token = tokenInput ? tokenInput.value.trim() : '';
 
     setConnectionUiState('connecting');
     setStatus('Connecting...');
 
-    closeCurrentSocket();
+    closeCurrentSocket({ suppressReconnect: true });
+    clearPendingRequests();
     msgQueue.length = 0;
 
-    ws = new WebSocket(`ws://${location.host}/`);
+    const socket = createDashboardSocket();
 
-    ws.onmessage = handleSocketMessage;
-    ws.onerror = handleSocketError;
-    ws.onclose = handleSocketClose;
+    const opened = await waitForSocketOpen(socket);
 
-    const opened = await waitForSocketOpen();
+    if (ws !== socket) {
+        connectInFlight = false;
+        return;
+    }
 
-    if (!opened || !isWsOpen()) {
+    if (!opened || !isSocketOpen(socket)) {
         setConnectionUiState('disconnected');
+        connectInFlight = false;
+        scheduleReconnect();
         return;
     }
 
     const welcome = await waitForWelcome();
 
+    if (ws !== socket) {
+        connectInFlight = false;
+        return;
+    }
+
     if (!welcome || welcome.type !== 'welcome') {
         setStatus('Bad server response', 'error');
         setConnectionUiState('disconnected');
-        closeCurrentSocket();
+        connectInFlight = false;
+        closeCurrentSocket({ suppressReconnect: true });
         return;
     }
 
@@ -409,11 +561,16 @@ async function connect() {
     if (!authenticated) {
         setStatus('Auth failed', 'error');
         setConnectionUiState('disconnected');
-        closeCurrentSocket();
+        connectInFlight = false;
+        closeCurrentSocket({ suppressReconnect: true });
         return;
     }
 
+    // Successful connection resets reconnect state.
+    resetReconnectState();
+
     setConnectionUiState('connected');
+    connectInFlight = false;
 
     await loadGraph();
 

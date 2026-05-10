@@ -285,4 +285,11 @@ function initAppBindings() {
     applyInitialGraphState();
 }
 
-initAppBindings();
+function startGraphApp() {
+    if (window.__memoryGraphAppInitialized) return;
+
+    window.__memoryGraphAppInitialized = true;
+    initAppBindings();
+}
+
+startGraphApp();

@@ -74,6 +74,27 @@ const FOCUS_SCALE = [
 // Schema-driven palette + relation-color presets live in window.SettingsSchema.
 // CSS-var application and relation-color resolution live in window.SettingsApply.
 
+function validateRequiredModules() {
+    const missing = [];
+
+    if (!window.Settings || typeof window.Settings.snapshot !== 'function') {
+        missing.push('window.Settings');
+    }
+
+    if (!window.SettingsApply || typeof window.SettingsApply.relationColors !== 'function') {
+        missing.push('window.SettingsApply');
+    }
+
+    if (missing.length > 0) {
+        console.error(
+            `Missing required modules: ${missing.join(', ')}. ` +
+            `Check that settings scripts are loaded before dashboard/state.js`
+        );
+    }
+
+    return missing.length === 0;
+}
+
 function getInitialGraphSettings() {
     if (!window.Settings || typeof window.Settings.snapshot !== 'function') {
         return {};
@@ -92,6 +113,8 @@ function getInitialRelationColors() {
 
     return window.SettingsApply.relationColors('aurora', {});
 }
+
+validateRequiredModules();
 
 let graphSettings = getInitialGraphSettings();
 let relationColors = getInitialRelationColors();

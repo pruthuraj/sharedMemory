@@ -26,26 +26,94 @@ const FORCE_DAMPING = 0.82;
 
 const SCENE_PADDING = 80;
 
+// ── Layout Performance Optimization ───────────────────────────────────
+
+const FORCE_LAYOUT_MAX_NODES = 100;
+const FORCE_LAYOUT_LARGE_GRAPH_NODES = 60;
+const FORCE_LAYOUT_MEDIUM_GRAPH_NODES = 35;
+const FORCE_LAYOUT_LARGE_ITERATIONS = 120;
+const FORCE_LAYOUT_MEDIUM_ITERATIONS = 180;
+
+let cachedLayoutKey = null;
+let cachedPositions = null;
+
 // ── Layout Selection ───────────────────────────────────────────────────
 
 function getLayoutMode() {
     return graphSettings?.layoutMode || DEFAULT_LAYOUT_MODE;
 }
 
+function buildLayoutCacheKey(entries, edges) {
+    const entrySignature = Object.keys(entries || {})
+        .sort()
+        .map((key) => {
+            const entry = entries[key] || {};
+            const tags = Array.isArray(entry.tags) ? entry.tags.length : 0;
+            const importance = Number(entry.importance) || 0;
+
+            return `${key}:${nodeHeight(entry)}:${importance}:${tags}`;
+        })
+        .join('|');
+
+    const edgeSignature = (edges || [])
+        .filter((edge) => isUsableEdge(edge, entries))
+        .map(getEdgeIdentity)
+        .sort()
+        .join('|');
+
+    return JSON.stringify({
+        layoutMode: getLayoutMode(),
+        entrySignature,
+        edgeSignature,
+    });
+}
+
+function clonePositions(positions = {}) {
+    const clone = {};
+
+    for (const [key, position] of Object.entries(positions)) {
+        clone[key] = { ...position };
+    }
+
+    return clone;
+}
+
 function computeLayout(entries, edges) {
     const mode = getLayoutMode();
+    const nodeCount = Object.keys(entries || {}).length;
 
-    switch (mode) {
+    // Check cache first
+    const cacheKey = buildLayoutCacheKey(entries, edges);
+    if (cacheKey === cachedLayoutKey && cachedPositions) {
+        return clonePositions(cachedPositions);
+    }
+
+    // Force layout can be O(n²); switch to radial if too many nodes
+    let effectiveMode = mode;
+    if (mode === 'force' && nodeCount > FORCE_LAYOUT_MAX_NODES) {
+        effectiveMode = 'radial';
+    }
+
+    let result;
+    switch (effectiveMode) {
         case 'force':
-            return computeForceLayout(entries, edges);
+            result = computeForceLayout(entries, edges);
+            break;
 
         case 'hierarchical':
-            return computeHierarchicalLayout(entries, edges);
+            result = computeHierarchicalLayout(entries, edges);
+            break;
 
         case 'radial':
         default:
-            return computeRadialLayout(entries, edges);
+            result = computeRadialLayout(entries, edges);
+            break;
     }
+
+    cachedLayoutKey = cacheKey;
+    cachedPositions = clonePositions(result);
+
+    return result;
 }
 
 // ── Shared Helpers ─────────────────────────────────────────────────────
@@ -337,6 +405,18 @@ function integrateForces(keys, positions, velocities, forces) {
     }
 }
 
+function forceIterationCount(nodeCount) {
+    if (nodeCount >= FORCE_LAYOUT_LARGE_GRAPH_NODES) {
+        return FORCE_LAYOUT_LARGE_ITERATIONS;
+    }
+
+    if (nodeCount >= FORCE_LAYOUT_MEDIUM_GRAPH_NODES) {
+        return FORCE_LAYOUT_MEDIUM_ITERATIONS;
+    }
+
+    return FORCE_ITERATIONS;
+}
+
 function computeForceLayout(entries, edges) {
     const keys = getEntryKeys(entries);
 
@@ -345,7 +425,9 @@ function computeForceLayout(entries, edges) {
     const { positions, velocities } = createInitialForceState(keys);
     const adjacency = buildAdjacencyList(edges, positions);
 
-    for (let iteration = 0; iteration < FORCE_ITERATIONS; iteration += 1) {
+    const iterations = forceIterationCount(keys.length);
+
+    for (let iteration = 0; iteration < iterations; iteration += 1) {
         const forces = createForceMap(keys);
 
         applyRepulsionForces(keys, positions, forces);
@@ -377,6 +459,7 @@ function setNodePresentation(key, nodeEl) {
     nodeEl.classList.toggle('expanded', isExpanded);
     nodeEl.classList.toggle('round', !isExpanded);
     nodeEl.setAttribute('aria-expanded', isExpanded ? 'true' : 'false');
+    nodeEl.setAttribute('aria-pressed', isExpanded ? 'true' : 'false');
 
     applyNodePlacement(nodeEl, key);
 }

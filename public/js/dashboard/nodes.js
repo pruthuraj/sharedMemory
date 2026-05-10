@@ -254,6 +254,8 @@ function setNodeBaseAttributes(nodeEl, key, isExpanded) {
     nodeEl.setAttribute('role', 'button');
     nodeEl.setAttribute('tabindex', '0');
     nodeEl.setAttribute('aria-expanded', isExpanded ? 'true' : 'false');
+    nodeEl.setAttribute('aria-pressed', isExpanded ? 'true' : 'false');
+    nodeEl.setAttribute('aria-selected', selectedKey === key ? 'true' : 'false');
     nodeEl.setAttribute('aria-label', `${key} memory node`);
 }
 
@@ -277,6 +279,20 @@ function handleNodeClick(event, key, nodeEl, entry) {
 }
 
 function handleNodeKeydown(event, key, nodeEl, entry) {
+    if (event.key === 'Escape' && selectedKey === key) {
+        event.preventDefault();
+
+        if (typeof closeActiveDetail === 'function') {
+            closeActiveDetail();
+        } else {
+            expandedNodes.delete(key);
+            setNodePresentation(key, nodeEl);
+            clearActiveSelection({ resetLayout: true });
+        }
+
+        return;
+    }
+
     if (event.key !== 'Enter' && event.key !== ' ') return;
 
     event.preventDefault();
@@ -426,6 +442,7 @@ function applyNodeFocusState(nodeEl, key, distances, hoverActive, hoverNeighbors
     nodeEl.classList.toggle('dimmed', Boolean(key) && !inFocus);
     nodeEl.classList.toggle('related', inFocus && distance > 0);
     nodeEl.classList.toggle('selected', selectedKey === nodeKey);
+    nodeEl.setAttribute('aria-selected', selectedKey === nodeKey ? 'true' : 'false');
     nodeEl.classList.toggle('hover-main', hoverActive && nodeKey === hoverKey);
     nodeEl.classList.toggle('hover-neighbor', hoverActive && hoverNeighbors.has(nodeKey));
     nodeEl.classList.toggle('hover-blurred', hoverActive && !inFocus);

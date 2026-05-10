@@ -5,6 +5,7 @@
 const IMPORT_MODE = 'merge';
 const IMPORT_MAX_VISIBLE_ERRORS = 12;
 const IMPORT_PANEL_CLOSE_DELAY_MS = 700;
+const IMPORT_MAX_FILE_BYTES = 10 * 1024 * 1024;
 
 const IMPORT_DEFAULT_MESSAGE = 'Choose a JSON snapshot file';
 const IMPORT_VALID_MESSAGE =
@@ -12,6 +13,10 @@ const IMPORT_VALID_MESSAGE =
 
 const IMPORT_CONFIRM_MESSAGE =
     'Import will add to the current memory. Existing memories will not be deleted or overwritten. Continue?';
+
+// Browsers do not always provide a MIME type for local JSON files, so the
+// extension remains the primary preflight signal.
+const IMPORT_ALLOWED_EXTENSIONS = ['.json'];
 
 // ── Snapshot Helpers ───────────────────────────────────────────────────
 
@@ -42,6 +47,40 @@ async function readJsonFile(file) {
     }
 }
 
+function formatFileSize(bytes) {
+    if (!Number.isFinite(bytes)) return 'unknown size';
+
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function hasAllowedImportExtension(fileName) {
+    const lowerName = String(fileName || '').toLowerCase();
+
+    return IMPORT_ALLOWED_EXTENSIONS.some((ext) => lowerName.endsWith(ext));
+}
+
+function validateImportFile(file) {
+    if (!file) {
+        return { ok: false, error: 'Choose a JSON snapshot file.' };
+    }
+
+    if (!hasAllowedImportExtension(file.name)) {
+        return { ok: false, error: 'Only .json snapshot files are supported.' };
+    }
+
+    if (file.size > IMPORT_MAX_FILE_BYTES) {
+        return {
+            ok: false,
+            error: `File is ${formatFileSize(file.size)}. Maximum size is ${formatFileSize(IMPORT_MAX_FILE_BYTES)}.`,
+        };
+    }
+
+    return { ok: true };
+}
+
 function hasOpenSocket() {
     return Boolean(ws && ws.readyState === WebSocket.OPEN);
 }
@@ -65,6 +104,12 @@ function setImportConfirmEnabled(enabled) {
     if (!importConfirmBtn) return;
 
     importConfirmBtn.disabled = !enabled;
+}
+
+function setImportBusy(isBusy) {
+    if (importFile) importFile.disabled = isBusy;
+    if (importConfirmBtn) importConfirmBtn.disabled = isBusy || !importSnapshotDraft;
+    if (importCancelBtn) importCancelBtn.disabled = isBusy;
 }
 
 function setImportPanelOpen(isOpen) {
@@ -208,10 +253,21 @@ async function handleImportFile(file) {
 
     resetImportDraft();
 
-    setImportSummary(`Validating ${file.name}`);
+    const fileValidation = validateImportFile(file);
+
+    if (!fileValidation.ok) {
+        setImportSummary('Unsupported file');
+        setImportResult('error', esc(fileValidation.error));
+        return;
+    }
+
+    setImportSummary(`Validating ${file.name} (${formatFileSize(file.size)})`);
     setImportResult('pending', 'Reading file...');
+    setImportBusy(true);
 
     const parsed = await readJsonFile(file);
+
+    setImportBusy(false);
 
     if (!parsed.ok) {
         setImportSummary('Invalid JSON file');
@@ -222,8 +278,11 @@ async function handleImportFile(file) {
     const snapshot = unwrapSnapshotPayload(parsed.value);
 
     setImportResult('pending', 'Validating snapshot with server...');
+    setImportBusy(true);
 
     const response = await validateSnapshotWithServer(snapshot);
+
+    setImportBusy(false);
 
     if (response.type === 'error') {
         setImportSummary('Validation request failed');
@@ -247,12 +306,13 @@ async function importValidatedSnapshot() {
 
     if (!window.confirm(IMPORT_CONFIRM_MESSAGE)) return;
 
-    setImportConfirmEnabled(false);
+    setImportBusy(true);
     setImportResult('pending', 'Importing snapshot...');
 
     const response = await importSnapshotWithServer(importSnapshotDraft);
 
     if (response.type === 'error' || response.ok === false) {
+        setImportBusy(false);
         setImportConfirmEnabled(true);
         setImportSummary('Import failed');
         setImportResult(
@@ -265,7 +325,12 @@ async function importValidatedSnapshot() {
     setImportResult('ok', formatImportSuccess(response.stats || {}));
 
     importSnapshotDraft = null;
+    setImportBusy(false);
     setImportConfirmEnabled(false);
+
+    if (importFile) {
+        importFile.value = '';
+    }
 
     await loadGraph({
         preserveView: false,

@@ -16,8 +16,8 @@ const EDGE_BEND_FACTOR = 0.09;
 // ── SVG Helpers ────────────────────────────────────────────────────────
 
 function clearEdgesSvg() {
-    while (edgesSvg.firstChild) {
-        edgesSvg.removeChild(edgesSvg.firstChild);
+    for (const group of edgesSvg.querySelectorAll('.edge-group')) {
+        group.remove();
     }
 }
 
@@ -60,14 +60,42 @@ function createArrowMarker(relation, color) {
     return marker;
 }
 
-function renderArrowMarkers() {
-    const defs = svgEl('defs');
+function markerColorEntries(edges = []) {
+    const colors = new Map(Object.entries(relationColors || {}));
 
-    for (const [relation, color] of Object.entries(relationColors || {})) {
-        defs.appendChild(createArrowMarker(relation, color));
+    for (const edge of edges) {
+        const relation = edge?.relation || 'related_to';
+
+        if (!colors.has(relation)) {
+            colors.set(relation, getRelationColor(relation));
+        }
     }
 
-    edgesSvg.appendChild(defs);
+    return colors;
+}
+
+function ensureMarkerDefs() {
+    let defs = edgesSvg.querySelector('#edge-marker-defs');
+
+    if (!defs) {
+        defs = svgEl('defs');
+        defs.id = 'edge-marker-defs';
+        edgesSvg.prepend(defs);
+    }
+
+    while (defs.firstChild) {
+        defs.removeChild(defs.firstChild);
+    }
+
+    return defs;
+}
+
+function renderArrowMarkers(edges = []) {
+    const defs = ensureMarkerDefs();
+
+    for (const [relation, color] of markerColorEntries(edges)) {
+        defs.appendChild(createArrowMarker(relation, color));
+    }
 }
 
 // ── Edge Data Helpers ──────────────────────────────────────────────────
@@ -187,6 +215,15 @@ function createEdgeGroup(edge) {
     return group;
 }
 
+function appendEdgeTooltip(group, edge) {
+    const title = svgEl('title');
+    const label = getEdgeLabel(edge);
+    const reason = edge?.reason ? ` - ${edge.reason}` : '';
+
+    title.textContent = `${edge.from} ${label} ${edge.to}${reason}`;
+    group.appendChild(title);
+}
+
 function createEdgePath(edge, geometry, color) {
     const path = svgEl('path');
 
@@ -250,6 +287,12 @@ function createEdgeLabelText(x, y, labelText, color) {
 }
 
 function appendEdgeLabel(group, edge, geometry, color) {
+    const mode = graphSettings?.edgeLabelMode;
+
+    if (mode === 'off' || mode === 'none' || mode === false) {
+        return;
+    }
+
     const labelText = getEdgeLabel(edge);
     const labelWidth = getEdgeLabelWidth(labelText);
 
@@ -267,6 +310,7 @@ function createEdgeElement(edge, positions, entries) {
     const geometry = calculateEdgeGeometry(edge, positions, entries);
     const group = createEdgeGroup(edge);
 
+    appendEdgeTooltip(group, edge);
     group.appendChild(createEdgePath(edge, geometry, color));
     appendEdgeLabel(group, edge, geometry, color);
 
@@ -277,7 +321,7 @@ function createEdgeElement(edge, positions, entries) {
 
 function renderEdges(edges, positions, entries) {
     clearEdgesSvg();
-    renderArrowMarkers();
+    renderArrowMarkers(edges);
 
     for (const edge of edges || []) {
         if (!isRenderableEdge(edge, positions, entries)) continue;

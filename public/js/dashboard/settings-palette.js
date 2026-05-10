@@ -17,6 +17,24 @@ function refreshRelationColors(settings) {
     );
 }
 
+let pendingSettings = null;
+let pendingChanged = new Set();
+let pendingSettingsFrame = null;
+
+function mergeChangedKeys(changed) {
+    for (const key of changed || []) {
+        pendingChanged.add(key);
+    }
+}
+
+function scheduleSettingsFlush() {
+    if (pendingSettingsFrame) return;
+
+    const scheduler = window.requestAnimationFrame || ((fn) => window.setTimeout(fn, 0));
+
+    pendingSettingsFrame = scheduler(flushSettingsEffects);
+}
+
 // ── Change Detection ───────────────────────────────────────────────────
 
 function didPaletteChange(changed) {
@@ -53,12 +71,6 @@ function didVisualScaleChange(changed) {
 
 // ── Effect Handlers ────────────────────────────────────────────────────
 
-function handlePaletteChange(changed) {
-    if (!didPaletteChange(changed)) return;
-
-    rerenderEdgesForCurrentPositions();
-}
-
 function handleLiveRefreshChange(settings, changed) {
     if (!changed.has('liveRefresh')) return;
 
@@ -73,9 +85,7 @@ function handleLiveRefreshChange(settings, changed) {
     stopLiveRefresh();
 }
 
-function handleFocusChange(changed) {
-    if (!didFocusChange(changed)) return;
-
+function applyFocusSettingsEffect() {
     if (selectedKey) {
         applyRadialFocusLayout(selectedKey);
     } else {
@@ -83,9 +93,7 @@ function handleFocusChange(changed) {
     }
 }
 
-function handleLayoutModeChange(changed) {
-    if (!changed.has('layoutMode')) return;
-
+function applyLayoutSettingsEffect() {
     renderGraph(currentEntries, currentEdges, {
         preserveSelection: false,
         preservePositions: false,
@@ -93,9 +101,7 @@ function handleLayoutModeChange(changed) {
     });
 }
 
-function handleFilterChange(changed) {
-    if (!didFilterChange(changed)) return;
-
+function applyFilterSettingsEffect() {
     // Filters are applied at render time via filteredGraph().
     // Re-render from the current snapshot without hitting the network.
     renderGraph(currentEntries, currentEdges, {
@@ -105,10 +111,42 @@ function handleFilterChange(changed) {
     });
 }
 
-function handleVisualScaleChange(changed) {
-    if (!didVisualScaleChange(changed)) return;
+function flushSettingsEffects() {
+    const changed = pendingChanged;
 
-    rerenderEdgesForCurrentPositions();
+    pendingSettingsFrame = null;
+    pendingChanged = new Set();
+
+    if (!pendingSettings || !changed.size) return;
+
+    if (changed.has('layoutMode')) {
+        applyLayoutSettingsEffect();
+        return;
+    }
+
+    if (didFilterChange(changed)) {
+        applyFilterSettingsEffect();
+        return;
+    }
+
+    if (didFocusChange(changed)) {
+        applyFocusSettingsEffect();
+        return;
+    }
+
+    if (didVisualScaleChange(changed)) {
+        applyNodePlacementsFromPositions();
+    }
+
+    if (didPaletteChange(changed) || didVisualScaleChange(changed)) {
+        rerenderEdgesForCurrentPositions();
+    }
+}
+
+function queueSettingsEffects(settings, changed) {
+    pendingSettings = settings;
+    mergeChangedKeys(changed);
+    scheduleSettingsFlush();
 }
 
 // ── Main Settings Subscriber ───────────────────────────────────────────
@@ -119,13 +157,8 @@ function handleSettingsChange({ settings, changed }) {
     graphSettings = settings;
 
     refreshRelationColors(settings);
-
-    handlePaletteChange(changed);
     handleLiveRefreshChange(settings, changed);
-    handleFocusChange(changed);
-    handleLayoutModeChange(changed);
-    handleFilterChange(changed);
-    handleVisualScaleChange(changed);
+    queueSettingsEffects(settings, changed);
 }
 
 // ── Init ───────────────────────────────────────────────────────────────
