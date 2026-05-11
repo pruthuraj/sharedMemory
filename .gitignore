@@ -10,7 +10,6 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 /.claude
-/.claude-plugin
 agent.md
 claude.md
 response.md

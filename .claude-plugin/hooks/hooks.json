@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${pluginDir}/../scripts/memory-hook.js\"",
+            "timeout": 5,
+            "statusMessage": "Loading shared memories..."
+          }
+        ]
+      }
+    ]
+  }
+}
