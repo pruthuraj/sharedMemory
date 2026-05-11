@@ -43,8 +43,17 @@ npm run restart   # safe restart helper for the local HTTP/WebSocket server
 | `MEMORY_TOKEN` | none | Bearer token for WebSocket, `/status`, and `/protocol` |
 | `MEMORY_SUGGEST_ENABLED` | `false` | Enables local semantic suggestions |
 | `SHARED_MEMORY_INSTALL_DIR` | `C:\sharedMemory` on Windows | Canonical plugin/server checkout |
+| `SHARED_MEMORY_PLUGIN_ROOT` | host plugin dir | Downloaded plugin folder |
+| `SHARED_MEMORY_AUTO_INSTALL` | `false` | Allow clone/setup without an interactive prompt |
+| `SHARED_MEMORY_AUTO_START` | `false` | Allow local HTTP/WebSocket server start without a prompt |
+| `SHARED_MEMORY_SKIP_SERVICE_CHECK` | `false` | Skip optional local server check/start |
 
-Plugin installs should use `C:\sharedMemory` by default. The Codex plugin config starts `.codex-plugin/plugin-start.mjs`, checks that checkout, and uses port `3001` unless overridden.
+Plugin startup separates two paths:
+
+- **Plugin root:** where Codex downloaded this plugin. The MCP config uses `${pluginDir}` when the host supports it and falls back to cwd/plugin env vars.
+- **Server install root:** the preferred long-lived sharedMemory checkout, defaulting to `C:\sharedMemory` on Windows.
+
+At startup, the plugin launcher first finds its own downloaded root, then prefers `C:\sharedMemory` for the actual server. If `C:\sharedMemory` is missing and install is not approved, it can run from the downloaded plugin copy when that copy is a full repo.
 
 ## Discovery Endpoints
 
@@ -77,5 +86,6 @@ The stdio adapter exposes:
 - If you change protocol constants or relation types, fully restart the Node process; running servers do not reload changed modules.
 - If both the dev checkout and `C:\sharedMemory` exist, check `/status.runtime.cwd` before debugging behavior.
 - Use `npm run doctor` when a client sees unexpected response types, missing relation support, or the wrong memory database.
+- Use `SHARED_MEMORY_BOOTSTRAP_DRY_RUN=true` to inspect plugin bootstrap decisions without cloning, installing, or starting servers.
 
 Full setup instructions and protocol reference: [guide.md](guide.md)

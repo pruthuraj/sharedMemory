@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
-const pluginRoot = resolve(scriptDir, '..');
+const scriptPluginRoot = resolve(scriptDir, '..');
 const defaultInstallDir = process.platform === 'win32'
   ? 'C:\\sharedMemory'
   : join(os.homedir(), '.sharedMemory');
@@ -17,6 +17,7 @@ const statusUrl = process.env.SHARED_MEMORY_STATUS_URL || `http://127.0.0.1:${po
 const autoInstall = isTruthy(process.env.SHARED_MEMORY_AUTO_INSTALL);
 const autoStart = isTruthy(process.env.SHARED_MEMORY_AUTO_START);
 const skipServiceCheck = isTruthy(process.env.SHARED_MEMORY_SKIP_SERVICE_CHECK);
+const dryRun = isTruthy(process.env.SHARED_MEMORY_BOOTSTRAP_DRY_RUN);
 
 function log(message) {
   process.stderr.write(`[shared-memory] ${message}\n`);
@@ -24,6 +25,14 @@ function log(message) {
 
 function isTruthy(value) {
   return ['1', 'true', 'yes', 'on'].includes(String(value || '').toLowerCase());
+}
+
+function usablePath(value) {
+  return Boolean(value) && !String(value).includes('${');
+}
+
+function unique(items) {
+  return [...new Set(items.filter(Boolean))];
 }
 
 function packageName(dir) {
@@ -42,7 +51,34 @@ function isSharedMemoryRoot(dir) {
   );
 }
 
+function pluginRootCandidates() {
+  return unique([
+    process.env.SHARED_MEMORY_PLUGIN_ROOT,
+    process.env.CODEX_PLUGIN_DIR,
+    process.env.CODEX_PLUGIN_ROOT,
+    process.env.PLUGIN_DIR,
+    process.env.MCP_PLUGIN_DIR,
+    scriptPluginRoot,
+    process.cwd(),
+    defaultInstallDir,
+  ].filter(usablePath).map((candidate) => resolve(candidate)));
+}
+
+function findPluginRoot() {
+  return pluginRootCandidates().find((candidate) => (
+    existsSync(join(candidate, '.codex-plugin', 'plugin.json'))
+    || existsSync(join(candidate, '.codex-plugin', 'plugin-start.mjs'))
+  )) || scriptPluginRoot;
+}
+
+const pluginRoot = findPluginRoot();
+
 function runChecked(command, args, options = {}) {
+  if (dryRun) {
+    log(`[dry-run] would run: ${command} ${args.join(' ')}${options.cwd ? ` (cwd ${options.cwd})` : ''}`);
+    return;
+  }
+
   const result = spawnSync(command, args, {
     cwd: options.cwd,
     env: process.env,
@@ -73,6 +109,7 @@ async function askPermission(question) {
 
 async function ensureCheckout() {
   if (isSharedMemoryRoot(installDir)) {
+    log(`using canonical install at ${installDir}`);
     return installDir;
   }
 
@@ -85,7 +122,7 @@ async function ensureCheckout() {
   );
 
   if (allowed) {
-    log(`cloning ${repoUrl} into ${installDir}`);
+    log(`${dryRun ? '[dry-run] would clone' : 'cloning'} ${repoUrl} into ${installDir}`);
     runChecked('git', ['clone', repoUrl, installDir]);
     runChecked('npm', ['install'], { cwd: installDir });
     return installDir;
@@ -101,29 +138,46 @@ async function ensureCheckout() {
   );
 }
 
-function ensureDependencies(repoRoot) {
-  if (existsSync(join(repoRoot, 'node_modules'))) return;
-
-  if (!autoInstall) {
-    log(`dependencies are missing in ${repoRoot}. Run npm install there, or set SHARED_MEMORY_AUTO_INSTALL=true.`);
+async function ensureDependencies(repoRoot) {
+  if (existsSync(join(repoRoot, 'node_modules'))) {
+    log(`dependencies found in ${repoRoot}`);
     return;
   }
 
-  log(`installing dependencies in ${repoRoot}`);
-  runChecked('npm', ['install'], { cwd: repoRoot });
+  const allowed = autoInstall || await askPermission(
+    `dependencies are missing in ${repoRoot}. Run npm install there?`,
+  );
+
+  if (allowed) {
+    log(`${dryRun ? '[dry-run] would install' : 'installing'} dependencies in ${repoRoot}`);
+    runChecked('npm', ['install'], { cwd: repoRoot });
+    return;
+  }
+
+  if (dryRun) {
+    log(`[dry-run] dependencies are missing in ${repoRoot}; startup would fail without SHARED_MEMORY_AUTO_INSTALL=true or permission to run npm install.`);
+    return;
+  }
+
+  throw new Error(`dependencies are missing in ${repoRoot}. Run npm install there, or set SHARED_MEMORY_AUTO_INSTALL=true.`);
 }
 
 function configureEnvironment(repoRoot) {
   const dataDir = resolve(repoRoot, 'data');
 
   if (!process.env.MEMORY_FILE) {
-    if (!existsSync(dataDir)) {
+    if (!dryRun && !existsSync(dataDir)) {
       mkdirSync(dataDir, { recursive: true });
     }
     process.env.MEMORY_FILE = resolve(dataDir, 'memory.db');
   }
 
   process.env.PORT = port;
+  process.env.SHARED_MEMORY_PORT = port;
+  log(`selected repo root: ${repoRoot}`);
+  log(`plugin root: ${pluginRoot}`);
+  log(`memory file: ${process.env.MEMORY_FILE}`);
+  log(`service port: ${port}`);
 }
 
 async function localServerStatus() {
@@ -150,7 +204,10 @@ async function localServerStatus() {
 }
 
 async function ensureLocalServer(repoRoot) {
-  if (skipServiceCheck) return;
+  if (skipServiceCheck) {
+    log('service check skipped');
+    return;
+  }
 
   const status = await localServerStatus();
   if (status === 'running') {
@@ -169,6 +226,11 @@ async function ensureLocalServer(repoRoot) {
 
   if (!allowed) {
     log(`local server is not running. Start it manually with: cd "${repoRoot}" && $env:PORT="${port}"; $env:MEMORY_FILE="${process.env.MEMORY_FILE}"; npm start`);
+    return;
+  }
+
+  if (dryRun) {
+    log(`[dry-run] would start local HTTP/WebSocket server on port ${port}`);
     return;
   }
 
@@ -202,6 +264,11 @@ async function ensureLocalServer(repoRoot) {
 }
 
 function startMcpServer(repoRoot) {
+  if (dryRun) {
+    log(`[dry-run] would start stdio MCP server from ${repoRoot}`);
+    return;
+  }
+
   const child = spawn(process.execPath, [resolve(repoRoot, 'mcp-server.mjs')], {
     cwd: repoRoot,
     env: process.env,
@@ -224,8 +291,10 @@ function startMcpServer(repoRoot) {
 }
 
 async function main() {
+  log(`bootstrap mode: ${dryRun ? 'dry-run' : 'normal'}`);
+  log(`install dir: ${installDir}`);
   const repoRoot = await ensureCheckout();
-  ensureDependencies(repoRoot);
+  await ensureDependencies(repoRoot);
   configureEnvironment(repoRoot);
   await ensureLocalServer(repoRoot);
   startMcpServer(repoRoot);

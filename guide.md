@@ -40,8 +40,37 @@ Environment:
 | `MEMORY_TOKEN` | none | Bearer token for WS, `/status`, and `/protocol` |
 | `MEMORY_SUGGEST_ENABLED` | `false` | Enables semantic suggestions |
 | `SHARED_MEMORY_INSTALL_DIR` | `C:\sharedMemory` on Windows | Canonical plugin checkout |
+| `SHARED_MEMORY_PLUGIN_ROOT` | host plugin dir | Downloaded plugin folder |
+| `SHARED_MEMORY_AUTO_INSTALL` | `false` | Allow clone/setup without an interactive prompt |
+| `SHARED_MEMORY_AUTO_START` | `false` | Allow local server start without an interactive prompt |
+| `SHARED_MEMORY_SKIP_SERVICE_CHECK` | `false` | Skip optional local server check/start |
+| `SHARED_MEMORY_BOOTSTRAP_DRY_RUN` | `false` | Print bootstrap decisions without mutating anything |
 
 The plugin launcher prefers `SHARED_MEMORY_PORT`, then `PORT`, then `3001`.
+
+## Plugin Auto-Boot
+
+The Codex plugin has two roots:
+
+- **Plugin root:** where the plugin was downloaded. `.mcp.json` uses `${pluginDir}` when available and falls back to host plugin env vars, cwd, and finally the canonical install path.
+- **Server install root:** the preferred long-lived sharedMemory checkout, defaulting to `C:\sharedMemory` on Windows.
+
+Startup behavior:
+
+| Case | Behavior |
+|---|---|
+| `C:\sharedMemory` exists and is valid | Use it for stdio MCP and optional HTTP/WebSocket server |
+| `C:\sharedMemory` exists but server on `3001` is down | Ask to start it, or start automatically with `SHARED_MEMORY_AUTO_START=true` |
+| `C:\sharedMemory` is missing | Ask to clone/setup it, or do so with `SHARED_MEMORY_AUTO_INSTALL=true` |
+| Install is denied but downloaded plugin is a full repo | Run from the downloaded plugin copy |
+| Dependencies are missing | Ask to run `npm install`, auto-install if allowed, otherwise fail clearly |
+| Non-interactive host | No prompt is possible; use explicit auto flags or preinstall dependencies |
+
+Dry-run bootstrap decisions:
+
+```bash
+SHARED_MEMORY_BOOTSTRAP_DRY_RUN=true node .codex-plugin/plugin-start.mjs
+```
 
 ## Discovery
 
