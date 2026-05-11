@@ -406,3 +406,5 @@ Tests favor deterministic injection: pass a `clock`/`now` function for time cont
 - **Last-write-wins by default.** Use `ifRevision` for optimistic concurrency control.
 - **FTS minimum length.** Queries shorter than 3 characters return no results.
 - **Model download on first use.** Enabling suggestions downloads ~25 MB of weights on the first `suggest` call.
+
+

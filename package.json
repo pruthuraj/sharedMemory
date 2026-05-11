@@ -6,7 +6,7 @@
   "scripts": {
     "mcp": "node mcp-server.mjs",
     "smoke:suggest": "node scripts/smoke-suggest.js",
-    "start": "cross-env MEMORY_FILE=data/memory.db node server.js",
+    "start": "node --env-file=.env server.js",
     "test": "node --test"
   },
   "engines": {

@@ -18,8 +18,6 @@
 
 const { readFileSync, writeFileSync } = require('node:fs');
 const { argv } = require('node:process');
-const https = require('node:https');
-const http = require('node:http');
 
 // ── CLI args ─────────────────────────────────────────────────────────────────
 
@@ -311,58 +309,37 @@ if (!dryRun) {
     console.log('[dry-run] No files written.');
 }
 
-// ── Step 4: Import ────────────────────────────────────────────────────────────
-
-async function mcpPost(path, body) {
-    return new Promise((resolve, reject) => {
-        const port = Number(process.env.PORT ?? 3000);
-        const payload = JSON.stringify(body);
-        const req = http.request(
-            { hostname: 'localhost', port, path, method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } },
-            (res) => {
-                let data = '';
-                res.on('data', (c) => (data += c));
-                res.on('end', () => {
-                    try { resolve(JSON.parse(data)); } catch { resolve(data); }
-                });
-            },
-        );
-        req.on('error', reject);
-        req.write(payload);
-        req.end();
-    });
-}
+// ── Step 4: Import (spawned subprocess to avoid CJS async/WS quirks) ─────────
 
 if (doImport && !dryRun) {
-    (async () => {
-        console.log('\nValidating snapshot against server...');
-        const valResult = await mcpPost('/mcp', {
-            jsonrpc: '2.0', id: 1, method: 'tools/call',
-            params: { name: 'memory_validate_import', arguments: { snapshot: curated, mode: 'replace' } },
-        });
-
-        const valContent = valResult?.result?.content?.[0]?.text;
-        let valData;
-        try { valData = JSON.parse(valContent); } catch { valData = valContent; }
-
-        if (valData?.errors?.length > 0) {
-            writeFileSync('curator-errors.json', JSON.stringify(valData.errors, null, 2), 'utf8');
-            console.error(`Validation failed: ${valData.errors.length} error(s). See curator-errors.json`);
-            process.exit(1);
-        }
-
-        console.log('Validation passed. Importing...');
-        const impResult = await mcpPost('/mcp', {
-            jsonrpc: '2.0', id: 2, method: 'tools/call',
-            params: { name: 'memory_import', arguments: { snapshot: curated, mode: 'replace' } },
-        });
-
-        const impContent = impResult?.result?.content?.[0]?.text;
-        let impData;
-        try { impData = JSON.parse(impContent); } catch { impData = impContent; }
-        console.log('Import result:', JSON.stringify(impData, null, 2));
-    })().catch((e) => {
-        console.error('Import error:', e.message);
+    const { execFileSync } = require('node:child_process');
+    const port = Number(process.env.PORT ?? 3000);
+    const importScript = `
+const fs = require('fs');
+const snap = JSON.parse(fs.readFileSync(${JSON.stringify(outFile)},'utf8'));
+const snapshot = { entries: snap.entries, edges: snap.edges };
+async function wsCmd(cmd, expectedType) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket('ws://localhost:${port}');
+    const timer = setTimeout(() => { ws.close(); reject(new Error('timeout')); }, 30000);
+    ws.addEventListener('open', () => ws.send(JSON.stringify({...cmd, requestId:'curator'})));
+    ws.addEventListener('message', e => { const m=JSON.parse(e.data); if(m.type!==expectedType)return; clearTimeout(timer); ws.close(); resolve(m); });
+    ws.addEventListener('error', () => { clearTimeout(timer); reject(new Error('ws error')); });
+  });
+}
+(async () => {
+  console.log('Validating...');
+  const val = await wsCmd({type:'validate-import',snapshot,mode:'replace'},'import-validation');
+  if (!val.ok) { fs.writeFileSync('curator-errors.json',JSON.stringify(val.errors,null,2)); console.error('Validation failed:',val.errors.length,'error(s). See curator-errors.json'); process.exit(1); }
+  console.log('Valid. Importing...');
+  const imp = await wsCmd({type:'import',snapshot,mode:'replace'},'import-result');
+  if (!imp.ok) { console.error('Import failed:',JSON.stringify(imp)); process.exit(1); }
+  console.log('Import complete:',imp.stats.entryCount,'entries,',imp.stats.edgeCount,'edges');
+})().catch(e=>{ console.error('Import error:',e.message); process.exit(1); });
+`;
+    try {
+        execFileSync(process.execPath, ['-e', importScript], { stdio: 'inherit' });
+    } catch {
         process.exit(1);
-    });
+    }
 }
