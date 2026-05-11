@@ -1,186 +1,156 @@
----
-name: memory-capture
-description: >
-  Sweep the current conversation, extract every important fact / decision / insight / blocker / action item / preference, store each one in the shared memory MCP server with proper metadata, and link them as a graph.
-  Use when: the user says "remember this", "save this", "capture this", "store what we discussed", "/memory-capture", or at the end of a substantive conversation.
-  Skip when: the conversation contained no decisions / insights / facts worth carrying forward, or the memory MCP server is unreachable.
+# Memory Capture Directive
+
+You have access to a shared memory store via tools (`memory_set`, `memory_get`, `memory_search`, `memory_map`) and the WebSocket `relate` command. Your task is to actively curate this memory across every conversation — not as an afterthought, but as a continuous background activity.
+
 ---
 
-# Memory Capture Skill
+## When to capture
 
-## Purpose
+Capture immediately when any of these appear in the conversation:
 
-Force a structured, lossless capture pass over the current conversation. Extracts important knowledge, deduplicates against existing memory, stores with proper metadata, and links new entries into the graph.
-
-## Required tools
-
-- `memory_search` — dedup check before writing
-- `memory_set` — store single entry (use for updates to existing keys)
-- `memory_bulk_set` — store multiple new entries in one call
-- `memory_get` — read existing entries when updating
-- `memory_relate` — link a single entry
-- `memory_bulk_relate` — link multiple entries in one call
-- `memory_audit` — post-capture quality gate
-
-If `memory-mcp` is not configured in the project's `.mcp.json`, abort and tell the user to add it (server lives at `${pluginDir}/../mcp-server.mjs`).
-
-## Procedure
-
-### Step 1 — Scan the conversation
-
-Re-read the entire current conversation. Build a candidate list categorized by type:
-
-| Type | Key prefix | Importance range |
-|---|---|---|
-| Decision (with rationale) | `decision.<topic>` | 7–8 |
-| Insight / gotcha / lesson | `insight.<topic>` | 6–8 |
-| Stable technical fact | `fact.<topic>` | 5–7 |
-| Project info / scope | `project.<name>` | 8–10 |
-| Action item / todo | `task.<name>` | 5–7 |
-| Blocker / risk | `blocker.<topic>` | 6–8 |
-| Setup / config | `setup.<thing>` | 6–8 |
-| External reference | `reference.<system>` | 3–5 |
-| User preference | `preference.<topic>` | 5–7 |
-
-**Importance tiebreaker (within range):** Pick the higher end if the entry will constrain future decisions or must be recalled to avoid mistakes. Pick the lower end if it's context-only and missing it causes no harm.
-
-**Split vs merge rule:** One entry per atomic decision or insight. If you write `and` more than twice in the summary, split it into two entries. If two candidates share the same key, merge them — don't create `insight.X` and `insight.X-detail`.
+| Signal                   | Example                                                                        |
+| ------------------------ | ------------------------------------------------------------------------------ |
+| **Decision**             | "let's go with Postgres", "we decided to drop the cache layer"                 |
+| **Fact / constraint**    | "the API returns dates as ISO strings", "production runs on Node 20"           |
+| **Insight / learning**   | "the bug was caused by race condition in X", "TTL must be > 5 min or Y breaks" |
+| **Project / goal**       | "we're building a memory MCP server", "next milestone is voice input"          |
+| **Blocker / risk**       | "WebSocket disconnects after 30s of idle", "DB migration not yet tested"       |
+| **Action item**          | "user will set up the hook tomorrow", "need to add memory_delete tool"         |
+| **Reference / location** | "logs are in /var/log/app", "issue tracked in JIRA-1234"                       |
+| **Preference**           | "user prefers terse answers", "user uses PowerShell on Windows"                |
 
 Skip:
+
 - Chitchat, greetings, acknowledgements
-- Information derivable from `git log` or by reading code
+- Information already stored (search before writing — use `memory_search` first)
+- Information derivable from the codebase (`git log`, `grep`)
 - Anything that will be irrelevant in a week
-- Things the user explicitly said not to store
 
-### Step 2 — Dedup pass
+---
 
-For each candidate, run `memory_search(query="<key topic words>")`. If a similar entry exists:
-- If the candidate adds new information → `memory_set` with the SAME key (revision auto-increments).
-- If the candidate is fully redundant → drop it from the list.
+## How to capture
 
-### Step 3 — Write entries and link immediately (per entry)
+### Step 1 — Search first, never duplicate
 
-For each surviving candidate, write then link before moving to the next. Do not batch all writes then all links — if capture fails mid-way, already-written entries would have no graph edges.
+Before writing, search:
 
-**3a. Write the entry**
+```
+memory_search(query="<key topic words>")
+```
 
-Use `memory_bulk_set` for all new entries in one call. Use `memory_set` only when updating an existing key (where `ifRevision` matters).
+If a similar entry exists, **update it via `memory_set`** with the same key (revision auto-increments) instead of creating a new one.
 
-Each entry in `bulk_set.entries`:
-- `key` — namespaced, lowercase, dot-separated (`decision.use-postgres`, NOT `Decision: Use Postgres`)
-- `value` — full content including rationale; if the entry records a code change include `filesChanged: [...]`
-- `summary` — one line ≤120 chars (this is what the hook surfaces)
-- `tags` — array of 2–5 lowercase tags
-- `importance` — see scale + tiebreaker above
+### Step 2 — Use a namespaced key
 
-**Files affected rule:** For any entry recording a code change (fix, implementation, refactor), include a `filesChanged` array in `value`:
+Pick a key from this taxonomy:
+
+| Prefix                 | Use for                                |
+| ---------------------- | -------------------------------------- |
+| `project.<name>`       | Project overview, scope, status        |
+| `decision.<topic>`     | Choices made and why                   |
+| `insight.<topic>`      | Lessons, gotchas, non-obvious truths   |
+| `fact.<topic>`         | Stable technical facts                 |
+| `task.<name>`          | Action items, todos, in-progress work  |
+| `blocker.<topic>`      | Known issues, risks                    |
+| `setup.<thing>`        | Configurations, install steps          |
+| `agent.<name>`         | Per-agent identity / role              |
+| `session.<YYYY-MM-DD>` | Per-session summary                    |
+| `reference.<system>`   | External links, dashboards, dashboards |
+| `preference.<topic>`   | User preferences                       |
+
+Keys must be lowercase, dot-separated, hyphens allowed within segments.
+
+### Step 3 — Set with full metadata
+
+```
+memory_set(
+  key      = "decision.persistence",
+  value    = "<full content of the decision and its rationale>",
+  summary  = "<one-line, ≤120 chars — this is what the hook surfaces>",
+  tags     = ["decision", "<topic>", "<subsystem>"],
+  importance = <0–10 — see scale below>,
+)
+```
+
+**Files affected rule:** Whenever a memory entry records a code change (decision, fix, refactor, implementation), include a `filesChanged` array in `value` listing every file that was modified. This lets future sessions know exactly where to look without re-grepping.
 
 ```json
 {
   "summary": "what was done and why",
   "filesChanged": ["src/foo.js", "test/foo.test.js"],
-  "rationale": "..."
+  "...": "other fields"
 }
 ```
 
-Omit `filesChanged` entirely for non-code entries (decisions, preferences, references).
+Only include files that were substantively changed (not just read). Omit `filesChanged` entirely for non-code memories (decisions, preferences, references).
 
-**3b. Link each entry immediately after writing**
+**Importance scale:**
 
-Use `memory_bulk_relate` to link all relations for the just-written entries in one call.
+- `9–10` — core project identity, fundamental architecture
+- `7–8` — key decisions, critical setup, reusable insights
+- `5–6` — useful context, current tasks, working notes
+- `3–4` — minor facts, references
+- `0–2` — disposable / ephemeral
 
-Mandatory links for every new entry:
-1. **To the parent project** — `memory_relate(new_key, project.<name>, "related_to", ...)`
-2. **To today's session log** — `memory_relate(new_key, session.<YYYY-MM-DD>, "derived_from", "captured during this session")`
+### Step 4 — Always link
 
-Optional but encouraged:
-3. **To prerequisite entries** — `depends_on` if the new entry relies on something
-4. **To contradicted entries** — `contradicts` if the new entry overrides a prior decision
-
-Relation types: `related_to`, `depends_on`, `supports`, `contradicts`, `mentions`, `derived_from`, `next_step`.
-
-### Step 4 — Write/update the session log
-
-Always create or update `session.<YYYY-MM-DD>` with this structure:
-
-```json
-{
-  "summary": "one paragraph describing what was discussed",
-  "entriesCaptured": ["decision.X", "insight.Y"],
-  "filesChanged": ["src/foo.js"]
-}
-```
-
-- `entriesCaptured` — keys of every entry written or updated this session
-- `filesChanged` — union of all `filesChanged` arrays across entries this session; omit if no code was touched
-- If the session entry already exists: `memory_get` it, merge in new keys and files, write back with same key
-
-### Step 5 — Post-capture audit
-
-After all entries are written, call `memory_audit()` and check `counts.zombieCount`. If > 0, inspect the zombies — if any were just written by this capture pass, fix them before reporting (add missing tags/importance). Surface the audit result in the report.
-
-### Step 6 — Report back
-
-Output a concise summary in this format:
+After writing a new entry, immediately link it to existing entries. **An unlinked memory is a wasted memory** — the graph is what makes recall powerful. Use the `relate` WebSocket command:
 
 ```
-Captured N entries:
-  + decision.X        — <summary>  [linked to: project.Y, session.Z]
-  + insight.A         — <summary>  [linked to: B, C, D]
-  ↻ project.sharedMemory (updated, rev 3) — <what changed>
-
-Skipped: <count> redundant, <count> low-value
-
-Audit: <zombieCount> zombies, <orphanCount> orphans
+relate(from=<new_key>, to=<existing_key>, relation=<type>, reason=<why>)
 ```
 
-## Anti-patterns
+**Relation types:**
 
-- ❌ Writing without searching first → creates duplicates
-- ❌ Writing without `summary` → useless in the hook context
-- ❌ Writing without `importance` → all entries default to 0 and never surface
-- ❌ Creating an entry but not linking it → wasted memory, no graph value
-- ❌ Linking after all writes → unlinked entries if capture fails mid-way
-- ❌ Capturing chitchat ("user said hi") → noise pollutes future recalls
-- ❌ Verbose `value` fields → keep them tight; the summary is what gets seen
-- ❌ Over-namespacing keys (`decision.api.auth.jwt.refresh.token.lifetime`) → 2–3 segments max
-- ❌ Omitting `filesChanged` on code-change entries → future sessions can't locate what was touched without re-grepping
-- ❌ Writing `and` more than twice in a summary → split into two entries
+- `related_to` — general topical connection
+- `depends_on` — A needs B to function
+- `supports` — A provides evidence/foundation for B
+- `contradicts` — A conflicts with B
+- `mentions` — A references B
+- `derived_from` — A was learned from / produced by B
+- `next_step` — A logically follows B
 
-## Example invocations
+A new entry should typically have **2–4 relations**: at minimum link it to its parent project and to whatever conversation/session it came from.
 
-### Non-code session
+### Step 5 — Update the session log
 
-> User: `/memory-capture`
+At the end of every session (or every ~10 substantive turns), write/update a `session.<YYYY-MM-DD>` entry summarizing what was discussed and what new memories were created. Link it via `derived_from` to all new entries from that session.
 
-```
-Captured 3 entries:
-  + decision.use-cross-env  — Use cross-env for Windows-compatible npm scripts  [→ project.sharedMemory, → session.2026-05-05]
-  + insight.mcp-no-delete-tool  — memory-mcp lacks delete tool; use WS protocol instead  [→ arch.mcp, → session.2026-05-05]
-  + setup.global-hook  — UserPromptSubmit hook in ~/.claude/settings.json fires for every project  [→ setup.claude-code-hook, → session.2026-05-05]
+If any code was changed during the session, include a top-level `filesChanged` array in the session entry value listing every modified file across all changes made in that session.
 
-↻ session.2026-05-05 updated (rev 2) — 3 entries captured.
+---
 
-Skipped: 1 redundant (project.sharedMemory already current), 4 low-value (chitchat).
+## Behavior contract
 
-Audit: 0 zombies, 0 orphans.
-```
+- **Don't ask permission** to capture — just do it. Mention captures briefly in your response (e.g., "stored as `decision.persistence`").
+- **Don't dump everything** — quality over volume. One well-summarized, well-linked entry beats five vague ones.
+- **Update beats append** — if a fact evolves, update the existing key instead of creating `fact.X.v2`.
+- **Be honest about uncertainty** — if a decision is tentative, say so in `value` and tag it `tentative`.
+- **Respect the user's correction** — if they say "don't store that" or "that was wrong", delete or update the entry immediately.
 
-### Code-change session
+---
 
-> User: `/memory-capture` (after implementing audit + bulk ops)
+## Recall behavior
 
-```
-Captured 2 entries:
-  + insight.sharedMemory.audit-was-missing  — audit/bulk ops in docs but absent from code; re-implemented 2026-05-11
-      filesChanged: [src/protocol.js, src/memory-store.js, src/server.js, src/mcp-tools.js, mcp-server.mjs, test/server.test.js]
-      [→ project.sharedMemory, → session.2026-05-11, → decision.sharedMemory.curation-tools]
-  + insight.sharedMemory.welcome-auth-leak  — welcome message leaked agentId pre-auth; agentId moved to authenticated response
-      [→ project.sharedMemory, → session.2026-05-11]
+At the start of each turn, the most relevant memories are auto-injected into your context. Beyond that:
 
-↻ session.2026-05-11 updated (rev 2) — filesChanged added, 2 entries captured.
+- If the user mentions something that sounds familiar, **search first** before assuming.
+- If you're about to make a recommendation, **check `decision.*` memories** for prior choices that constrain you.
+- If the user asks "what do you remember about X", call `memory_search` and cite results.
+- If you need to traverse relationships, call `memory_map(key=<root>, depth=2)`.
 
-Skipped: 2 redundant, 1 low-value.
+---
 
-Audit: 0 zombies, 1 orphan (task.sharedMemory.zombie-cleanup — already resolved, safe to ignore).
-```
+## Example capture flow
+
+> User: "We hit an issue where TTL of 30 seconds was too short — entries were expiring before agents could read them. Bumping it to 5 minutes minimum."
+
+Your internal flow:
+
+1. `memory_search("TTL expiry")` → no existing entry
+2. `memory_set("insight.ttl-minimum", "TTL below 5 min causes premature expiry — agents can't read entries before deletion. Use 5 min as floor.", summary="TTL must be ≥5 min — shorter values cause race with agent reads", tags=["insight","ttl","gotcha"], importance=7)`
+3. `relate("insight.ttl-minimum", "feature.ttl", "related_to", "documents real-world constraint on this feature")`
+4. `relate("insight.ttl-minimum", "session.<today>", "derived_from", "discovered during this session")`
+5. Briefly mention in your reply: "Got it. Stored as `insight.ttl-minimum` and linked to the TTL feature."
+
+That's it. Capture, link, move on.
