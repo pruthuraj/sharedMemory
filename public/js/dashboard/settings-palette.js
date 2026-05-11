@@ -131,7 +131,12 @@ function flushSettingsEffects() {
     }
 
     if (didPaletteChange(changed) || didVisualScaleChange(changed)) {
-        if (cy) cy.style().update();
+        if (cy) {
+            cy.style().update();
+            if (didVisualScaleChange(changed)) {
+                resolveNodeCollisions();
+            }
+        }
     }
 }
 

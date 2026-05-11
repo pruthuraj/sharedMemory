@@ -18,6 +18,7 @@ const autoInstall = isTruthy(process.env.SHARED_MEMORY_AUTO_INSTALL);
 const autoStart = isTruthy(process.env.SHARED_MEMORY_AUTO_START);
 const skipServiceCheck = isTruthy(process.env.SHARED_MEMORY_SKIP_SERVICE_CHECK);
 const dryRun = isTruthy(process.env.SHARED_MEMORY_BOOTSTRAP_DRY_RUN);
+const explicitMemoryFile = process.env.SHARED_MEMORY_MEMORY_FILE;
 
 function log(message) {
   process.stderr.write(`[shared-memory] ${message}\n`);
@@ -163,14 +164,18 @@ async function ensureDependencies(repoRoot) {
 }
 
 function configureEnvironment(repoRoot) {
-  const dataDir = resolve(repoRoot, 'data');
+  const memoryFile = usablePath(explicitMemoryFile)
+    ? resolve(explicitMemoryFile)
+    : resolve(repoRoot, 'data', 'memory.db');
+  const dataDir = dirname(memoryFile);
 
-  if (!process.env.MEMORY_FILE) {
-    if (!dryRun && !existsSync(dataDir)) {
-      mkdirSync(dataDir, { recursive: true });
-    }
-    process.env.MEMORY_FILE = resolve(dataDir, 'memory.db');
+  if (!dryRun && !existsSync(dataDir)) {
+    mkdirSync(dataDir, { recursive: true });
   }
+  if (process.env.MEMORY_FILE && process.env.MEMORY_FILE !== memoryFile && !usablePath(explicitMemoryFile)) {
+    log(`overriding inherited MEMORY_FILE (${process.env.MEMORY_FILE}) with selected repo memory file`);
+  }
+  process.env.MEMORY_FILE = memoryFile;
 
   process.env.PORT = port;
   process.env.SHARED_MEMORY_PORT = port;

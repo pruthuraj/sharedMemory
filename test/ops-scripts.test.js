@@ -112,6 +112,44 @@ test('plugin bootstrap dry-run uses canonical install when available', () => {
     assert.match(output, /\[dry-run\] would start stdio MCP server/);
 });
 
+test('plugin bootstrap derives MEMORY_FILE from selected repo root instead of inherited cwd state', () => {
+    const inheritedMemory = path.join(tempDir(), 'wrong-memory.db');
+    const expectedMemory = path.join(repoRoot, 'data', 'memory.db');
+    const output = runNodeAll(['.codex-plugin/plugin-start.mjs'], {
+        env: {
+            SHARED_MEMORY_BOOTSTRAP_DRY_RUN: 'true',
+            SHARED_MEMORY_INSTALL_DIR: repoRoot,
+            SHARED_MEMORY_PLUGIN_ROOT: repoRoot,
+            SHARED_MEMORY_SKIP_SERVICE_CHECK: 'true',
+            SHARED_MEMORY_PORT: '39996',
+            PORT: '',
+            MEMORY_FILE: inheritedMemory,
+        },
+    });
+
+    assert.match(output, /overriding inherited MEMORY_FILE/);
+    assert.match(output, new RegExp(expectedMemory.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')));
+});
+
+test('plugin bootstrap accepts explicit sharedMemory memory file override', () => {
+    const explicitMemory = path.join(tempDir(), 'explicit-memory.db');
+    const output = runNodeAll(['.codex-plugin/plugin-start.mjs'], {
+        env: {
+            SHARED_MEMORY_BOOTSTRAP_DRY_RUN: 'true',
+            SHARED_MEMORY_INSTALL_DIR: repoRoot,
+            SHARED_MEMORY_PLUGIN_ROOT: repoRoot,
+            SHARED_MEMORY_MEMORY_FILE: explicitMemory,
+            SHARED_MEMORY_SKIP_SERVICE_CHECK: 'true',
+            SHARED_MEMORY_PORT: '39997',
+            PORT: '',
+            MEMORY_FILE: '',
+        },
+    });
+
+    assert.doesNotMatch(output, /overriding inherited MEMORY_FILE/);
+    assert.match(output, new RegExp(explicitMemory.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')));
+});
+
 test('plugin bootstrap falls back to downloaded plugin root when canonical install is missing', () => {
     const missingInstall = path.join(tempDir(), 'missing-install');
     const output = runNodeAll(['.codex-plugin/plugin-start.mjs'], {

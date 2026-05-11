@@ -44,6 +44,7 @@ npm run restart   # safe restart helper for the local HTTP/WebSocket server
 | `MEMORY_SUGGEST_ENABLED` | `false` | Enables local semantic suggestions |
 | `SHARED_MEMORY_INSTALL_DIR` | `C:\sharedMemory` on Windows | Canonical plugin/server checkout |
 | `SHARED_MEMORY_PLUGIN_ROOT` | host plugin dir | Downloaded plugin folder |
+| `SHARED_MEMORY_MEMORY_FILE` | selected repo `data/memory.db` | Explicit plugin memory DB override |
 | `SHARED_MEMORY_AUTO_INSTALL` | `false` | Allow clone/setup without an interactive prompt |
 | `SHARED_MEMORY_AUTO_START` | `false` | Allow local HTTP/WebSocket server start without a prompt |
 | `SHARED_MEMORY_SKIP_SERVICE_CHECK` | `false` | Skip optional local server check/start |
@@ -87,5 +88,6 @@ The stdio adapter exposes:
 - If both the dev checkout and `C:\sharedMemory` exist, check `/status.runtime.cwd` before debugging behavior.
 - Use `npm run doctor` when a client sees unexpected response types, missing relation support, or the wrong memory database.
 - Use `SHARED_MEMORY_BOOTSTRAP_DRY_RUN=true` to inspect plugin bootstrap decisions without cloning, installing, or starting servers.
+- Plugin startup derives `MEMORY_FILE` from the selected repo root so MCP and the local dashboard use the same SQLite file. Use `SHARED_MEMORY_MEMORY_FILE` only when you intentionally want a different database.
 
 Full setup instructions and protocol reference: [guide.md](guide.md)

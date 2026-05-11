@@ -578,7 +578,7 @@ function createMemoryStore(options = {}) {
     let db;
     try {
         db = new DatabaseSync(dbFile !== null ? dbFile : ':memory:');
-        db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;');
+        db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA wal_autocheckpoint = 1000;');
         initSchema(db);
     } catch (error) {
         throw new Error(`Failed to load memory persistence file ${dbFile}: ${error.message}`);
@@ -601,6 +601,7 @@ function createMemoryStore(options = {}) {
     let lastFlushedAt = null;
     let lastFlushError = null;
     let lastPrunedAt = null;
+    const testHooks = options.testHooks || {};
 
     // Prepared statements compiled once and reused for every call.
     const stmts = {
@@ -722,7 +723,7 @@ function createMemoryStore(options = {}) {
         return row.revision === ifRevision ? null : revisionConflict(key, row.revision);
     }
 
-    const doSet = inTransaction((key, valueJson, summary, importance, expiresAt, ts, updatedBy, tags, ifRevision) => {
+    function applySet(key, valueJson, summary, importance, expiresAt, ts, updatedBy, tags, ifRevision) {
         const existing = stmts.getEntryWithRowid.get(key);
         const revisionError = validateRevisionCheck(key, existing, ifRevision, ts, true);
         if (revisionError) return revisionError;
@@ -737,7 +738,9 @@ function createMemoryStore(options = {}) {
         const current = stmts.getEntryRowid.get(key);
         stmts.ftsInsert.run(current.rowid, key, ftsBody(key, summary, tags));
         return { ok: true, revision: nextRevision };
-    });
+    }
+
+    const doSet = inTransaction(applySet);
 
     const doDelete = inTransaction((key, ifRevision) => {
         const existing = stmts.getEntryWithRowid.get(key);
@@ -771,6 +774,36 @@ function createMemoryStore(options = {}) {
             revision: nextRevision,
         };
     });
+
+    function applyRelate(from, to, relation, updatedBy, metadata = {}, t = now()) {
+        if (from === to) return { ok: false, error: 'self-relation-not-allowed' };
+        if (!RELATION_TYPES.has(relation)) return { ok: false, error: 'invalid-relation' };
+        if (metadata.weight !== undefined && !isValidWeight(metadata.weight)) {
+            return { ok: false, error: 'invalid-weight' };
+        }
+
+        if (!stmts.getVisibleEntry.get(from, t) || !stmts.getVisibleEntry.get(to, t)) {
+            return { ok: false, error: 'missing-node' };
+        }
+
+        const id = edgeId(from, relation, to);
+        const action = stmts.getEdge.get(id) ? 'updated' : 'created';
+        stmts.upsertEdge.run(id, from, to, relation, metadata.reason || '', metadata.weight ?? 1, t, updatedBy);
+
+        const edge = {
+            id,
+            from,
+            to,
+            relation,
+            reason: metadata.reason || '',
+            weight: metadata.weight ?? 1,
+            updatedAt: t,
+            updatedBy,
+        };
+        return { ok: true, action, edge };
+    }
+
+    const doRelate = inTransaction(applyRelate);
 
     const doPrune = inTransaction((t) => {
         const expiredRows = stmts.getExpiredEntries.all(t);
@@ -912,7 +945,13 @@ function createMemoryStore(options = {}) {
 
         flushTimer = persistence.scheduler.setTimeout(async () => {
             flushTimer = null;
-            await flush(); // eslint-disable-line no-use-before-define
+            try {
+                await flush(); // eslint-disable-line no-use-before-define
+            } catch (error) {
+                lastFlushError = error.message;
+                dirty = true;
+                console.error(`Failed to flush memory persistence: ${error.message}`);
+            }
         }, persistence.debounceMs);
     }
 
@@ -922,26 +961,50 @@ function createMemoryStore(options = {}) {
         scheduleFlush();
     }
 
-    // Async flush; returns Promise<boolean> (true if acknowledged). SQLite writes are already
-    // durable; this clears the dirty flag and records lastFlushedAt for status reporting.
+    function checkpointWal(mode) {
+        if (!persistence.enabled) return;
+        db.exec(`PRAGMA wal_checkpoint(${mode});`);
+    }
+
+    function recordFlushSuccess() {
+        dirty = false;
+        lastFlushedAt = Date.now();
+        lastFlushError = null;
+    }
+
+    function recordFlushFailure(error) {
+        dirty = true;
+        lastFlushError = error.message;
+    }
+
+    // Async flush; returns Promise<boolean> (true if checkpointed). SQLite commits are immediate;
+    // this coalesces status cleanup and bounds WAL growth after bursty writes.
     async function flush() {
         if (!persistence.enabled) return false;
         clearPendingFlush();
         if (!dirty) return false;
-        dirty = false;
-        lastFlushedAt = Date.now();
-        lastFlushError = null;
-        return true;
+        try {
+            checkpointWal('PASSIVE');
+            recordFlushSuccess();
+            return true;
+        } catch (error) {
+            recordFlushFailure(error);
+            throw error;
+        }
     }
 
-    // Synchronous flush for SIGINT/SIGTERM handlers. Returns true if acknowledged.
+    // Synchronous flush for SIGINT/SIGTERM handlers. Returns true if checkpointed.
     function flushSync() {
         if (!persistence.enabled || !dirty) return false;
         clearPendingFlush();
-        dirty = false;
-        lastFlushedAt = Date.now();
-        lastFlushError = null;
-        return true;
+        try {
+            checkpointWal('TRUNCATE');
+            recordFlushSuccess();
+            return true;
+        } catch (error) {
+            recordFlushFailure(error);
+            throw error;
+        }
     }
 
     function persistenceStatus() {
@@ -1238,6 +1301,88 @@ function createMemoryStore(options = {}) {
         };
     }
 
+    const doBulkSet = inTransaction((entries, updatedBy) => {
+        let changed = false;
+        const results = entries.map((item, index) => {
+            let itemResult;
+            if (!item || typeof item !== 'object' || Array.isArray(item)) {
+                itemResult = { ok: false, error: 'invalid-item' };
+            } else {
+                try {
+                    const summary = item.summary || safeSummary(item.value);
+                    const tags = normalizeTags(item.tags);
+                    const importance = item.importance ?? DEFAULT_IMPORTANCE;
+                    const expiresAt = normalizeExpiry(item);
+                    const ts = now();
+                    const ifRevision = hasOwn(item, 'ifRevision') ? item.ifRevision : undefined;
+                    const valueJson = JSON.stringify(item.value);
+                    const result = applySet(item.key, valueJson, summary, importance, expiresAt, ts, updatedBy, tags, ifRevision);
+                    if (result && result.ok === false) {
+                        itemResult = {
+                            key: item.key,
+                            ok: false,
+                            error: result.error,
+                            currentRevision: result.currentRevision,
+                        };
+                    } else {
+                        changed = true;
+                        itemResult = { key: item.key, ok: true, revision: result.revision };
+                    }
+                } catch (error) {
+                    itemResult = { key: item.key, ok: false, error: error.message };
+                }
+            }
+
+            if (itemResult.ok && testHooks.afterBulkSetItem) {
+                testHooks.afterBulkSetItem({ index, item, result: itemResult });
+            }
+            return itemResult;
+        });
+
+        return { results, changed };
+    });
+
+    const doBulkRelate = inTransaction((relations, updatedBy) => {
+        let changed = false;
+        const results = relations.map((item, index) => {
+            let itemResult;
+            if (!item || typeof item !== 'object' || Array.isArray(item)) {
+                itemResult = { ok: false, error: 'invalid-item' };
+            } else {
+                const result = applyRelate(item.from, item.to, item.relation, updatedBy, {
+                    reason: item.reason,
+                    weight: item.weight,
+                });
+                if (!result.ok) {
+                    itemResult = {
+                        from: item.from,
+                        to: item.to,
+                        relation: item.relation,
+                        ok: false,
+                        error: result.error,
+                    };
+                } else {
+                    changed = true;
+                    itemResult = {
+                        from: item.from,
+                        to: item.to,
+                        relation: item.relation,
+                        ok: true,
+                        action: result.action,
+                        edge: result.edge,
+                    };
+                }
+            }
+
+            if (itemResult.ok && testHooks.afterBulkRelateItem) {
+                testHooks.afterBulkRelateItem({ index, item, result: itemResult });
+            }
+            return itemResult;
+        });
+
+        return { results, changed };
+    });
+
     return {
         // metadata fields: summary, tags, importance (0-10), ttlMs (ms from now), expiresAt (absolute ms).
         set(key, value, updatedBy, metadata = {}) {
@@ -1298,33 +1443,9 @@ function createMemoryStore(options = {}) {
         // Both from and to must already be visible keys.
         // Returns { ok: false, error } or { ok: true, action: 'created'|'updated', edge }.
         relate(from, to, relation, updatedBy, metadata = {}) {
-            if (from === to) return { ok: false, error: 'self-relation-not-allowed' };
-            if (!RELATION_TYPES.has(relation)) return { ok: false, error: 'invalid-relation' };
-            if (metadata.weight !== undefined && !isValidWeight(metadata.weight)) {
-                return { ok: false, error: 'invalid-weight' };
-            }
-
-            const t = now();
-            if (!stmts.getVisibleEntry.get(from, t) || !stmts.getVisibleEntry.get(to, t)) {
-                return { ok: false, error: 'missing-node' };
-            }
-
-            const id = edgeId(from, relation, to);
-            const action = stmts.getEdge.get(id) ? 'updated' : 'created';
-            stmts.upsertEdge.run(id, from, to, relation, metadata.reason || '', metadata.weight ?? 1, t, updatedBy);
-            markDirty();
-
-            const edge = {
-                id,
-                from,
-                to,
-                relation,
-                reason: metadata.reason || '',
-                weight: metadata.weight ?? 1,
-                updatedAt: t,
-                updatedBy,
-            };
-            return { ok: true, action, edge };
+            const result = doRelate(from, to, relation, updatedBy, metadata);
+            if (result.ok) markDirty();
+            return result;
         },
 
         // Idempotently removes an edge and reports whether the graph actually changed.
@@ -1429,49 +1550,20 @@ function createMemoryStore(options = {}) {
             doImport(state);
         },
 
-        // Applies many set calls in one round-trip with per-item failure isolation.
+        // Applies many set calls in one SQLite transaction with per-item failure isolation.
         bulkSet(entries, updatedBy) {
             if (!Array.isArray(entries)) return [];
-            return entries.map((item) => {
-                if (!item || typeof item !== 'object' || Array.isArray(item)) {
-                    return { ok: false, error: 'invalid-item' };
-                }
-                const metadata = {};
-                if (item.summary !== undefined) metadata.summary = item.summary;
-                if (item.tags !== undefined) metadata.tags = item.tags;
-                if (item.importance !== undefined) metadata.importance = item.importance;
-                if (item.ttlMs !== undefined) metadata.ttlMs = item.ttlMs;
-                if (item.expiresAt !== undefined) metadata.expiresAt = item.expiresAt;
-                if (hasOwn(item, 'ifRevision')) metadata.ifRevision = item.ifRevision;
-
-                try {
-                    const result = this.set(item.key, item.value, updatedBy, metadata);
-                    if (result && result.ok === false) {
-                        return { key: item.key, ok: false, error: result.error, currentRevision: result.currentRevision };
-                    }
-                    return { key: item.key, ok: true, revision: result.revision };
-                } catch (error) {
-                    return { key: item.key, ok: false, error: error.message };
-                }
-            });
+            const { results, changed } = doBulkSet(entries, updatedBy);
+            if (changed) markDirty();
+            return results;
         },
 
-        // Applies many relate calls in one round-trip with per-item failure isolation.
+        // Applies many relate calls in one SQLite transaction with per-item failure isolation.
         bulkRelate(relations, updatedBy) {
             if (!Array.isArray(relations)) return [];
-            return relations.map((item) => {
-                if (!item || typeof item !== 'object' || Array.isArray(item)) {
-                    return { ok: false, error: 'invalid-item' };
-                }
-                const result = this.relate(item.from, item.to, item.relation, updatedBy, {
-                    reason: item.reason,
-                    weight: item.weight,
-                });
-                if (!result.ok) {
-                    return { from: item.from, to: item.to, relation: item.relation, ok: false, error: result.error };
-                }
-                return { from: item.from, to: item.to, relation: item.relation, ok: true, action: result.action, edge: result.edge };
-            });
+            const { results, changed } = doBulkRelate(relations, updatedBy);
+            if (changed) markDirty();
+            return results;
         },
 
         audit,

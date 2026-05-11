@@ -41,12 +41,14 @@ Environment:
 | `MEMORY_SUGGEST_ENABLED` | `false` | Enables semantic suggestions |
 | `SHARED_MEMORY_INSTALL_DIR` | `C:\sharedMemory` on Windows | Canonical plugin checkout |
 | `SHARED_MEMORY_PLUGIN_ROOT` | host plugin dir | Downloaded plugin folder |
+| `SHARED_MEMORY_MEMORY_FILE` | selected repo `data/memory.db` | Explicit plugin memory DB override |
 | `SHARED_MEMORY_AUTO_INSTALL` | `false` | Allow clone/setup without an interactive prompt |
 | `SHARED_MEMORY_AUTO_START` | `false` | Allow local server start without an interactive prompt |
 | `SHARED_MEMORY_SKIP_SERVICE_CHECK` | `false` | Skip optional local server check/start |
 | `SHARED_MEMORY_BOOTSTRAP_DRY_RUN` | `false` | Print bootstrap decisions without mutating anything |
 
 The plugin launcher prefers `SHARED_MEMORY_PORT`, then `PORT`, then `3001`.
+It derives `MEMORY_FILE` from the selected repo root and overrides inherited `MEMORY_FILE` values from another checkout. Set `SHARED_MEMORY_MEMORY_FILE` only when you intentionally want the plugin MCP server to use a different SQLite file.
 
 ## Plugin Auto-Boot
 

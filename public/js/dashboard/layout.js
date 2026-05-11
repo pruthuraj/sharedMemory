@@ -6,6 +6,10 @@ const DEFAULT_LAYOUT_MODE = 'force';
 const SCENE_PADDING = 60;
 const NODE_CARD_W = 168;
 const NODE_CARD_H = 78;
+const COLLISION_GAP = 34;
+const COLLISION_HOVER_MARGIN = 14;
+const COLLISION_NUDGE = 2;
+const COLLISION_MAX_ITERATIONS = 80;
 
 // ── Relation Color ─────────────────────────────────────────────────────
 
@@ -22,6 +26,212 @@ function getRelationColor(relation) {
 function cardScale() { return Number(graphSettings?.nodeScale) || 1; }
 function cardW() { return NODE_CARD_W * cardScale(); }
 function cardH() { return NODE_CARD_H * cardScale(); }
+
+// Layout boxes include hover growth so focus animations do not immediately cover neighbors.
+function nodeLayoutSize(node) {
+    const width = Number(node.width()) || cardW();
+    const height = Number(node.height()) || cardH();
+
+    return {
+        width: width + COLLISION_GAP + COLLISION_HOVER_MARGIN,
+        height: height + COLLISION_GAP + COLLISION_HOVER_MARGIN,
+    };
+}
+
+function layoutBoxForNode(node) {
+    const pos = node.position();
+    const size = nodeLayoutSize(node);
+
+    return {
+        key: node.id(),
+        left: pos.x - size.width / 2,
+        right: pos.x + size.width / 2,
+        top: pos.y - size.height / 2,
+        bottom: pos.y + size.height / 2,
+        width: size.width,
+        height: size.height,
+        x: pos.x,
+        y: pos.y,
+    };
+}
+
+function layoutBoxForKey(key) {
+    if (!cy || !key) return null;
+
+    const node = cy.$id(key);
+    if (!node.length) return null;
+
+    return layoutBoxForNode(node[0]);
+}
+
+function boxesOverlap(a, b) {
+    return (
+        a.left < b.right &&
+        a.right > b.left &&
+        a.top < b.bottom &&
+        a.bottom > b.top
+    );
+}
+
+function sortedCyNodes() {
+    const nodes = [];
+
+    cy.nodes().forEach((node) => nodes.push(node));
+    nodes.sort((a, b) => a.id().localeCompare(b.id()));
+
+    return nodes;
+}
+
+function moveNodeBy(node, dx, dy) {
+    const pos = node.position();
+
+    node.position({
+        x: pos.x + dx,
+        y: pos.y + dy,
+    });
+}
+
+function separateOverlappingNodes(a, b, pinnedKeys) {
+    const aBox = layoutBoxForNode(a);
+    const bBox = layoutBoxForNode(b);
+
+    if (!boxesOverlap(aBox, bBox)) return false;
+
+    const aPinned = pinnedKeys.has(a.id());
+    const bPinned = pinnedKeys.has(b.id());
+
+    if (aPinned && bPinned) return false;
+
+    const overlapX = Math.min(aBox.right, bBox.right) - Math.max(aBox.left, bBox.left);
+    const overlapY = Math.min(aBox.bottom, bBox.bottom) - Math.max(aBox.top, bBox.top);
+
+    if (overlapX <= 0 || overlapY <= 0) return false;
+
+    const separateOnX = overlapX <= overlapY;
+    const aFirst = a.id().localeCompare(b.id()) <= 0;
+    const direction = separateOnX
+        ? (aBox.x === bBox.x ? (aFirst ? 1 : -1) : (aBox.x < bBox.x ? 1 : -1))
+        : (aBox.y === bBox.y ? (aFirst ? 1 : -1) : (aBox.y < bBox.y ? 1 : -1));
+    const amount = (separateOnX ? overlapX : overlapY) + COLLISION_NUDGE;
+
+    if (aPinned) {
+        moveNodeBy(b, separateOnX ? direction * amount : 0, separateOnX ? 0 : direction * amount);
+        return true;
+    }
+
+    if (bPinned) {
+        moveNodeBy(a, separateOnX ? -direction * amount : 0, separateOnX ? 0 : -direction * amount);
+        return true;
+    }
+
+    const half = amount / 2;
+    moveNodeBy(a, separateOnX ? -direction * half : 0, separateOnX ? 0 : -direction * half);
+    moveNodeBy(b, separateOnX ? direction * half : 0, separateOnX ? 0 : direction * half);
+
+    return true;
+}
+
+function resolveNodeCollisions(options = {}) {
+    if (!cy) return;
+
+    const nodes = sortedCyNodes();
+    if (nodes.length < 2) return;
+
+    const pinnedKeys = options.pinnedKeys || new Set();
+
+    for (let iteration = 0; iteration < COLLISION_MAX_ITERATIONS; iteration += 1) {
+        let moved = false;
+
+        for (let i = 0; i < nodes.length - 1; i += 1) {
+            for (let j = i + 1; j < nodes.length; j += 1) {
+                if (separateOverlappingNodes(nodes[i], nodes[j], pinnedKeys)) {
+                    moved = true;
+                }
+            }
+        }
+
+        if (!moved) break;
+    }
+}
+
+function savedPositionBounds(savedPositions) {
+    const values = Object.values(savedPositions);
+
+    if (values.length === 0) return null;
+
+    const xs = values.map((pos) => pos.x);
+    const ys = values.map((pos) => pos.y);
+
+    return {
+        left: Math.min(...xs),
+        right: Math.max(...xs),
+        top: Math.min(...ys),
+        bottom: Math.max(...ys),
+    };
+}
+
+function neighborPositionCenter(node, savedPositions) {
+    const positions = [];
+
+    node.connectedEdges().connectedNodes().forEach((neighbor) => {
+        const pos = savedPositions[neighbor.id()];
+        if (pos) positions.push(pos);
+    });
+
+    if (positions.length === 0) return null;
+
+    return {
+        x: positions.reduce((sum, pos) => sum + pos.x, 0) / positions.length,
+        y: positions.reduce((sum, pos) => sum + pos.y, 0) / positions.length,
+    };
+}
+
+function fallbackPositionForMissing(index, savedPositions) {
+    const bounds = savedPositionBounds(savedPositions);
+
+    if (!bounds) {
+        const spacing = Math.max(cardW(), cardH()) + COLLISION_GAP;
+        return { x: index * spacing, y: 0 };
+    }
+
+    return {
+        x: bounds.right + cardW() + COLLISION_GAP,
+        y: bounds.top + index * (cardH() + COLLISION_GAP),
+    };
+}
+
+function placeMissingNode(node, index, savedPositions) {
+    const center = neighborPositionCenter(node, savedPositions) || fallbackPositionForMissing(index, savedPositions);
+    const angle = (stableHash(node.id()) % 360) * Math.PI / 180;
+    const radius = Math.max(cardW(), cardH()) * 1.7 + (index % 4) * 28;
+
+    node.position({
+        x: center.x + Math.cos(angle) * radius,
+        y: center.y + Math.sin(angle) * radius,
+    });
+}
+
+function restoreSavedPositions(savedPositions) {
+    const pinnedKeys = new Set();
+    const missingNodes = [];
+
+    cy.nodes().forEach((node) => {
+        const pos = savedPositions[node.id()];
+
+        if (pos) {
+            node.position(pos);
+            pinnedKeys.add(node.id());
+        } else {
+            missingNodes.push(node);
+        }
+    });
+
+    missingNodes
+        .sort((a, b) => a.id().localeCompare(b.id()))
+        .forEach((node, index) => placeMissingNode(node, index, savedPositions));
+
+    resolveNodeCollisions({ pinnedKeys });
+}
 
 // ── Node SVG Card ──────────────────────────────────────────────────────
 
@@ -257,6 +467,12 @@ function initCytoscape() {
         }
     });
 
+    cy.on('free', 'node', (event) => {
+        resolveNodeCollisions({
+            pinnedKeys: new Set([event.target.id()]),
+        });
+    });
+
     cy.on('mouseover', 'node', (event) => {
         const key = event.target.id();
         const entry = currentEntries[key];
@@ -328,6 +544,7 @@ function runCyLayout() {
     }
 
     cy.layout(config).run();
+    resolveNodeCollisions();
 }
 
 // ── Filtering ──────────────────────────────────────────────────────────
@@ -436,10 +653,7 @@ function renderGraph(rawEntries, rawEdges, options = {}) {
     cy.add(buildCyElements(entries, edges));
 
     if (options.preservePositions && Object.keys(savedPositions).length > 0) {
-        cy.nodes().forEach((node) => {
-            const pos = savedPositions[node.id()];
-            if (pos) node.position(pos);
-        });
+        restoreSavedPositions(savedPositions);
         cy.style().update();
     } else {
         runCyLayout();

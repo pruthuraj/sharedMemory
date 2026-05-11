@@ -853,3 +853,50 @@ function createTimedStoreWithPersistence(file) {
         persistence: { file },
     });
 }
+
+test('bulkSet rolls back the SQLite transaction if interrupted mid-batch', () => {
+    const memory = createMemoryStore({
+        testHooks: {
+            afterBulkSetItem() {
+                throw new Error('simulated bulk interruption');
+            },
+        },
+    });
+
+    assert.throws(
+        () => memory.bulkSet([
+            { key: 'bulk.a', value: 'A', summary: 'A' },
+            { key: 'bulk.b', value: 'B', summary: 'B' },
+        ], 'bulk-agent'),
+        /simulated bulk interruption/,
+    );
+
+    assert.equal(memory.get('bulk.a'), null);
+    assert.equal(memory.get('bulk.b'), null);
+    assert.equal(memory.count(), 0);
+});
+
+test('bulkRelate rolls back the SQLite transaction if interrupted mid-batch', () => {
+    const memory = createMemoryStore({
+        testHooks: {
+            afterBulkRelateItem() {
+                throw new Error('simulated relation interruption');
+            },
+        },
+    });
+
+    memory.set('bulk.a', 'A', 'bulk-agent', { summary: 'A' });
+    memory.set('bulk.b', 'B', 'bulk-agent', { summary: 'B' });
+    memory.set('bulk.c', 'C', 'bulk-agent', { summary: 'C' });
+
+    assert.throws(
+        () => memory.bulkRelate([
+            { from: 'bulk.a', to: 'bulk.b', relation: 'supports' },
+            { from: 'bulk.b', to: 'bulk.c', relation: 'supports' },
+        ], 'bulk-agent'),
+        /simulated relation interruption/,
+    );
+
+    assert.equal(memory.relationCount(), 0);
+    assert.deepEqual(memory.map('bulk.a', { depth: 2, limit: 10 }).edges, []);
+});
