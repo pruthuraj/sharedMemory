@@ -145,29 +145,10 @@ function toggleIdentityPanel() {
 
 // ── Identity Node Focus ────────────────────────────────────────────────
 
-function getIdentityNodeElement(key) {
-    if (!key || !scene) return null;
-
-    return scene.querySelector(`[data-key="${CSS.escape(key)}"]`);
-}
-
-function expandIdentityNodeIfNeeded(key) {
-    const nodeEl = getIdentityNodeElement(key);
-
-    if (!nodeEl || expandedNodes.has(key)) return;
-
-    expandedNodes.add(key);
-    setNodePresentation(key, nodeEl);
-
-    rerenderEdgesForCurrentPositions();
-    window.setTimeout(rerenderEdgesForCurrentPositions, NODE_TRANSITION_MS);
-}
-
 function focusIdentityNode(key) {
     const entry = currentEntries?.[key];
 
     if (!entry) return;
 
-    expandIdentityNodeIfNeeded(key);
     openDetail(key, entry);
 }
