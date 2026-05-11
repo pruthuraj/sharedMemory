@@ -6,7 +6,7 @@
   "mcpServers": {
     "memory-mcp": {
       "command": "node",
-      "args": ["${pluginDir}/plugin-start.js"],
+      "args": ["--input-type=module", "-e", "import(process.env.SHARED_MEMORY_INSTALL_DIR+'/mcp-server.mjs')"],
       "env": {
         "MCP_ENABLED": "true",
         "SHARED_MEMORY_INSTALL_DIR": "C:\\sharedMemory",
