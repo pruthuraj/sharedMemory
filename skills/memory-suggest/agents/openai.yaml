@@ -1,0 +1,12 @@
+interface:
+  display_name: "Memory Suggest"
+  short_description: "Semantic memory recall"
+  default_prompt: "Use $memory-suggest to recall context for this task."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "shared-memory"
+      description: "SharedMemory MCP server with memory_suggest."
+      transport: "stdio"
+policy:
+  allow_implicit_invocation: true

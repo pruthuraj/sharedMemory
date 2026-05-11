@@ -1,0 +1,12 @@
+interface:
+  display_name: "Memory Bulk Relate"
+  short_description: "Link many memory nodes"
+  default_prompt: "Use $memory-bulk-relate to connect several memory entries."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "shared-memory"
+      description: "SharedMemory MCP server with memory_bulk_relate."
+      transport: "stdio"
+policy:
+  allow_implicit_invocation: true

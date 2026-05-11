@@ -1,0 +1,12 @@
+interface:
+  display_name: "Memory Search"
+  short_description: "Find memory by metadata"
+  default_prompt: "Use $memory-search to find relevant project memories."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "shared-memory"
+      description: "SharedMemory MCP server with memory_search."
+      transport: "stdio"
+policy:
+  allow_implicit_invocation: true

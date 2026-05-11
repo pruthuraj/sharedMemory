@@ -1,0 +1,12 @@
+interface:
+  display_name: "Memory Import"
+  short_description: "Import memory snapshots"
+  default_prompt: "Use $memory-import to restore a validated memory snapshot."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "shared-memory"
+      description: "SharedMemory MCP server with memory_import."
+      transport: "stdio"
+policy:
+  allow_implicit_invocation: true
