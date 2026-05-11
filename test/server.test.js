@@ -7,6 +7,8 @@ const WebSocket = require('ws');
 
 const { createSharedMemoryServer } = require('../src/server');
 const { createMemoryStore } = require('../src/memory-store');
+const { DIRECT_RESPONSE_TYPES, RELATION_TYPE_LIST, protocolMetadata } = require('../src/protocol');
+const { SharedMemoryWsClient } = require('../scripts/shared-memory-client');
 
 function tempPath(name) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'shared-memory-server-test-'));
@@ -209,7 +211,17 @@ test('register, set, get, list, and status remain compatible', async () => {
         });
 
         const status = await fetch(`${httpUrl}/status`).then((response) => response.json());
-        assert.deepEqual(status, {
+        const { runtime, ...statusWithoutRuntime } = status;
+        assert.equal(runtime.packageName, 'mcp-shared-memory-server');
+        assert.equal(runtime.packageVersion, '0.1.0');
+        assert.equal(runtime.port, appServer.server.address().port);
+        assert.equal(typeof runtime.pid, 'number');
+        assert.equal(typeof runtime.startedAt, 'number');
+        assert.equal(typeof runtime.cwd, 'string');
+        assert.equal(typeof runtime.entrypoint, 'string');
+        assert.equal(runtime.nodeVersion, process.version);
+
+        assert.deepEqual(statusWithoutRuntime, {
             agents: ['agentA'],
             connectedAgents: ['agentA'],
             memoryKeys: ['greeting'],
@@ -251,6 +263,121 @@ test('register, set, get, list, and status remain compatible', async () => {
             },
         });
     } finally {
+        await appServer.close();
+    }
+});
+
+test('/protocol exposes live protocol metadata and follows status auth', async () => {
+    const { appServer, httpUrl } = await startServer();
+
+    try {
+        const response = await fetch(`${httpUrl}/protocol`);
+        assert.equal(response.status, 200);
+        assert.deepEqual(await response.json(), protocolMetadata());
+    } finally {
+        await appServer.close();
+    }
+
+    const locked = await startServer({ authToken: 'secret' });
+    try {
+        const missing = await fetch(`${locked.httpUrl}/protocol`);
+        assert.equal(missing.status, 401);
+        assert.deepEqual(await missing.json(), { error: 'unauthorized' });
+
+        const wrong = await fetch(`${locked.httpUrl}/protocol`, {
+            headers: { Authorization: 'Bearer wrong' },
+        });
+        assert.equal(wrong.status, 401);
+        assert.deepEqual(await wrong.json(), { error: 'unauthorized' });
+
+        const ok = await fetch(`${locked.httpUrl}/protocol`, {
+            headers: { Authorization: 'Bearer secret' },
+        });
+        assert.equal(ok.status, 200);
+        const metadata = await ok.json();
+        assert.equal(metadata.directResponseTypes['validate-import'], 'import-validation');
+        assert.equal(metadata.directResponseTypes.relate, 'related');
+        assert.equal(metadata.directResponseTypes.unrelate, 'unrelated');
+        assert.deepEqual(metadata.relationTypes, RELATION_TYPE_LIST);
+    } finally {
+        await locked.appServer.close();
+    }
+});
+
+test('all official relation types work through websocket graph operations', async () => {
+    const { appServer, wsUrl } = await startServer();
+
+    try {
+        const client = await connectClient(wsUrl);
+        await client.waitFor((message) => message.type === 'welcome');
+        client.send({ type: 'register', agentId: 'relation-agent' });
+        await client.waitFor((message) => message.type === 'registered');
+
+        client.send({ type: 'set', key: 'from', value: true, summary: 'From node' });
+        await client.waitFor((message) => message.type === 'ok' && message.key === 'from');
+        client.send({ type: 'set', key: 'to', value: true, summary: 'To node' });
+        await client.waitFor((message) => message.type === 'ok' && message.key === 'to');
+
+        for (const relation of RELATION_TYPE_LIST) {
+            client.send({ type: 'relate', from: 'from', to: 'to', relation, requestId: `rel-${relation}` });
+            const response = await client.waitFor((message) => message.requestId === `rel-${relation}`);
+            assert.equal(response.type, DIRECT_RESPONSE_TYPES.relate);
+            assert.equal(response.edge.relation, relation);
+        }
+
+        client.send({ type: 'map', key: 'from', depth: 1, limit: 20, requestId: 'map-relations' });
+        const graph = await client.waitFor((message) => message.requestId === 'map-relations');
+        assert.equal(graph.type, 'map-result');
+        assert.deepEqual(graph.edges.map((edge) => edge.relation).sort(), RELATION_TYPE_LIST.slice().sort());
+
+        client.send({ type: 'export', requestId: 'export-relations' });
+        const exported = await client.waitFor((message) => message.requestId === 'export-relations');
+        assert.deepEqual(exported.snapshot.edges.map((edge) => edge.relation).sort(), RELATION_TYPE_LIST.slice().sort());
+
+        client.send({ type: 'validate-import', snapshot: exported.snapshot, requestId: 'validate-relations' });
+        const validation = await client.waitFor((message) => message.requestId === 'validate-relations');
+        assert.equal(validation.type, 'import-validation');
+        assert.equal(validation.ok, true);
+    } finally {
+        await appServer.close();
+    }
+});
+
+test('shared WebSocket client uses protocol response mappings and fails on mismatches', async () => {
+    const { appServer, wsUrl } = await startServer();
+    const client = new SharedMemoryWsClient({ wsUrl, timeoutMs: 500 });
+
+    try {
+        await client.connect();
+        await client.waitFor((message) => message.type === 'welcome');
+
+        const registered = await client.request({ type: 'register', agentId: 'mapped-client' });
+        assert.equal(registered.type, DIRECT_RESPONSE_TYPES.register);
+
+        await client.request({ type: 'set', key: 'a', value: true, summary: 'A' });
+        await client.request({ type: 'set', key: 'b', value: true, summary: 'B' });
+
+        const related = await client.request({ type: 'relate', from: 'a', to: 'b', relation: 'documents' });
+        assert.equal(related.type, 'related');
+
+        const unrelated = await client.request({ type: 'unrelate', from: 'a', to: 'b', relation: 'documents' });
+        assert.equal(unrelated.type, 'unrelated');
+
+        const validation = await client.request({
+            type: 'validate-import',
+            snapshot: { entries: {}, edges: [] },
+        });
+        assert.equal(validation.type, 'import-validation');
+
+        await assert.rejects(
+            client.request(
+                { type: 'validate-import', snapshot: { entries: {}, edges: [] } },
+                { expectedType: 'validate-import-result' },
+            ),
+            /Expected validate-import-result/,
+        );
+    } finally {
+        await client.close();
         await appServer.close();
     }
 });

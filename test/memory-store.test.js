@@ -5,6 +5,7 @@ const path = require('path');
 const test = require('node:test');
 
 const { createMemoryStore } = require('../src/memory-store');
+const { RELATION_TYPE_LIST } = require('../src/protocol');
 
 function tempPath(name) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'shared-memory-test-'));
@@ -65,6 +66,71 @@ test('map orders nodes deterministically before applying the limit', () => {
 
     const result = memory.map('root', { depth: 1, limit: 3 });
     assert.deepEqual(result.nodes.map((node) => node.key), ['root', 'high-new', 'high-old']);
+});
+
+test('memory store accepts every protocol relation type', () => {
+    const memory = createTimedStore();
+
+    memory.set('from', 'from', 'test', { summary: 'From' });
+    memory.set('to', 'to', 'test', { summary: 'To' });
+
+    for (const relation of RELATION_TYPE_LIST) {
+        const result = memory.relate('from', 'to', relation, 'test', {
+            reason: `${relation} reason`,
+            weight: 0.5,
+        });
+        assert.equal(result.ok, true);
+        assert.equal(result.edge.relation, relation);
+    }
+
+    const graph = memory.map('from', { depth: 1, limit: 20 });
+    assert.deepEqual(graph.edges.map((edge) => edge.relation).sort(), RELATION_TYPE_LIST.slice().sort());
+});
+
+test('snapshot validation accepts every protocol relation type', () => {
+    const memory = createTimedStore();
+    const entries = {
+        from: {
+            value: 'from',
+            summary: 'From',
+            tags: [],
+            importance: 0,
+            revision: 1,
+            expiresAt: null,
+            updatedAt: 100,
+            updatedBy: 'test',
+        },
+        to: {
+            value: 'to',
+            summary: 'To',
+            tags: [],
+            importance: 0,
+            revision: 1,
+            expiresAt: null,
+            updatedAt: 100,
+            updatedBy: 'test',
+        },
+    };
+    const edges = RELATION_TYPE_LIST.map((relation, index) => ({
+        from: 'from',
+        to: 'to',
+        relation,
+        reason: `${relation} reason`,
+        weight: 0.5,
+        updatedAt: 200 + index,
+        updatedBy: 'test',
+    }));
+
+    const result = memory.validateSnapshot({ entries, edges });
+    assert.equal(result.ok, true);
+    assert.equal(result.stats.edgeCount, RELATION_TYPE_LIST.length);
+
+    const invalid = memory.validateSnapshot({
+        entries,
+        edges: [{ ...edges[0], relation: 'not_real' }],
+    });
+    assert.equal(invalid.ok, false);
+    assert.ok(invalid.errors.some((error) => error.message === 'invalid-relation'));
 });
 
 test('persistence starts empty when file is missing', () => {

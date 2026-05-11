@@ -6,10 +6,12 @@ import * as z from 'zod/v4';
 import memoryStoreModule from './src/memory-store.js';
 import suggestionEngineModule from './src/suggestion-engine.js';
 import mcpToolsModule from './src/mcp-tools.js';
+import protocolModule from './src/protocol.js';
 
 const { createMemoryStore } = memoryStoreModule;
 const { createSuggestionEngine } = suggestionEngineModule;
 const { createSharedMemoryToolHandlers, mcpToolResult } = mcpToolsModule;
+const { RELATION_TYPE_LIST, MCP_TOOL_NAMES } = protocolModule;
 
 const looseInput = z.any().optional();
 const outputSchema = z.object({ ok: z.boolean() }).passthrough();
@@ -100,7 +102,7 @@ function registerSharedMemoryTools(server, handlers) {
         'memory_relate',
         {
             title: 'Relate Memory',
-            description: 'Create or update a typed graph edge between two memory keys. Relations: related_to, depends_on, supports, contradicts, mentions, derived_from, next_step.',
+            description: `Create or update a typed graph edge between two memory keys. Relations: ${RELATION_TYPE_LIST.join(', ')}.`,
             inputSchema: z.object({
                 from: looseInput,
                 to: looseInput,
@@ -157,7 +159,7 @@ function registerSharedMemoryTools(server, handlers) {
         'memory_import',
         {
             title: 'Import Memory Snapshot',
-            description: 'Replace current shared memory graph with a strictly validated snapshot.',
+            description: 'Import a strictly validated memory graph snapshot in replace or merge mode.',
             inputSchema: z.object({
                 snapshot: looseInput,
                 mode: looseInput,
@@ -232,6 +234,8 @@ export function createSharedMemoryMcpServer(options = {}) {
         },
     };
 }
+
+export { MCP_TOOL_NAMES };
 
 async function main() {
     const app = createSharedMemoryMcpServer();

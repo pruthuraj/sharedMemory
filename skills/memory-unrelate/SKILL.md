@@ -11,7 +11,7 @@ Use `memory_unrelate` when a specific edge is wrong or stale but both memory ent
 
 - `from`: source key.
 - `to`: target key.
-- `relation`: relation type to remove.
+- `relation`: official relation type to remove (`related_to`, `depends_on`, `supports`, `contradicts`, `mentions`, `derived_from`, `next_step`, `implements`, `documents`, or `blocks`).
 
 ## Safe Use
 

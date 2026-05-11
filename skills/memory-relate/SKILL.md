@@ -11,7 +11,7 @@ Use `memory_relate` after creating or updating memories so recall can traverse t
 
 - `from`: existing source key.
 - `to`: existing target key.
-- `relation`: one of `related_to`, `depends_on`, `supports`, `contradicts`, `mentions`, `derived_from`, `next_step`.
+- `relation`: one of `related_to`, `depends_on`, `supports`, `contradicts`, `mentions`, `derived_from`, `next_step`, `implements`, `documents`, `blocks`.
 - `reason`: optional non-empty explanation.
 - `weight`: optional numeric strength from 0 to 1 inclusive. Omit it to default to 1.
 

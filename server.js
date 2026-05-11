@@ -3,8 +3,12 @@
 const { createSharedMemoryServer } = require('./src/server');
 
 if (require.main === module) {
-    const PORT = process.env.PORT || 3000;
-    const appServer = createSharedMemoryServer();
+    const configuredPort = process.env.SHARED_MEMORY_PORT || process.env.PORT || '3001';
+    const PORT = Number(configuredPort);
+    if (!Number.isInteger(PORT) || PORT <= 0) {
+        throw new Error(`Invalid port: ${configuredPort}`);
+    }
+    const appServer = createSharedMemoryServer({ port: PORT, entrypoint: __filename });
     let shuttingDown = false;
 
     appServer.listen(PORT, () => {

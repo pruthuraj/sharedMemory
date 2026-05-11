@@ -26,7 +26,7 @@ function hasValidTags(tags) {
     return Array.isArray(tags) && tags.every(isNonEmptyString);
 }
 
-// Coerce helpers — handle type mismatches from MCP JSON-RPC transport
+// Coerce helpers handle type mismatches from MCP JSON-RPC transport.
 function coerceArray(v) {
     if (Array.isArray(v)) return v;
     if (typeof v === 'string') {

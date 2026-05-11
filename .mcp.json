@@ -8,7 +8,10 @@
         "const { pathToFileURL } = await import('node:url'); const path = await import('node:path'); const configuredRoot = process.env.SHARED_MEMORY_PLUGIN_ROOT || ''; const root = configuredRoot.includes('${') ? process.cwd() : (configuredRoot || process.cwd()); await import(pathToFileURL(path.resolve(root, '.codex-plugin/plugin-start.mjs')).href);"
       ],
       "env": {
-        "SHARED_MEMORY_PLUGIN_ROOT": "C:\\sharedMemory"
+        "SHARED_MEMORY_PLUGIN_ROOT": "C:\\sharedMemory",
+        "MEMORY_FILE": "C:\\sharedMemory\\data\\memory.db",
+        "SHARED_MEMORY_PORT": "3001",
+        "PORT": "3001"
       },
       "description": "SharedMemory stdio MCP server exposing memory_set, memory_get, memory_search, memory_suggest, memory_map, relation, snapshot, audit, and bulk tools."
     }

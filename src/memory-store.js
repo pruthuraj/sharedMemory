@@ -3,21 +3,14 @@
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 
+const { RELATION_TYPES } = require('./protocol');
+
 const DEFAULT_IMPORTANCE = 0;
 const DEFAULT_MAP_DEPTH = 1;
 const DEFAULT_MAP_LIMIT = 10;
 const DEFAULT_PERSISTENCE_DEBOUNCE_MS = 500;
 const DEFAULT_PRUNE_INTERVAL_MS = 600000;
 const FALLBACK_SUMMARY_LIMIT = 120;
-const RELATION_TYPES = new Set([
-    'related_to',
-    'depends_on',
-    'supports',
-    'contradicts',
-    'mentions',
-    'derived_from',
-    'next_step',
-]);
 
 // Unit-separator (U+001F) prevents keys containing the relation name from colliding with a real edge id.
 function edgeId(from, relation, to) {

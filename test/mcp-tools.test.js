@@ -3,6 +3,7 @@ const test = require('node:test');
 
 const { createSharedMemoryToolHandlers, mcpToolResult } = require('../src/mcp-tools');
 const { createMemoryStore } = require('../src/memory-store');
+const { RELATION_TYPE_LIST } = require('../src/protocol');
 
 function createFakeSuggestionEngine(enabled = true) {
     const calls = {
@@ -162,6 +163,31 @@ test('MCP handlers validate inputs with protocol-compatible domain errors', asyn
         error: 'invalid-weight',
     });
     assert.equal(memory.relationCount(), 0);
+});
+
+test('MCP relate accepts every official protocol relation type', async () => {
+    const memory = createMemoryStore();
+    const handlers = createSharedMemoryToolHandlers({
+        memory,
+        suggestionEngine: createFakeSuggestionEngine(false),
+    });
+
+    await handlers.memory_set({ key: 'from', value: true, summary: 'From' });
+    await handlers.memory_set({ key: 'to', value: true, summary: 'To' });
+
+    for (const relation of RELATION_TYPE_LIST) {
+        const result = await handlers.memory_relate({
+            from: 'from',
+            to: 'to',
+            relation,
+            reason: `${relation} reason`,
+            weight: 0.5,
+        });
+        assert.equal(result.ok, true);
+        assert.equal(result.edge.relation, relation);
+    }
+
+    assert.equal(memory.relationCount(), RELATION_TYPE_LIST.length);
 });
 
 test('MCP handlers export, validate, and import strict snapshots', async () => {

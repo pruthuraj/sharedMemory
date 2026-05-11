@@ -12,7 +12,7 @@ const defaultInstallDir = process.platform === 'win32'
   : join(os.homedir(), '.sharedMemory');
 const installDir = resolve(process.env.SHARED_MEMORY_INSTALL_DIR || defaultInstallDir);
 const repoUrl = process.env.SHARED_MEMORY_REPO_URL || 'https://github.com/pruthuraj/sharedMemory.git';
-const port = String(process.env.PORT || process.env.SHARED_MEMORY_PORT || '8000');
+const port = String(process.env.SHARED_MEMORY_PORT || process.env.PORT || '3001');
 const statusUrl = process.env.SHARED_MEMORY_STATUS_URL || `http://127.0.0.1:${port}/status`;
 const autoInstall = isTruthy(process.env.SHARED_MEMORY_AUTO_INSTALL);
 const autoStart = isTruthy(process.env.SHARED_MEMORY_AUTO_START);
