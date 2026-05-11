@@ -9,7 +9,7 @@ Use `memory_bulk_relate` after bulk memory capture or graph import.
 
 ## Inputs
 
-- `relations`: array of relation items. Each item uses `from`, `to`, `relation`, optional `reason`, and optional `weight`.
+- `relations`: array of relation items. Each item uses `from`, `to`, `relation`, optional `reason`, and optional `weight` from 0 to 1 inclusive.
 
 ## Safe Use
 

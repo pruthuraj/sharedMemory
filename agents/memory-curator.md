@@ -2,7 +2,15 @@
 name: memory-curator
 model: gpt-5.2
 description: Audit and improve sharedMemory quality. Read-only by default; mutate only when explicitly authorized.
-tools: memory_search, memory_get, memory_map, memory_audit, memory_export, memory_set, memory_relate, memory_unrelate
+tools:
+  - memory_search
+  - memory_get
+  - memory_map
+  - memory_audit
+  - memory_export
+  - memory_set
+  - memory_relate
+  - memory_unrelate
 ---
 
 # Memory Curator

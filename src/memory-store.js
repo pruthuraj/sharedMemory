@@ -1306,6 +1306,10 @@ function createMemoryStore(options = {}) {
         // Returns { ok: false, error } or { ok: true, action: 'created'|'updated', edge }.
         relate(from, to, relation, updatedBy, metadata = {}) {
             if (from === to) return { ok: false, error: 'self-relation-not-allowed' };
+            if (!RELATION_TYPES.has(relation)) return { ok: false, error: 'invalid-relation' };
+            if (metadata.weight !== undefined && !isValidWeight(metadata.weight)) {
+                return { ok: false, error: 'invalid-weight' };
+            }
 
             const t = now();
             if (!stmts.getVisibleEntry.get(from, t) || !stmts.getVisibleEntry.get(to, t)) {

@@ -13,7 +13,7 @@ Use `memory_relate` after creating or updating memories so recall can traverse t
 - `to`: existing target key.
 - `relation`: one of `related_to`, `depends_on`, `supports`, `contradicts`, `mentions`, `derived_from`, `next_step`.
 - `reason`: optional non-empty explanation.
-- `weight`: optional numeric strength. Prefer 0 to 1.
+- `weight`: optional numeric strength from 0 to 1 inclusive. Omit it to default to 1.
 
 ## Safe Use
 
@@ -21,4 +21,4 @@ Both endpoints must exist and be visible. Self-relations are rejected. Prefer sp
 
 ## Output
 
-Success returns `{ ok: true, action, edge }`. Common failures are `missing-node`, `invalid-relation`, and `self-relation-not-allowed`.
+Success returns `{ ok: true, action, edge }`. Common failures are `missing-node`, `invalid-relation`, `invalid-weight`, and `self-relation-not-allowed`.

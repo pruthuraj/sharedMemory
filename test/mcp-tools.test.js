@@ -115,8 +115,9 @@ test('MCP handlers set, get, search, and map memory with stable envelopes', asyn
 });
 
 test('MCP handlers validate inputs with protocol-compatible domain errors', async () => {
+    const memory = createMemoryStore();
     const handlers = createSharedMemoryToolHandlers({
-        memory: createMemoryStore(),
+        memory,
         suggestionEngine: createFakeSuggestionEngine(false),
     });
 
@@ -148,6 +149,19 @@ test('MCP handlers validate inputs with protocol-compatible domain errors', asyn
         ok: false,
         error: 'missing-snapshot',
     });
+
+    await handlers.memory_set({ key: 'a', value: true });
+    await handlers.memory_set({ key: 'b', value: true });
+    assert.deepEqual(await handlers.memory_relate({
+        from: 'a',
+        to: 'b',
+        relation: 'supports',
+        weight: 5,
+    }), {
+        ok: false,
+        error: 'invalid-weight',
+    });
+    assert.equal(memory.relationCount(), 0);
 });
 
 test('MCP handlers export, validate, and import strict snapshots', async () => {

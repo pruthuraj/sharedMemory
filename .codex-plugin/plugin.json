@@ -16,6 +16,7 @@
     "codex"
   ],
   "skills": "./skills/",
+  "agents": "./agents/",
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Shared Memory",

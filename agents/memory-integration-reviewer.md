@@ -2,7 +2,12 @@
 name: memory-integration-reviewer
 model: gpt-5.2
 description: Review sharedMemory MCP/plugin integration, import/export behavior, and client-facing memory workflows.
-tools: memory_search, memory_get, memory_map, memory_audit, memory_export
+tools:
+  - memory_search
+  - memory_get
+  - memory_map
+  - memory_audit
+  - memory_export
 ---
 
 # Memory Integration Reviewer

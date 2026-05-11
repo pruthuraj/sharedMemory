@@ -166,7 +166,15 @@ function validateRelateInput(input) {
         return 'invalid-relation';
     }
     if (hasOwn(input, 'reason') && !isNonEmptyString(input.reason)) return 'invalid-reason';
-    if (hasOwn(input, 'weight') && !(typeof input.weight === 'number' && Number.isFinite(input.weight))) {
+    if (
+        hasOwn(input, 'weight')
+        && !(
+            typeof input.weight === 'number'
+            && Number.isFinite(input.weight)
+            && input.weight >= 0
+            && input.weight <= 1
+        )
+    ) {
         return 'invalid-weight';
     }
     return null;

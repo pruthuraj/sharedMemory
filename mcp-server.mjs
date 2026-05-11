@@ -144,7 +144,10 @@ function registerSharedMemoryTools(server, handlers) {
         {
             title: 'Validate Memory Snapshot Import',
             description: 'Validate a full memory graph snapshot without mutating current state.',
-            inputSchema: z.object({ snapshot: looseInput }),
+            inputSchema: z.object({
+                snapshot: looseInput,
+                mode: looseInput,
+            }),
             outputSchema,
         },
         async (input) => mcpToolResult(await handlers.memory_validate_import(input)),
@@ -155,7 +158,10 @@ function registerSharedMemoryTools(server, handlers) {
         {
             title: 'Import Memory Snapshot',
             description: 'Replace current shared memory graph with a strictly validated snapshot.',
-            inputSchema: z.object({ snapshot: looseInput }),
+            inputSchema: z.object({
+                snapshot: looseInput,
+                mode: looseInput,
+            }),
             outputSchema,
         },
         async (input) => mcpToolResult(await handlers.memory_import(input)),

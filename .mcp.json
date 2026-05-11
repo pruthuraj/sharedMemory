@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "shared-memory": {
+      "command": "node",
+      "args": [
+        "--input-type=module",
+        "-e",
+        "const { pathToFileURL } = await import('node:url'); const path = await import('node:path'); const configuredRoot = process.env.SHARED_MEMORY_PLUGIN_ROOT || ''; const root = configuredRoot.includes('${') ? process.cwd() : (configuredRoot || process.cwd()); await import(pathToFileURL(path.resolve(root, 'scripts/plugin-start.mjs')).href);"
+      ],
+      "env": {
+        "SHARED_MEMORY_PLUGIN_ROOT": "${pluginDir}"
+      },
+      "description": "SharedMemory stdio MCP server exposing memory_set, memory_get, memory_search, memory_suggest, memory_map, relation, snapshot, audit, and bulk tools."
+    }
+  }
+}

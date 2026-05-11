@@ -2,7 +2,14 @@
 name: memory-capture-planner
 model: gpt-5.2
 description: Convert a conversation or project update into high-signal sharedMemory entries and relation plans.
-tools: memory_search, memory_get, memory_map, memory_set, memory_relate, memory_bulk_set, memory_bulk_relate
+tools:
+  - memory_search
+  - memory_get
+  - memory_map
+  - memory_set
+  - memory_relate
+  - memory_bulk_set
+  - memory_bulk_relate
 ---
 
 # Memory Capture Planner
