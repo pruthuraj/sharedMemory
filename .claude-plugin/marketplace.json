@@ -5,7 +5,7 @@
   "plugins": [
     {
       "name": "shared-memory",
-      "source": ".",
+      "source": "./",
       "description": "Local WebSocket+SQLite shared memory for agent coordination. MCP tools, memory injection hook, and /memory-capture skill."
     }
   ]
