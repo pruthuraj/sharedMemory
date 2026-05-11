@@ -70,26 +70,49 @@ MEMORY_SUGGEST_ENABLED=true npm start   # terminal 1
 npm run smoke:suggest                   # terminal 2
 ```
 
+### Integrating with Claude Code (plugin)
+
+Install as a Claude Code plugin — MCP tools, `UserPromptSubmit` hook, and `/memory-capture` skill load automatically:
+
+```
+/plugin install shared-memory@pruthuraj
+```
+
+Or add to `~/.claude/settings.json` manually:
+
+```json
+"enabledPlugins": { "shared-memory@pruthuraj": true },
+"extraKnownMarketplaces": {
+  "pruthuraj": { "source": { "source": "github", "repo": "pruthuraj/sharedMemory" } }
+}
+```
+
+The plugin runs `mcp-server.mjs` from `SHARED_MEMORY_INSTALL_DIR` (default `C:\sharedMemory` on Windows, `~/.shared-memory` on other platforms). Override env vars in `plugin.json` if needed:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SHARED_MEMORY_INSTALL_DIR` | `C:\sharedMemory` | Where server code lives |
+| `MEMORY_FILE` | `C:\sharedMemory\data\memory.db` | SQLite persistence path |
+| `PORT` | `3000` | Server port |
+
 ### Integrating with Claude Desktop (Windows)
 
-The MCP entry point is `mcp-server.mjs`. Use `scripts/claude-mcp.ps1` to resolve the repo path dynamically so your config doesn't break if the repo moves.
+The MCP entry point is `mcp-server.mjs`. Point directly at the install dir:
 
 ```json
 {
   "mcpServers": {
     "shared-memory": {
-      "command": "powershell",
-      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-               "D:\\Pruthu\\cv projects\\test\\sharedMemory\\scripts\\claude-mcp.ps1"],
+      "command": "node",
+      "args": ["C:\\sharedMemory\\mcp-server.mjs"],
       "env": {
-        "MEMORY_FILE": "D:\\Pruthu\\cv projects\\test\\sharedMemory\\data\\memory.db"
+        "MCP_ENABLED": "true",
+        "MEMORY_FILE": "C:\\sharedMemory\\data\\memory.db"
       }
     }
   }
 }
 ```
-
-Set `SHARED_MEMORY_REPO_ROOT` to override the resolved repo path if needed.
 
 ---
 

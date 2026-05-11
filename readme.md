@@ -47,6 +47,27 @@ Two protocols, same underlying store:
 
 ---
 
+## Claude Code plugin
+
+Install as a Claude Code plugin — memory tools, hook, and skill load automatically in every project:
+
+```
+/plugin install shared-memory@pruthuraj
+```
+
+Or add manually to `settings.json`:
+
+```json
+"enabledPlugins": { "shared-memory@pruthuraj": true },
+"extraKnownMarketplaces": {
+  "pruthuraj": { "source": { "source": "github", "repo": "pruthuraj/sharedMemory" } }
+}
+```
+
+The plugin runs `mcp-server.mjs` from `C:\sharedMemory` (default) or `SHARED_MEMORY_INSTALL_DIR`. Data persists at `MEMORY_FILE` (default `C:\sharedMemory\data\memory.db`). Port is configurable via `PORT` (default 3000).
+
+---
+
 ## Stack
 
 Node.js 24+, SQLite (`node:sqlite`), WebSocket (`ws`), Express. No build step. No external test framework — tests use Node's built-in `node:test`. Optional Hugging Face Transformers.js for semantic suggestions.
