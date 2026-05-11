@@ -73,6 +73,9 @@ function createSharedMemoryServer(options = {}) {
     let lastExportedAt = null;
     let lastImportedAt = null;
     let lastImportStats = null;
+    let auditCache = null;
+    let auditCachedAt = 0;
+    const AUDIT_CACHE_MS = 5000;
     const authenticatedSockets = new WeakSet();
 
     app.use(express.static(path.join(__dirname, '..', 'public')));
@@ -83,6 +86,7 @@ function createSharedMemoryServer(options = {}) {
             return;
         }
 
+        const auditResult = getCachedAudit();
         res.json({
             agents: agents.ids(),
             connectedAgents: agents.connectedIds(),
@@ -93,6 +97,7 @@ function createSharedMemoryServer(options = {}) {
             persistence: memory.persistenceStatus(),
             suggestions: suggestionStatus(),
             snapshot: snapshotStatus(),
+            audit: auditResult.counts,
         });
     });
 
@@ -144,6 +149,14 @@ function createSharedMemoryServer(options = {}) {
             lastImportedAt,
             lastImportStats,
         };
+    }
+
+    function getCachedAudit() {
+        const t = now();
+        if (auditCache && t - auditCachedAt < AUDIT_CACHE_MS) return auditCache;
+        auditCache = memory.audit();
+        auditCachedAt = t;
+        return auditCache;
     }
 
     function snapshotStats(snapshot) {
@@ -243,7 +256,8 @@ function createSharedMemoryServer(options = {}) {
         if (isAuthenticated) {
             authenticatedSockets.add(ws);
         }
-        safeSend(ws, { type: 'welcome', agentId });
+        // Don't leak agentId to unauthenticated connections; it arrives in 'authenticated' instead.
+        safeSend(ws, isAuthenticated ? { type: 'welcome', agentId } : { type: 'welcome' });
 
         ws.on('message', async (raw) => {
             const parsed = parseMessage(raw);
@@ -259,7 +273,7 @@ function createSharedMemoryServer(options = {}) {
                 if (!authToken || data.token === authToken) {
                     isAuthenticated = true;
                     authenticatedSockets.add(ws);
-                    safeSend(ws, { type: 'authenticated', requestId });
+                    safeSend(ws, { type: 'authenticated', agentId, requestId });
                 } else {
                     safeSend(ws, { type: 'error', message: 'unauthorized', requestId });
                 }
@@ -540,6 +554,39 @@ function createSharedMemoryServer(options = {}) {
                         requestId,
                     });
                     notifySnapshotImported(result.stats, mode);
+                    break;
+                }
+
+                case 'audit': {
+                    auditCache = memory.audit(data.staleMs != null ? { staleMs: data.staleMs } : {});
+                    auditCachedAt = now();
+                    safeSend(ws, { type: 'audit-result', ...auditCache, requestId });
+                    break;
+                }
+
+                case 'bulk_set': {
+                    const results = memory.bulkSet(data.entries, agentId);
+                    safeSend(ws, { type: 'bulk-set-result', results, requestId });
+                    for (const r of results) {
+                        if (r.ok) {
+                            const entry = memory.get(r.key);
+                            if (entry) {
+                                upsertSuggestionMemory(r.key, entry);
+                                notifyKeyUpdate(agents, r.key, entry);
+                            }
+                        }
+                    }
+                    break;
+                }
+
+                case 'bulk_relate': {
+                    const results = memory.bulkRelate(data.relations, agentId);
+                    safeSend(ws, { type: 'bulk-relate-result', results, requestId });
+                    for (const r of results) {
+                        if (r.ok) {
+                            notifyRelationUpdate(agents, r.action, publicEdge(r.edge));
+                        }
+                    }
                     break;
                 }
 

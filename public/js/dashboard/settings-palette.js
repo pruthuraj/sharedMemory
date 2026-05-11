@@ -86,11 +86,7 @@ function handleLiveRefreshChange(settings, changed) {
 }
 
 function applyFocusSettingsEffect() {
-    if (selectedKey) {
-        applyRadialFocusLayout(selectedKey);
-    } else {
-        applyFocusState();
-    }
+    applyFocusState();
 }
 
 function applyLayoutSettingsEffect() {
@@ -134,12 +130,8 @@ function flushSettingsEffects() {
         return;
     }
 
-    if (didVisualScaleChange(changed)) {
-        applyNodePlacementsFromPositions();
-    }
-
     if (didPaletteChange(changed) || didVisualScaleChange(changed)) {
-        rerenderEdgesForCurrentPositions();
+        if (cy) cy.style().update();
     }
 }
 

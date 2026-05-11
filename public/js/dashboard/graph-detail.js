@@ -6,18 +6,6 @@ function getDetailEl(id) {
     return document.getElementById(id);
 }
 
-function getSelectedNodeEl() {
-    if (!selectedKey || !scene) return null;
-
-    return scene.querySelector(`[data-key="${CSS.escape(selectedKey)}"]`);
-}
-
-function getNodeElByKey(key) {
-    if (!key || !scene) return null;
-
-    return scene.querySelector(`[data-key="${CSS.escape(key)}"]`);
-}
-
 function stringifyEntryValue(entry) {
     if (!entry) return '';
 
@@ -99,50 +87,6 @@ function buildDetailBodyHtml(key, entry, recencyColor) {
 ${expiryHtml}`;
 }
 
-// ── Selection Styling ──────────────────────────────────────────────────
-
-function resetNodeSelectionStyle(key) {
-    const nodeEl = getNodeElByKey(key);
-
-    if (!nodeEl) return;
-
-    const color = nodeIdentityColor(key);
-
-    nodeEl.classList.remove('selected');
-    nodeEl.style.borderColor = `${color}44`;
-    nodeEl.style.boxShadow = '0 2px 14px #00000055';
-}
-
-function applyNodeSelectionStyle(key) {
-    const nodeEl = getNodeElByKey(key);
-
-    if (!nodeEl) return;
-
-    const color = nodeIdentityColor(key);
-
-    nodeEl.classList.add('selected');
-    nodeEl.style.borderColor = color;
-    nodeEl.style.boxShadow = `0 0 0 3px ${color}33, 0 4px 24px #00000077`;
-}
-
-function resetPreviousSelection() {
-    if (!selectedKey) return;
-
-    resetNodeSelectionStyle(selectedKey);
-}
-
-function closeSelectedNodeVisualState() {
-    if (!selectedKey) return;
-
-    const nodeEl = getSelectedNodeEl();
-
-    if (!nodeEl) return;
-
-    expandedNodes.delete(selectedKey);
-    setNodePresentation(selectedKey, nodeEl);
-    resetNodeSelectionStyle(selectedKey);
-}
-
 // ── Detail Panel Rendering ─────────────────────────────────────────────
 
 function updateDetailPanelChrome(key, entry) {
@@ -183,54 +127,45 @@ function closeDetailPanel() {
     document.body.classList.remove('inspector-open');
 }
 
-// ── Focus Layout ───────────────────────────────────────────────────────
-
-function getCurrentNodeFocusCenter(key, entry) {
-    const position = nodePositions[key];
-
-    if (!position) return null;
-
-    const box = nodeVisualBox(key, position, entry);
-
-    return nodeCenter(box);
-}
-
-function updateGraphFocusLayout(key, entry, previousSelected, focusCenter) {
-    if (previousSelected !== key) {
-        nodePositions = computeLayout(currentEntries, currentEdges);
-
-        if (focusCenter) {
-            setSlotCenter(key, focusCenter.x, focusCenter.y);
-        }
-    }
-
-    applyRadialFocusLayout(key, {
-        center: focusCenter,
-    });
-}
-
 // ── Detail Panel Public Action ─────────────────────────────────────────
 
 function openDetail(key, entry) {
     if (!key || !entry) return;
 
-    const previousSelected = selectedKey;
-    const focusCenter = getCurrentNodeFocusCenter(key, entry);
-
-    collapseOtherNodes(key);
-    resetPreviousSelection();
+    if (selectedKey && cy) {
+        cy.$id(selectedKey).removeClass('selected');
+    }
 
     selectedKey = key;
     focusedKey = key;
     lastFocusedKey = key;
 
-    applyNodeSelectionStyle(key);
-    updateGraphFocusLayout(key, entry, previousSelected, focusCenter);
+    if (cy) {
+        cy.$id(key).addClass('selected');
+    }
 
     updateDetailPanelChrome(key, entry);
     updateDetailPanelBody(key, entry);
     showDetailPanel();
 
+    renderIdentityPanel();
+    applyFocusState();
+}
+
+// ── Close Action ───────────────────────────────────────────────────────
+
+function closeActiveDetail() {
+    if (selectedKey && cy) {
+        cy.$id(selectedKey).removeClass('selected');
+    }
+
+    closeDetailPanel();
+
+    selectedKey = null;
+    focusedKey = null;
+    hoverKey = null;
+
+    updatePeekStrip(null);
     renderIdentityPanel();
     applyFocusState();
 }
@@ -276,14 +211,6 @@ function setupCopyButton() {
     });
 }
 
-// ── Close Action ───────────────────────────────────────────────────────
-
-function closeActiveDetail() {
-    closeSelectedNodeVisualState();
-    closeDetailPanel();
-    clearActiveSelection({ resetLayout: true });
-}
-
 function setupCloseButton() {
     const closeBtn = getDetailEl('dp-close');
 
@@ -292,23 +219,7 @@ function setupCloseButton() {
     closeBtn.addEventListener('click', closeActiveDetail);
 }
 
-function setupViewportCloseHandler() {
-    if (!viewport) return;
-
-    viewport.addEventListener('click', (event) => {
-        const clickedGraphBackground =
-            event.target === viewport ||
-            event.target === scene ||
-            event.target === edgesSvg;
-
-        if (!clickedGraphBackground) return;
-
-        closeActiveDetail();
-    });
-}
-
 // ── Event Setup ────────────────────────────────────────────────────────
 
 setupCopyButton();
 setupCloseButton();
-setupViewportCloseHandler();

@@ -1,360 +1,10 @@
 'use strict';
 
-// ── Node Rendering Constants ───────────────────────────────────────────
+// ── Peek Strip Constants ───────────────────────────────────────────────
 
-const NODE_DEFAULT_LINK_LABEL = 'links';
-const NODE_VISIBLE_TAG_LIMIT = 2;
 const PEEK_VISIBLE_TAG_LIMIT = 4;
-
-// ── Node Query Helpers ─────────────────────────────────────────────────
-
-function getNodeElement(key) {
-    if (!key || !scene) return null;
-
-    return scene.querySelector(`[data-key="${CSS.escape(key)}"]`);
-}
-
-function getRenderedNodes() {
-    return scene ? scene.querySelectorAll('.mem-node') : [];
-}
-
-function getEntry(key, fallbackEntry = null) {
-    return currentEntries?.[key] || fallbackEntry;
-}
-
-// ── Node Expansion / Selection ─────────────────────────────────────────
-
-function collapseOtherNodes(activeKey) {
-    for (const key of Array.from(expandedNodes)) {
-        if (key === activeKey) continue;
-
-        expandedNodes.delete(key);
-
-        const nodeEl = getNodeElement(key);
-
-        if (nodeEl) {
-            setNodePresentation(key, nodeEl);
-        }
-    }
-}
-
-function resetToComputedLayout() {
-    if (!Object.keys(currentEntries || {}).length) return;
-
-    nodePositions = computeLayout(currentEntries, currentEdges);
-
-    for (const nodeEl of getRenderedNodes()) {
-        applyNodePlacement(nodeEl, nodeEl.dataset.key);
-    }
-
-    sizeSceneToPositions(nodePositions);
-    renderEdges(currentEdges, nodePositions, currentEntries);
-    applyFocusState();
-}
-
-function clearActiveSelection(options = {}) {
-    selectedKey = null;
-    focusedKey = null;
-    hoverKey = null;
-    lastFocusedKey = null;
-
-    detailPanel.classList.remove('visible');
-    document.body.classList.remove('inspector-open');
-
-    renderIdentityPanel();
-
-    if (options.resetLayout) {
-        resetToComputedLayout();
-    } else {
-        applyFocusState();
-    }
-}
-
-function toggleNodeAndSelection(key, nodeEl, fallbackEntry = null) {
-    const wasExpanded = expandedNodes.has(key);
-
-    toggleNodeExpanded(key, nodeEl);
-
-    if (wasExpanded) {
-        clearActiveSelection({ resetLayout: true });
-        return;
-    }
-
-    openDetail(key, getEntry(key, fallbackEntry));
-}
-
-// ── Radial Focus Layout ────────────────────────────────────────────────
-
-function getLargestVisualWidth(keys) {
-    return keys.reduce((largest, key) => {
-        const position = nodePositions[key];
-
-        if (!position) return largest;
-
-        const box = nodeVisualBox(key, position);
-
-        return Math.max(largest, box.w);
-    }, 0);
-}
-
-function radialRingRadius(distance, keys) {
-    const maxSize = getLargestVisualWidth(keys);
-    const minSpacing = Math.max(maxSize + 64, 150);
-    const circumferenceRadius = (keys.length * minSpacing) / (Math.PI * 2);
-    const distanceRadius = RADIAL_RING_GAP * distance;
-    const extraGap = RADIAL_RING_GAP * (distance - 1) * 0.35;
-
-    return Math.max(distanceRadius, circumferenceRadius + extraGap);
-}
-
-function groupFocusNodesByDistance(rootKey, distances, layoutDepth) {
-    const groups = new Map();
-
-    for (const key of Object.keys(currentEntries || {}).sort()) {
-        if (!distances.has(key)) continue;
-
-        const distance = key === rootKey ? 0 : distances.get(key);
-
-        if (distance > layoutDepth) continue;
-
-        if (!groups.has(distance)) {
-            groups.set(distance, []);
-        }
-
-        groups.get(distance).push(key);
-    }
-
-    return groups;
-}
-
-function placeFocusRing(keys, distance, centerX, centerY) {
-    if (!keys.length) return;
-
-    const radius = radialRingRadius(distance, keys);
-    const stagger = distance % 2 === 0 && keys.length > 1
-        ? Math.PI / keys.length
-        : 0;
-
-    const offset = -Math.PI / 2 + stagger;
-
-    keys.forEach((key, index) => {
-        const angle = offset + (Math.PI * 2 * index) / keys.length;
-
-        setSlotCenter(
-            key,
-            centerX + Math.cos(angle) * radius,
-            centerY + Math.sin(angle) * radius
-        );
-    });
-}
-
-function applyNodePlacementsFromPositions() {
-    for (const nodeEl of getRenderedNodes()) {
-        applyNodePlacement(nodeEl, nodeEl.dataset.key);
-    }
-}
-
-function applyRadialFocusLayout(rootKey, options = {}) {
-    if (!rootKey || !nodePositions[rootKey] || !currentEntries[rootKey]) return;
-
-    const rootBox = nodeVisualBox(rootKey, nodePositions[rootKey]);
-    const rootCenter = options.center || nodeCenter(rootBox);
-    const centerX = rootCenter.x;
-    const centerY = rootCenter.y;
-
-    const distances = focusDistances(rootKey);
-    const layoutDepth = Math.min(
-        graphSettings.focusDepth,
-        RADIAL_LAYOUT_MAX_DEPTH
-    );
-
-    const groups = groupFocusNodesByDistance(rootKey, distances, layoutDepth);
-
-    setSlotCenter(rootKey, centerX, centerY);
-
-    const sortedGroups = Array.from(groups.entries()).sort((a, b) => a[0] - b[0]);
-
-    for (const [distance, keys] of sortedGroups) {
-        if (distance === 0) continue;
-
-        placeFocusRing(keys, distance, centerX, centerY);
-    }
-
-    applyNodePlacementsFromPositions();
-    rerenderEdgesForCurrentPositions();
-}
-
-// ── Node HTML Builders ─────────────────────────────────────────────────
-
-function buildTagHtml(tags = [], className = 'node-tag') {
-    return tags.map((tag) => `<span class="${className}">${esc(tag)}</span>`).join('');
-}
-
-function buildNodeTagsHtml(entry) {
-    const tags = entry.tags || [];
-
-    if (!tags.length) return '';
-
-    return `<div class="node-tags">${buildTagHtml(tags, 'node-tag')}</div>`;
-}
-
-function buildNodeImportanceHtml(entry) {
-    const importance = Number(entry.importance) || 0;
-
-    if (importance <= 0) return '';
-
-    return `
-<div class="node-imp">
-  importance <span>${importance}</span>/10
-</div>`;
-}
-
-function buildNodeMiniHtml(key, entry, color) {
-    const tags = (entry.tags || []).slice(0, NODE_VISIBLE_TAG_LIMIT);
-
-    return `
-<div class="node-mini">
-  <span class="node-dot node-mini-dot" style="background:${color};box-shadow:0 0 8px ${color}"></span>
-  <div class="node-mini-title">${esc(key)}</div>
-  <div class="node-mini-degree">${nodeDegree(key)} ${NODE_DEFAULT_LINK_LABEL}</div>
-  <div class="node-mini-summary">${esc(entry.summary || '')}</div>
-  <div class="node-mini-tags">${buildTagHtml(tags, '')}</div>
-  <div class="node-mini-relation"></div>
-</div>`;
-}
-
-function buildNodeCardHtml(key, entry, color, recencyColor) {
-    return `
-<div class="node-card">
-  <div class="node-header">
-    <div class="node-key-row">
-      <span class="node-dot" style="background:${color};box-shadow:0 0 6px ${color}"></span>
-      <div class="node-key">${esc(key)}</div>
-    </div>
-    <div class="node-age" style="color:${recencyColor}">${ageLabel(entry.updatedAt)}</div>
-  </div>
-  <div class="node-summary">${esc(entry.summary || '')}</div>
-  ${buildNodeTagsHtml(entry)}
-  ${buildNodeImportanceHtml(entry)}
-</div>`;
-}
-
-function buildNodeHtml(key, entry, color, recencyColor) {
-    return `
-${buildNodeMiniHtml(key, entry, color)}
-${buildNodeCardHtml(key, entry, color, recencyColor)}`;
-}
-
-// ── Node Element Creation ──────────────────────────────────────────────
-
-function setNodeBaseAttributes(nodeEl, key, isExpanded) {
-    nodeEl.className = `mem-node ${isExpanded ? 'expanded' : 'round'}`;
-    nodeEl.dataset.key = key;
-
-    nodeEl.setAttribute('role', 'button');
-    nodeEl.setAttribute('tabindex', '0');
-    nodeEl.setAttribute('aria-expanded', isExpanded ? 'true' : 'false');
-    nodeEl.setAttribute('aria-pressed', isExpanded ? 'true' : 'false');
-    nodeEl.setAttribute('aria-selected', selectedKey === key ? 'true' : 'false');
-    nodeEl.setAttribute('aria-label', `${key} memory node`);
-}
-
-function setNodeVisualStyle(nodeEl, color) {
-    nodeEl.style.cssText = [
-        `--node-color:${color}`,
-        `border:1.5px solid ${color}66`,
-        'box-shadow:0 2px 14px #00000055',
-    ].join(';');
-}
-
-function handleNodeClick(event, key, nodeEl, entry) {
-    event.stopPropagation();
-
-    if (suppressClickKey === key) {
-        suppressClickKey = null;
-        return;
-    }
-
-    toggleNodeAndSelection(key, nodeEl, entry);
-}
-
-function handleNodeKeydown(event, key, nodeEl, entry) {
-    if (event.key === 'Escape' && selectedKey === key) {
-        event.preventDefault();
-
-        if (typeof closeActiveDetail === 'function') {
-            closeActiveDetail();
-        } else {
-            expandedNodes.delete(key);
-            setNodePresentation(key, nodeEl);
-            clearActiveSelection({ resetLayout: true });
-        }
-
-        return;
-    }
-
-    if (event.key !== 'Enter' && event.key !== ' ') return;
-
-    event.preventDefault();
-
-    toggleNodeAndSelection(key, nodeEl, entry);
-}
-
-function attachNodeEvents(nodeEl, key, entry) {
-    nodeEl.addEventListener('pointerdown', (event) => {
-        beginNodeDrag(event, key, nodeEl);
-    });
-
-    nodeEl.addEventListener('click', (event) => {
-        handleNodeClick(event, key, nodeEl, entry);
-    });
-
-    nodeEl.addEventListener('keydown', (event) => {
-        handleNodeKeydown(event, key, nodeEl, entry);
-    });
-
-    nodeEl.addEventListener('mouseenter', () => setFocusKey(key));
-    nodeEl.addEventListener('mouseleave', () => clearFocusKey());
-    nodeEl.addEventListener('focus', () => setFocusKey(key));
-    nodeEl.addEventListener('blur', () => clearFocusKey());
-}
-
-function buildNodeEl(key, entry, pos) {
-    const color = nodeIdentityColor(key);
-    const recencyColor = ageColor(entry.updatedAt);
-    const isExpanded = expandedNodes.has(key);
-
-    const nodeEl = document.createElement('div');
-
-    setNodeBaseAttributes(nodeEl, key, isExpanded);
-    setNodeVisualStyle(nodeEl, color);
-
-    nodeEl.innerHTML = buildNodeHtml(key, entry, color, recencyColor);
-
-    applyNodePlacement(nodeEl, key);
-    attachNodeEvents(nodeEl, key, entry);
-
-    return nodeEl;
-}
-
-// ── Focus State ────────────────────────────────────────────────────────
-
-function setFocusKey(key) {
-    hoverKey = key;
-    focusedKey = key;
-    lastFocusedKey = key;
-
-    updatePeekStrip(key);
-    applyFocusState();
-}
-
-function clearFocusKey() {
-    hoverKey = null;
-    focusedKey = selectedKey;
-
-    updatePeekStrip(selectedKey);
-    applyFocusState();
-}
+const NODE_TOOLTIP_VISIBLE_TAGS = 3;
+const NODE_TOOLTIP_MARGIN = 16;
 
 // ── Peek Strip ─────────────────────────────────────────────────────────
 
@@ -411,94 +61,120 @@ function updatePeekStrip(key) {
     updatePeekStripTags(tags);
 }
 
-// ── Focus Chrome Application ───────────────────────────────────────────
+// ── Node Tooltip ───────────────────────────────────────────────────────
 
-function getNodeFocusDistance(nodeKey, key, distances, hoverActive, hoverNeighbors) {
-    if (!key) return undefined;
+let nodeTooltipEl = null;
 
-    if (hoverActive) {
-        if (nodeKey === hoverKey) return 0;
-        if (hoverNeighbors.has(nodeKey)) return 1;
-        return undefined;
+function getNodeTooltipEl() {
+    if (!nodeTooltipEl) {
+        nodeTooltipEl = document.getElementById('node-tooltip');
     }
 
-    return distances.get(nodeKey);
+    return nodeTooltipEl;
 }
 
-function applyNodeFocusState(nodeEl, key, distances, hoverActive, hoverNeighbors) {
-    const nodeKey = nodeEl.dataset.key;
-    const distance = getNodeFocusDistance(
-        nodeKey,
-        key,
-        distances,
-        hoverActive,
-        hoverNeighbors
-    );
+function buildTooltipHtml(key, entry, color) {
+    const importance = Number(entry.importance) || 0;
+    const tags = (entry.tags || []).slice(0, NODE_TOOLTIP_VISIBLE_TAGS);
 
-    const inFocus = Boolean(key) && distance !== undefined;
+    const tagsHtml = tags.length
+        ? `<div class="nt-tags">${tags.map((t) => `<span class="nt-tag">${esc(t)}</span>`).join('')}</div>`
+        : '';
 
-    applyMiniDetail(nodeEl, Boolean(key) ? distance : undefined, key);
+    const impHtml = importance > 0
+        ? `<span class="nt-imp">imp ${importance}</span>`
+        : '';
 
-    nodeEl.classList.toggle('dimmed', Boolean(key) && !inFocus);
-    nodeEl.classList.toggle('related', inFocus && distance > 0);
-    nodeEl.classList.toggle('selected', selectedKey === nodeKey);
-    nodeEl.setAttribute('aria-selected', selectedKey === nodeKey ? 'true' : 'false');
-    nodeEl.classList.toggle('hover-main', hoverActive && nodeKey === hoverKey);
-    nodeEl.classList.toggle('hover-neighbor', hoverActive && hoverNeighbors.has(nodeKey));
-    nodeEl.classList.toggle('hover-blurred', hoverActive && !inFocus);
-
-    if (inFocus) {
-        applyNodeFocusChrome(nodeEl, distance);
-        return;
-    }
-
-    resetNodeChrome(nodeEl, nodeKey);
-
-    if (key) {
-        nodeEl.style.opacity = String(dimmedNodeOpacity());
-    }
+    return `
+<div class="nt-key">${esc(key)}</div>
+${entry.summary ? `<div class="nt-summary">${esc(entry.summary)}</div>` : ''}
+${(impHtml || tags.length) ? `<div class="nt-meta">${impHtml}<span>${ageLabel(entry.updatedAt)}</span></div>` : ''}
+${tagsHtml}`.trim();
 }
 
-function getFocusedEdgeDistance(edge, key, distances, selectedMode) {
-    if (!key) return null;
+function showNodeTooltip(key, entry, renderedX, renderedY) {
+    const el = getNodeTooltipEl();
 
-    return focusedEdgeDistance(edge, distances, key, selectedMode);
+    if (!el) return;
+
+    const color = nodeIdentityColor(key);
+
+    el.style.setProperty('--nt-color', color);
+    el.innerHTML = buildTooltipHtml(key, entry, color);
+    el.removeAttribute('hidden');
+
+    positionNodeTooltip(el, renderedX, renderedY);
 }
 
-function applyEdgeFocusState(group, key, distances, selectedMode) {
-    resetEdgeChrome(group);
+function positionNodeTooltip(el, x, y) {
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const tipW = 260;
+    const tipH = el.offsetHeight || 100;
 
-    const edge = {
-        from: group.dataset.from,
-        to: group.dataset.to,
-    };
+    let left = x + NODE_TOOLTIP_MARGIN;
+    let top = y - tipH / 2;
 
-    const distance = getFocusedEdgeDistance(edge, key, distances, selectedMode);
-    const inFocus = distance !== null;
+    if (left + tipW > vw - 8) left = x - tipW - NODE_TOOLTIP_MARGIN;
+    if (top < 8) top = 8;
+    if (top + tipH > vh - 8) top = vh - tipH - 8;
 
-    group.classList.toggle('dimmed', Boolean(key) && !inFocus);
-    group.classList.toggle('highlight', inFocus);
-
-    if (inFocus) {
-        applyEdgeFocusChrome(group, distance);
-    } else if (key) {
-        group.style.opacity = String(dimmedEdgeOpacity());
-    }
+    el.style.left = `${left}px`;
+    el.style.top = `${top}px`;
 }
+
+function hideNodeTooltip() {
+    const el = getNodeTooltipEl();
+
+    if (!el) return;
+
+    el.setAttribute('hidden', '');
+}
+
+function moveNodeTooltip(renderedX, renderedY) {
+    const el = getNodeTooltipEl();
+
+    if (!el || el.hasAttribute('hidden')) return;
+
+    positionNodeTooltip(el, renderedX, renderedY);
+}
+
+// ── Focus State ────────────────────────────────────────────────────────
 
 function applyFocusState() {
+    if (!cy) return;
+
     const key = focusedKey;
-    const distances = key ? focusDistances(key) : new Map();
 
-    const hoverActive = Boolean(hoverKey && key === hoverKey);
-    const hoverNeighbors = hoverActive ? directNeighbors(hoverKey) : new Set();
-    const selectedMode = Boolean(key && selectedKey === key && !hoverActive);
+    cy.nodes().removeClass('dimmed selected hover-main related');
+    cy.edges().removeClass('dimmed highlight');
 
-    for (const nodeEl of getRenderedNodes()) {
-        applyNodeFocusState(nodeEl, key, distances, hoverActive, hoverNeighbors);
+    if (selectedKey) {
+        cy.$id(selectedKey).addClass('selected');
     }
 
-    for (const edgeGroup of edgesSvg.querySelectorAll('.edge-group')) {
-        applyEdgeFocusState(edgeGroup, key, distances, selectedMode);
-    }
+    if (!key) return;
+
+    const distances = focusDistances(key);
+
+    cy.nodes().forEach((node) => {
+        const nodeKey = node.id();
+        const distance = distances.get(nodeKey);
+
+        if (nodeKey === selectedKey) node.addClass('selected');
+        if (nodeKey === key) node.addClass('hover-main');
+        if (distance !== undefined && nodeKey !== key) node.addClass('related');
+        if (distance === undefined) node.addClass('dimmed');
+    });
+
+    cy.edges().forEach((edge) => {
+        const fromDist = distances.get(edge.source().id());
+        const toDist = distances.get(edge.target().id());
+
+        if (fromDist !== undefined || toDist !== undefined) {
+            edge.addClass('highlight');
+        } else {
+            edge.addClass('dimmed');
+        }
+    });
 }

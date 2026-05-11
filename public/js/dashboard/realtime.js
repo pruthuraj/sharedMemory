@@ -185,21 +185,17 @@ function renderLiveGraph() {
 }
 
 function markNodeUpdating(key) {
-    if (!key || !scene) return;
+    if (!key || !cy) return;
 
-    const el = scene.querySelector(`[data-key="${CSS.escape(key)}"]`);
+    const node = cy.$id(key);
 
-    if (!el) return;
+    if (!node.length) return;
 
-    el.classList.remove('updating');
-
-    // Force animation restart.
-    void el.offsetWidth;
-
-    el.classList.add('updating');
+    node.removeClass('updating');
+    node.addClass('updating');
 
     window.setTimeout(() => {
-        el.classList.remove('updating');
+        node.removeClass('updating');
     }, NODE_UPDATE_ANIMATION_MS);
 }
 

@@ -27,88 +27,30 @@ function clickedOutsidePanel(event, panelEl, triggerEl) {
     );
 }
 
-// ── Viewport Pan / Drag / Zoom ─────────────────────────────────────────
-
-function handleViewportMouseDown(event) {
-    if (event.target.closest('.mem-node')) return;
-    if (nodeDrag) return;
-
-    isPanning = true;
-
-    panStartX = event.clientX;
-    panStartY = event.clientY;
-    panStartPanX = panX;
-    panStartPanY = panY;
-
-    viewport.classList.add('grabbing');
-
-    event.preventDefault();
-}
-
-function handleDocumentMouseMove(event) {
-    if (nodeDrag) return;
-    if (!isPanning) return;
-
-    panX = panStartPanX + (event.clientX - panStartX);
-    panY = panStartPanY + (event.clientY - panStartY);
-
-    applyTransform();
-}
-
-function stopViewportPanning() {
-    if (!isPanning) return;
-
-    isPanning = false;
-    viewport.classList.remove('grabbing');
-}
-
-function handleViewportWheel(event) {
-    event.preventDefault();
-
-    const cappedDelta = Math.max(-120, Math.min(120, event.deltaY));
-    const factor = Math.exp(
-        -cappedDelta * DEFAULT_WHEEL_ZOOM_INTENSITY * graphSettings.zoomSpeed
-    );
-
-    const rect = viewport.getBoundingClientRect();
-    const mouseX = event.clientX - rect.left;
-    const mouseY = event.clientY - rect.top;
-
-    zoomAt(mouseX, mouseY, scale * factor);
-}
-
-function bindViewportControls() {
-    on(viewport, 'mousedown', handleViewportMouseDown);
-
-    on(document, 'mousemove', handleDocumentMouseMove);
-    on(document, 'mouseup', stopViewportPanning);
-
-    on(document, 'pointermove', moveDraggedNode);
-    on(document, 'pointerup', endNodeDrag);
-    on(document, 'pointercancel', endNodeDrag);
-
-    on(viewport, 'wheel', handleViewportWheel, {
-        passive: false,
-    });
-}
-
 // ── Zoom / Fit Controls ────────────────────────────────────────────────
+
+function zoomStep() {
+    return 1 + 0.1 * (Number(graphSettings?.zoomSpeed) || 1);
+}
 
 function bindZoomControls() {
     on(getEl('zoom-in-btn'), 'click', () => {
-        zoomAtCenter(scale * zoomButtonFactor());
+        if (!cy) return;
+
+        const center = { x: cy.width() / 2, y: cy.height() / 2 };
+        cy.zoom({ level: cy.zoom() * (1 + zoomStep() * 0.2), renderedPosition: center });
     });
 
     on(getEl('zoom-out-btn'), 'click', () => {
-        zoomAtCenter(scale / zoomButtonFactor());
+        if (!cy) return;
+
+        const center = { x: cy.width() / 2, y: cy.height() / 2 };
+        cy.zoom({ level: cy.zoom() / (1 + zoomStep() * 0.2), renderedPosition: center });
     });
 
     on(getEl('fit-btn'), 'click', () => {
-        fitView(nodePositions);
+        fitView();
     });
-
-    // fit-focused-btn is bound after Settings.init()
-    // once the settings panel renders it.
 }
 
 // ── Identity Panel Controls ────────────────────────────────────────────
@@ -234,7 +176,7 @@ function handleFullscreenChange() {
     updateFullscreenButton();
 
     window.setTimeout(() => {
-        fitView(nodePositions);
+        fitView();
     }, 80);
 }
 
@@ -257,22 +199,9 @@ function bindConnectionControls() {
     on(tokenInput, 'keydown', handleTokenInputKeydown);
 }
 
-// ── Initial Graph State ────────────────────────────────────────────────
-
-function applyInitialGraphState() {
-    if (selectedKey) {
-        applyRadialFocusLayout(selectedKey);
-    } else {
-        applyFocusState();
-    }
-
-    applyTransform();
-}
-
 // ── Main Init ──────────────────────────────────────────────────────────
 
 function initAppBindings() {
-    bindViewportControls();
     bindZoomControls();
     bindIdentityControls();
     bindImportControls();
@@ -281,8 +210,6 @@ function initAppBindings() {
     bindGlobalCloseHandlers();
     bindFullscreenControls();
     bindConnectionControls();
-
-    applyInitialGraphState();
 }
 
 function startGraphApp() {

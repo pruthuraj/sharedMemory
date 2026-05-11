@@ -30,9 +30,7 @@
   </div>
 
   <div id="viewport">
-    <div id="scene">
-      <svg id="edges-svg"></svg>
-    </div>
+    <div id="cy"></div>
     <div id="empty-state">
       <div class="es-icon">M</div>
       <div class="es-title">No memory entries</div>
@@ -102,6 +100,8 @@
     </div>
   </div>
 
+  <div id="node-tooltip" hidden></div>
+
   <div id="peek-strip" aria-live="polite" hidden>
     <span class="peek-dot"></span>
     <div class="peek-key"></div>
@@ -117,6 +117,8 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
   <script src="js/settings/schema.js"></script>
   <script src="js/settings/store.js"></script>
   <script src="js/settings/profiles.js"></script>

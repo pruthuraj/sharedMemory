@@ -1,0 +1,17 @@
+{
+  "name": "shared-memory",
+  "version": "0.1.0",
+  "description": "Local WebSocket+SQLite shared memory for agent coordination. Provides memory_set/get/search/map/relate/audit/bulk tools via MCP, memory injection hook, and /memory-capture skill.",
+  "author": { "name": "pruthu" },
+  "mcpServers": {
+    "memory-mcp": {
+      "command": "node",
+      "args": ["${pluginDir}/../mcp-server.mjs"],
+      "env": {
+        "MCP_ENABLED": "true",
+        "MEMORY_FILE": "${pluginDir}/../data/memory.db"
+      },
+      "description": "13 memory tools: memory_set/get/search/map/relate/unrelate/audit/suggest/bulk_set/bulk_relate/export/validate_import/import"
+    }
+  }
+}

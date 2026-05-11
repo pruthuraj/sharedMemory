@@ -414,6 +414,33 @@ function createSharedMemoryToolHandlers(options) {
 
             return ok({ ...(mode === 'merge' ? { mode } : {}), stats: result.stats });
         },
+
+        async memory_audit(input = {}) {
+            const staleMs = hasOwn(input, 'staleMs') ? coerceInt(input.staleMs) : undefined;
+            return ok(memory.audit(staleMs != null && Number.isFinite(staleMs) ? { staleMs } : {}));
+        },
+
+        async memory_bulk_set(input = {}) {
+            const entries = coerceArray(input.entries);
+            if (!Array.isArray(entries)) return fail('missing-entries');
+            const results = memory.bulkSet(entries, updatedBy);
+            if (suggestionEngine && typeof suggestionEngine.upsertMemory === 'function') {
+                for (const r of results) {
+                    if (r.ok) {
+                        const entry = memory.get(r.key);
+                        if (entry) await suggestionEngine.upsertMemory(r.key, entry);
+                    }
+                }
+            }
+            return ok({ results });
+        },
+
+        async memory_bulk_relate(input = {}) {
+            const relations = coerceArray(input.relations);
+            if (!Array.isArray(relations)) return fail('missing-relations');
+            const results = memory.bulkRelate(relations, updatedBy);
+            return ok({ results });
+        },
     };
 }
 

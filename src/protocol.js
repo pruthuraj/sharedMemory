@@ -21,6 +21,9 @@ const COMMAND_TYPES = new Set([
     'export',
     'validate-import',
     'import',
+    'audit',
+    'bulk_set',
+    'bulk_relate',
 ]);
 
 const RELATION_TYPES = new Set([
@@ -202,6 +205,19 @@ function validateMessage(message) {
         case 'list':
         case 'prune':
         case 'export':
+        case 'audit':
+            return { ok: true, message };
+
+        case 'bulk_set':
+            if (!Array.isArray(message.entries)) {
+                return { ok: false, error: 'missing-entries' };
+            }
+            return { ok: true, message };
+
+        case 'bulk_relate':
+            if (!Array.isArray(message.relations)) {
+                return { ok: false, error: 'missing-relations' };
+            }
             return { ok: true, message };
 
         case 'validate-import':

@@ -86,8 +86,8 @@
             id: 'layout',
             title: 'Layout',
             settings: [
-                { id: 'layoutMode', type: 'select', label: 'Algorithm', default: 'radial',
-                  options: [{ value: 'radial', label: 'Radial focus' }, { value: 'force', label: 'Force-directed' }, { value: 'hierarchical', label: 'Hierarchical' }] },
+                { id: 'layoutMode', type: 'select', label: 'Algorithm', default: 'force',
+                  options: [{ value: 'force', label: 'Force-directed' }, { value: 'hierarchical', label: 'Hierarchical' }] },
             ],
         },
         {
