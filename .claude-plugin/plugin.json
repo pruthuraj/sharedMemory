@@ -15,7 +15,7 @@
         "MCP_ENABLED": "true",
         "SHARED_MEMORY_INSTALL_DIR": "C:\\sharedMemory",
         "MEMORY_FILE": "C:\\sharedMemory\\data\\memory.db",
-        "PORT": "8000"
+        "PORT": "3001"
       },
       "description": "13 memory tools: memory_set/get/search/map/relate/unrelate/audit/suggest/bulk_set/bulk_relate/export/validate_import/import"
     }
