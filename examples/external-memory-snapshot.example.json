@@ -1,0 +1,36 @@
+{
+  "entries": {
+    "project.overview": {
+      "value": {
+        "name": "sharedMemory",
+        "purpose": "Local shared memory graph for agents that cannot all share one context window."
+      },
+      "summary": "sharedMemory stores agent memories as a local graph with metadata and relations.",
+      "tags": ["project", "memory", "agents"],
+      "importance": 8,
+      "expiresAt": null,
+      "updatedAt": 0,
+      "updatedBy": "external-ai"
+    },
+    "task.next-step": {
+      "value": "Import useful memories from an external AI using a strict JSON snapshot file.",
+      "summary": "Next step is importing external AI memory through a JSON snapshot upload.",
+      "tags": ["task", "import"],
+      "importance": 7,
+      "expiresAt": null,
+      "updatedAt": 0,
+      "updatedBy": "external-ai"
+    }
+  },
+  "edges": [
+    {
+      "from": "task.next-step",
+      "to": "project.overview",
+      "relation": "supports",
+      "reason": "The import workflow helps populate the sharedMemory project graph.",
+      "weight": 0.7,
+      "updatedAt": 0,
+      "updatedBy": "external-ai"
+    }
+  ]
+}

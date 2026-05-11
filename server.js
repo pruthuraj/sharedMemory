@@ -1,3 +1,5 @@
+// Entry point for npm start.
+
 const { createSharedMemoryServer } = require('./src/server');
 
 if (require.main === module) {
@@ -13,13 +15,23 @@ if (require.main === module) {
         if (shuttingDown) return;
         shuttingDown = true;
 
-        appServer.memory.flushSync();
-        appServer.server.close(() => {
-            process.exit(signal === 'SIGINT' ? 130 : 143);
-        });
+        const exitCode = signal === 'SIGINT' ? 130 : 143;
+        try {
+            appServer.memory.flushSync();
+        } catch (error) {
+            console.error(`Failed to flush memory during ${signal}: ${error.message}`);
+        }
+
+        Promise.resolve(appServer.close())
+            .catch((error) => {
+                console.error(`Failed to close server during ${signal}: ${error.message}`);
+            })
+            .finally(() => {
+                process.exit(exitCode);
+            });
 
         setTimeout(() => {
-            process.exit(signal === 'SIGINT' ? 130 : 143);
+            process.exit(exitCode);
         }, 1000).unref();
     }
 

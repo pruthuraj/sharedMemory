@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Memory Graph</title>
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+
+<body>
+
+  <div id="toolbar">
+    <h1>Memory Graph</h1>
+    <div class="tb-sep"></div>
+    <div class="ld" id="ld-nodes"><span class="dot" style="background:#10b981"></span><span>-</span></div>
+    <div class="ld" id="ld-edges"><span class="dot" style="background:#6366f1"></span><span>-</span></div>
+    <div class="tb-spacer"></div>
+    <span id="status-text">Not connected</span>
+    <input type="password" id="token-input" placeholder="Token (optional)" autocomplete="off" />
+    <button class="primary" id="connect-btn">Connect</button>
+    <button id="refresh-btn" disabled>Refresh</button>
+    <button id="identity-btn" title="Node identity legend" aria-expanded="false"
+      aria-controls="identity-panel">Identity</button>
+    <button id="import-btn" title="Import memory snapshot JSON" disabled>Import JSON</button>
+    <button id="export-btn" title="Export memory snapshot as JSON" disabled>Export JSON</button>
+    <button id="settings-btn" title="Graph settings" aria-expanded="false"
+      aria-controls="settings-panel">Settings</button>
+    <button id="fullscreen-btn" title="Fullscreen">[ ]</button>
+  </div>
+
+  <div id="viewport">
+    <div id="scene">
+      <svg id="edges-svg"></svg>
+    </div>
+    <div id="empty-state">
+      <div class="es-icon">M</div>
+      <div class="es-title">No memory entries</div>
+      <div class="es-sub">Connect and add entries to see the graph.</div>
+    </div>
+    <div id="loading">
+      <div class="spinner"></div>
+    </div>
+  </div>
+
+  <div id="detail-panel">
+    <div class="dp-bar" id="dp-bar"></div>
+    <div class="dp-header">
+      <div class="dp-label" id="dp-label">Memory Entry</div>
+      <div class="dp-actions">
+        <button class="dp-copy" id="dp-copy" title="Copy entry value">Copy</button>
+        <button class="dp-close" id="dp-close">x</button>
+      </div>
+    </div>
+    <div class="dp-body" id="dp-body"></div>
+  </div>
+
+  <div id="identity-panel" aria-hidden="true">
+    <div class="identity-head">
+      <div>
+        <div class="identity-title">Node Identity</div>
+        <div class="identity-summary" id="identity-summary">No nodes loaded</div>
+      </div>
+      <button class="identity-close" id="identity-close" title="Close identity panel">x</button>
+    </div>
+    <div class="identity-body">
+      <input id="identity-search" type="search" placeholder="Filter nodes" autocomplete="off" />
+      <div class="identity-list" id="identity-list"></div>
+    </div>
+  </div>
+
+  <div id="import-panel" aria-hidden="true">
+    <div class="import-head">
+      <div>
+        <div class="import-title">Import Memory Snapshot</div>
+        <div class="import-summary" id="import-summary">Choose a JSON snapshot file</div>
+      </div>
+      <button class="import-close" id="import-close" title="Close import panel">x</button>
+    </div>
+    <div class="import-body">
+      <input id="import-file" type="file" accept="application/json,.json" />
+      <div class="import-note">Uploads add to the current memory by default. Existing memories will not be deleted or
+        overwritten.</div>
+      <div class="import-result" id="import-result"></div>
+      <div class="import-actions">
+        <button id="import-confirm-btn" class="primary" disabled>Add to Memory</button>
+        <button id="import-cancel-btn">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="settings-panel" aria-hidden="true">
+    <div class="settings-head">
+      <div>
+        <div class="settings-title">Graph Settings</div>
+        <div class="settings-summary" id="settings-summary">Balanced view</div>
+      </div>
+      <button class="settings-close" id="settings-close" title="Close settings">x</button>
+    </div>
+    <div class="settings-body">
+      <!-- Built dynamically by js/settings/panel.js from the schema. -->
+    </div>
+  </div>
+
+  <div id="peek-strip" aria-live="polite" hidden>
+    <span class="peek-dot"></span>
+    <div class="peek-key"></div>
+    <div class="peek-imp" title="Importance"><span class="peek-imp-fill"></span></div>
+    <div class="peek-tags"></div>
+    <div class="peek-summary"></div>
+  </div>
+
+  <div id="controls">
+    <button id="zoom-in-btn" title="Zoom in">+</button>
+    <button id="zoom-out-btn" title="Zoom out">-</button>
+    <button id="fit-btn" title="Fit view">[]</button>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js"></script>
+  <script src="js/settings/schema.js"></script>
+  <script src="js/settings/store.js"></script>
+  <script src="js/settings/profiles.js"></script>
+  <script src="js/settings/apply.js"></script>
+  <script src="js/settings/panel.js"></script>
+  <script src="js/settings/index.js"></script>
+  <script src="js/dashboard/state.js"></script>
+  <script src="js/dashboard/utils.js"></script>
+  <script src="js/dashboard/layout.js"></script>
+  <script src="js/dashboard/edges.js"></script>
+  <script src="js/dashboard/nodes.js"></script>
+  <script src="js/dashboard/identity.js"></script>
+  <script src="js/dashboard/import.js"></script>
+  <script src="js/dashboard/export.js"></script>
+  <script src="js/dashboard/graph-detail.js"></script>
+  <script src="js/dashboard/viewport.js"></script>
+  <script src="js/dashboard/realtime.js"></script>
+  <script src="js/dashboard/settings-palette.js"></script>
+  <script src="js/dashboard/main.js"></script>
+</body>
+
+</html>

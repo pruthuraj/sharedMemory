@@ -6,14 +6,19 @@ const test = require('node:test');
 const WebSocket = require('ws');
 
 const { createSharedMemoryServer } = require('../src/server');
+const { createMemoryStore } = require('../src/memory-store');
 
 function tempPath(name) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'shared-memory-server-test-'));
     return path.join(dir, name);
 }
 
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function startServer(options = {}) {
-    const appServer = createSharedMemoryServer(options);
+    const appServer = createSharedMemoryServer({ ...options });
 
     await new Promise((resolve) => {
         appServer.listen(0, '127.0.0.1', resolve);
@@ -79,6 +84,94 @@ async function connectClient(url) {
     };
 }
 
+function createFakeSuggestionEngine() {
+    const calls = {
+        upserts: [],
+        removes: [],
+        suggests: [],
+        closed: false,
+    };
+
+    return {
+        calls,
+        async upsertMemory(key, entry) {
+            calls.upserts.push({ key, entry });
+        },
+        async removeMemory(key) {
+            calls.removes.push(key);
+        },
+        async suggest(request) {
+            calls.suggests.push(request);
+            return [{
+                key: 'project.architecture',
+                summary: 'Architecture summary',
+                tags: ['architecture'],
+                importance: 8,
+                score: 0.87,
+                reasons: ['semantic-match', 'high-importance'],
+            }];
+        },
+        status() {
+            return {
+                enabled: true,
+                modelId: 'fake-suggestion-model',
+                modelLoaded: true,
+                activeIndexedCount: 1,
+                queuedUpdateCount: 0,
+                processing: false,
+                lastIndexedAt: 1234,
+                lastIndexError: null,
+            };
+        },
+        async close() {
+            calls.closed = true;
+        },
+    };
+}
+
+function createSuggestionScheduler() {
+    const scheduled = new Map();
+    let nextId = 1;
+
+    return {
+        scheduled,
+        scheduler: {
+            setTimeout(fn) {
+                const id = nextId;
+                nextId += 1;
+                scheduled.set(id, fn);
+                return id;
+            },
+            clearTimeout(id) {
+                scheduled.delete(id);
+            },
+        },
+        async runNext() {
+            const next = scheduled.entries().next().value;
+            assert.ok(next, 'expected a scheduled suggestion queue task');
+            const [id, fn] = next;
+            scheduled.delete(id);
+            return fn();
+        },
+    };
+}
+
+function createKeywordEmbedder() {
+    return {
+        modelId: 'fake-keyword-embedder',
+        async embed(text) {
+            const lower = text.toLowerCase();
+            if (lower.includes('database')) return [1, 0];
+            if (lower.includes('architecture')) return [0, 1];
+            return [0, 0];
+        },
+        status() {
+            return { modelId: 'fake-keyword-embedder', loaded: true };
+        },
+        async dispose() { },
+    };
+}
+
 test('register, set, get, list, and status remain compatible', async () => {
     const { appServer, httpUrl, wsUrl } = await startServer();
 
@@ -97,6 +190,7 @@ test('register, set, get, list, and status remain compatible', async () => {
             type: 'ok',
             action: 'set',
             key: 'greeting',
+            revision: 1,
         });
 
         client.send({ type: 'get', key: 'greeting' });
@@ -105,6 +199,7 @@ test('register, set, get, list, and status remain compatible', async () => {
         assert.equal(result.entry.value, 'hello');
         assert.equal(result.entry.updatedBy, 'agentA');
         assert.equal(typeof result.entry.updatedAt, 'number');
+        assert.equal(result.entry.revision, 1);
 
         client.send({ type: 'list' });
         assert.deepEqual(await client.waitFor((message) => message.type === 'list'), {
@@ -120,6 +215,9 @@ test('register, set, get, list, and status remain compatible', async () => {
             memoryKeys: ['greeting'],
             memoryCount: 1,
             relationCount: 0,
+            expiredMemoryCount: 0,
+            pruneIntervalMs: 600000,
+            lastPrunedAt: null,
             persistence: {
                 enabled: false,
                 file: null,
@@ -128,14 +226,185 @@ test('register, set, get, list, and status remain compatible', async () => {
                 lastFlushedAt: null,
                 lastFlushError: null,
             },
+            suggestions: {
+                enabled: false,
+                modelId: 'onnx-community/all-MiniLM-L6-v2-ONNX',
+                modelLoaded: false,
+                activeIndexedCount: 0,
+                queuedUpdateCount: 0,
+                processing: false,
+                lastIndexedAt: null,
+                lastIndexError: null,
+            },
+            snapshot: {
+                lastExportedAt: null,
+                lastImportedAt: null,
+                lastImportStats: null,
+            },
         });
+    } finally {
+        await appServer.close();
+    }
+});
+test('snapshot merge import preserves existing graph and broadcasts merge mode', async () => {
+    const { appServer, wsUrl } = await startServer();
+
+    try {
+        const actor = await connectClient(wsUrl);
+        await actor.waitFor((message) => message.type === 'welcome');
+        actor.send({ type: 'register', agentId: 'actor' });
+        await actor.waitFor((message) => message.type === 'registered');
+
+        const observer = await connectClient(wsUrl);
+        await observer.waitFor((message) => message.type === 'welcome');
+        observer.send({ type: 'register', agentId: 'observer' });
+        await observer.waitFor((message) => message.type === 'registered');
+
+        actor.send({
+            type: 'set',
+            key: 'project.architecture',
+            value: { body: 'architecture' },
+            summary: 'Architecture summary',
+            tags: ['architecture'],
+            importance: 8,
+        });
+        await actor.waitFor((message) => message.type === 'ok' && message.key === 'project.architecture');
+        actor.send({
+            type: 'set',
+            key: 'project.database',
+            value: { body: 'database' },
+            summary: 'Database summary',
+            tags: ['database'],
+            importance: 7,
+        });
+        await actor.waitFor((message) => message.type === 'ok' && message.key === 'project.database');
+        actor.send({
+            type: 'relate',
+            from: 'project.database',
+            to: 'project.architecture',
+            relation: 'depends_on',
+            weight: 0.8,
+        });
+        await actor.waitFor((message) => message.type === 'related');
+
+        const mergeSnapshot = {
+            entries: {
+                'project.database': {
+                    value: { body: 'database replacement' },
+                    summary: 'Database replacement summary',
+                    tags: ['database'],
+                    importance: 7,
+                    expiresAt: null,
+                    updatedAt: 200,
+                    updatedBy: 'external',
+                },
+                'project.notes': {
+                    value: { body: 'notes' },
+                    summary: 'Notes summary',
+                    tags: ['notes'],
+                    importance: 5,
+                    expiresAt: null,
+                    updatedAt: 300,
+                    updatedBy: 'external',
+                },
+            },
+            edges: [
+                {
+                    from: 'project.notes',
+                    to: 'project.database',
+                    relation: 'depends_on',
+                    reason: 'Notes reference the database work.',
+                    weight: 0.6,
+                    updatedAt: 400,
+                    updatedBy: 'external',
+                },
+                {
+                    from: 'project.notes',
+                    to: 'project.database',
+                    relation: 'depends_on',
+                    reason: 'Duplicate edge should be skipped.',
+                    weight: 0.6,
+                    updatedAt: 401,
+                    updatedBy: 'external',
+                },
+            ],
+        };
+
+        actor.send({ type: 'validate-import', mode: 'merge', snapshot: mergeSnapshot, requestId: 'validate-merge-1' });
+        assert.deepEqual(await actor.waitFor((message) => message.requestId === 'validate-merge-1'), {
+            type: 'import-validation',
+            ok: true,
+            errors: [],
+            mode: 'merge',
+            stats: { entriesAdded: 1, entriesSkipped: 1, edgesAdded: 1, edgesSkipped: 1 },
+            requestId: 'validate-merge-1',
+        });
+
+        actor.send({ type: 'import', mode: 'merge', snapshot: mergeSnapshot, requestId: 'import-merge-1' });
+        assert.deepEqual(await actor.waitFor((message) => message.requestId === 'import-merge-1'), {
+            type: 'import-result',
+            ok: true,
+            mode: 'merge',
+            stats: { entriesAdded: 1, entriesSkipped: 1, edgesAdded: 1, edgesSkipped: 1 },
+            requestId: 'import-merge-1',
+        });
+
+        const update = await observer.waitFor((message) => message.type === 'snapshot-update');
+        assert.deepEqual(update, {
+            type: 'snapshot-update',
+            action: 'imported',
+            mode: 'merge',
+            stats: { entriesAdded: 1, entriesSkipped: 1, edgesAdded: 1, edgesSkipped: 1 },
+        });
+        assert.equal(Object.prototype.hasOwnProperty.call(update, 'requestId'), false);
+
+        actor.send({ type: 'get', key: 'project.database', requestId: 'merge-db' });
+        assert.equal((await actor.waitFor((message) => message.requestId === 'merge-db')).entry.value.body, 'database');
+        actor.send({ type: 'get', key: 'project.notes', requestId: 'merge-notes' });
+        assert.equal((await actor.waitFor((message) => message.requestId === 'merge-notes')).entry.value.body, 'notes');
+        actor.send({ type: 'map', key: 'project.notes', requestId: 'merge-map' });
+        const graph = await actor.waitFor((message) => message.requestId === 'merge-map');
+        assert.deepEqual(graph.edges.map((edge) => edge.relation), ['depends_on']);
+    } finally {
+        await appServer.close();
+    }
+});
+
+test('default server keeps semantic suggestions disabled without queueing embeddings', async () => {
+    const { appServer, httpUrl, wsUrl } = await startServer();
+
+    try {
+        const client = await connectClient(wsUrl);
+        await client.waitFor((message) => message.type === 'welcome');
+        client.send({ type: 'register', agentId: 'agentA' });
+        await client.waitFor((message) => message.type === 'registered');
+
+        client.send({ type: 'set', key: 'project.database', value: 'Database details', summary: 'Database details' });
+        await client.waitFor((message) => message.type === 'ok' && message.key === 'project.database');
+
+        let status = await fetch(`${httpUrl}/status`).then((response) => response.json());
+        assert.equal(status.suggestions.enabled, false);
+        assert.equal(status.suggestions.modelLoaded, false);
+        assert.equal(status.suggestions.queuedUpdateCount, 0);
+        assert.equal(status.suggestions.activeIndexedCount, 0);
+
+        client.send({ type: 'suggest', context: 'database work', requestId: 'suggest-disabled' });
+        assert.deepEqual(await client.waitFor((message) => message.requestId === 'suggest-disabled'), {
+            type: 'suggest-result',
+            suggestions: [],
+            requestId: 'suggest-disabled',
+        });
+
+        status = await fetch(`${httpUrl}/status`).then((response) => response.json());
+        assert.equal(status.suggestions.queuedUpdateCount, 0);
+        assert.equal(status.suggestions.activeIndexedCount, 0);
     } finally {
         await appServer.close();
     }
 });
 
 test('status reports enabled persistence and close flushes pending state', async () => {
-    const file = tempPath('memory.json');
+    const file = tempPath('memory.db');
     const { appServer, httpUrl, wsUrl } = await startServer({
         persistence: { file, debounceMs: 10000 },
     });
@@ -158,8 +427,8 @@ test('status reports enabled persistence and close flushes pending state', async
         await appServer.close();
     }
 
-    const persisted = JSON.parse(fs.readFileSync(file, 'utf8'));
-    assert.equal(persisted.entries.durable.summary, 'Saved memory');
+    const restored = createMemoryStore({ persistence: { file } });
+    assert.equal(restored.get('durable').summary, 'Saved memory');
 });
 
 test('auth disabled keeps existing flow open and accepts auth as no-op', async () => {
@@ -210,6 +479,7 @@ test('auth enabled blocks protected commands until valid auth unlocks the socket
             type: 'ok',
             action: 'set',
             key: 'allowed',
+            revision: 1,
             requestId: 'allowed-1',
         });
     } finally {
@@ -342,6 +612,156 @@ test('set supports metadata and fallback summaries', async () => {
     }
 });
 
+test('versioned WebSocket writes expose revisions and reject stale mutations', async () => {
+    const { appServer, wsUrl } = await startServer();
+
+    try {
+        const writer = await connectClient(wsUrl);
+        await writer.waitFor((message) => message.type === 'welcome');
+        writer.send({ type: 'register', agentId: 'agentA' });
+        await writer.waitFor((message) => message.type === 'registered');
+
+        const observer = await connectClient(wsUrl);
+        await observer.waitFor((message) => message.type === 'welcome');
+        observer.send({ type: 'register', agentId: 'agentB' });
+        await observer.waitFor((message) => message.type === 'registered');
+        observer.send({ type: 'subscribe', key: 'versioned' });
+        await observer.waitFor((message) => message.type === 'subscribed' && message.key === 'versioned');
+
+        writer.send({
+            type: 'set',
+            key: 'versioned',
+            value: 'v1',
+            summary: 'Versioned v1',
+            tags: ['versioned'],
+            importance: 5,
+            ifRevision: null,
+            requestId: 'create-only',
+        });
+        assert.deepEqual(await writer.waitFor((message) => message.requestId === 'create-only'), {
+            type: 'ok',
+            action: 'set',
+            key: 'versioned',
+            revision: 1,
+            requestId: 'create-only',
+        });
+        await observer.waitFor(
+            (message) => message.type === 'update' && message.key === 'versioned' && message.entry.revision === 1,
+        );
+
+        writer.send({
+            type: 'set',
+            key: 'versioned',
+            value: 'blocked',
+            summary: 'Blocked',
+            ifRevision: null,
+            requestId: 'create-conflict',
+        });
+        assert.deepEqual(await writer.waitFor((message) => message.requestId === 'create-conflict'), {
+            type: 'error',
+            message: 'revision-conflict',
+            key: 'versioned',
+            currentRevision: 1,
+            requestId: 'create-conflict',
+        });
+
+        writer.send({
+            type: 'set',
+            key: 'versioned',
+            value: 'v2',
+            summary: 'Versioned v2',
+            tags: ['versioned', 'updated'],
+            importance: 6,
+            ifRevision: 1,
+            requestId: 'set-v2',
+        });
+        assert.deepEqual(await writer.waitFor((message) => message.requestId === 'set-v2'), {
+            type: 'ok',
+            action: 'set',
+            key: 'versioned',
+            revision: 2,
+            requestId: 'set-v2',
+        });
+
+        writer.send({
+            type: 'set',
+            key: 'versioned',
+            value: 'stale',
+            summary: 'Stale',
+            ifRevision: 1,
+            requestId: 'stale-set',
+        });
+        assert.deepEqual(await writer.waitFor((message) => message.requestId === 'stale-set'), {
+            type: 'error',
+            message: 'revision-conflict',
+            key: 'versioned',
+            currentRevision: 2,
+            requestId: 'stale-set',
+        });
+
+        writer.send({ type: 'touch', key: 'versioned', ifRevision: 2, requestId: 'touch-v3' });
+        const touchAck = await writer.waitFor((message) => message.requestId === 'touch-v3');
+        assert.equal(touchAck.type, 'touched');
+        assert.equal(touchAck.entry.revision, 3);
+
+        writer.send({ type: 'touch', key: 'versioned', ifRevision: 2, requestId: 'stale-touch' });
+        assert.deepEqual(await writer.waitFor((message) => message.requestId === 'stale-touch'), {
+            type: 'error',
+            message: 'revision-conflict',
+            key: 'versioned',
+            currentRevision: 3,
+            requestId: 'stale-touch',
+        });
+
+        writer.send({ type: 'get', key: 'versioned', requestId: 'get-versioned' });
+        const getResult = await writer.waitFor((message) => message.requestId === 'get-versioned');
+        assert.equal(getResult.entry.value, 'v2');
+        assert.equal(getResult.entry.revision, 3);
+
+        writer.send({ type: 'search', tags: ['updated'], requestId: 'search-versioned' });
+        const searchResult = await writer.waitFor((message) => message.requestId === 'search-versioned');
+        assert.equal(searchResult.results[0].revision, 3);
+
+        writer.send({ type: 'map', key: 'versioned', requestId: 'map-versioned' });
+        const mapResult = await writer.waitFor((message) => message.requestId === 'map-versioned');
+        assert.equal(mapResult.nodes[0].revision, 3);
+
+        writer.send({ type: 'delete', key: 'versioned', ifRevision: 2, requestId: 'stale-delete' });
+        assert.deepEqual(await writer.waitFor((message) => message.requestId === 'stale-delete'), {
+            type: 'error',
+            message: 'revision-conflict',
+            key: 'versioned',
+            currentRevision: 3,
+            requestId: 'stale-delete',
+        });
+
+        writer.send({ type: 'delete', key: 'versioned', ifRevision: 3, requestId: 'delete-current' });
+        assert.deepEqual(await writer.waitFor((message) => message.requestId === 'delete-current'), {
+            type: 'deleted',
+            key: 'versioned',
+            removed: true,
+            revision: 3,
+            requestId: 'delete-current',
+        });
+
+        writer.send({ type: 'set', key: 'bad-revision', value: true, ifRevision: 0, requestId: 'bad-rev' });
+        assert.deepEqual(await writer.waitFor((message) => message.requestId === 'bad-rev'), {
+            type: 'error',
+            message: 'invalid-ifRevision',
+            requestId: 'bad-rev',
+        });
+
+        writer.send({ type: 'delete', key: 'bad-revision', ifRevision: null, requestId: 'bad-delete-rev' });
+        assert.deepEqual(await writer.waitFor((message) => message.requestId === 'bad-delete-rev'), {
+            type: 'error',
+            message: 'invalid-ifRevision',
+            requestId: 'bad-delete-rev',
+        });
+    } finally {
+        await appServer.close();
+    }
+});
+
 test('relate creates and updates edges with exactly-once incident notifications', async () => {
     const { appServer, wsUrl } = await startServer();
 
@@ -467,12 +887,19 @@ test('unrelate and delete emit distinct graph lifecycle notifications', async ()
         await actor.waitFor((message) => message.type === 'related' && message.action === 'created');
         await subscriber.waitFor((message) => message.type === 'relation-update' && message.action === 'created');
 
-        actor.send({ type: 'unrelate', from: 'nodeA', to: 'nodeB', relation: 'supports' });
-        assert.deepEqual(await actor.waitFor((message) => message.type === 'unrelated'), {
+        actor.send({
+            type: 'unrelate',
+            from: 'nodeA',
+            to: 'nodeB',
+            relation: 'supports',
+            requestId: 'remove-edge',
+        });
+        assert.deepEqual(await actor.waitFor((message) => message.requestId === 'remove-edge'), {
             type: 'unrelated',
             from: 'nodeA',
             to: 'nodeB',
             relation: 'supports',
+            requestId: 'remove-edge',
         });
         await subscriber.waitFor((message) => message.type === 'relation-update' && message.action === 'deleted');
 
@@ -486,6 +913,7 @@ test('unrelate and delete emit distinct graph lifecycle notifications', async ()
             type: 'deleted',
             key: 'nodeA',
             removed: true,
+            revision: 1,
         });
         await subscriber.waitFor(
             (message) => message.type === 'update' && message.key === 'nodeA' && message.action === 'deleted',
@@ -504,6 +932,288 @@ test('unrelate and delete emit distinct graph lifecycle notifications', async ()
         const status = await fetch(`${httpUrl}/status`).then((response) => response.json());
         assert.equal(status.memoryCount, 2);
         assert.equal(status.relationCount, 0);
+    } finally {
+        await appServer.close();
+    }
+});
+
+test('idempotent unrelate and delete do not emit false state-change broadcasts', async () => {
+    const suggestionEngine = createFakeSuggestionEngine();
+    const { appServer, wsUrl } = await startServer({ suggestionEngine });
+
+    try {
+        const actor = await connectClient(wsUrl);
+        await actor.waitFor((message) => message.type === 'welcome');
+        actor.send({ type: 'register', agentId: 'actor' });
+        await actor.waitFor((message) => message.type === 'registered');
+
+        const subscriber = await connectClient(wsUrl);
+        await subscriber.waitFor((message) => message.type === 'welcome');
+        subscriber.send({ type: 'register', agentId: 'subscriber' });
+        await subscriber.waitFor((message) => message.type === 'registered');
+
+        for (const key of ['nodeA', 'nodeB']) {
+            actor.send({ type: 'set', key, value: key, summary: key });
+            await actor.waitFor((message) => message.type === 'ok' && message.key === key);
+            subscriber.send({ type: 'subscribe', key });
+            await subscriber.waitFor((message) => message.type === 'subscribed' && message.key === key);
+        }
+
+        const relationCountBeforeNoop = subscriber.messages
+            .filter((message) => message.type === 'relation-update')
+            .length;
+        actor.send({
+            type: 'unrelate',
+            from: 'nodeA',
+            to: 'nodeB',
+            relation: 'supports',
+            requestId: 'noop-unrelate',
+        });
+        assert.deepEqual(await actor.waitFor((message) => message.requestId === 'noop-unrelate'), {
+            type: 'unrelated',
+            from: 'nodeA',
+            to: 'nodeB',
+            relation: 'supports',
+            requestId: 'noop-unrelate',
+        });
+        await sleep(50);
+        assert.equal(
+            subscriber.messages.filter((message) => message.type === 'relation-update').length,
+            relationCountBeforeNoop,
+        );
+
+        actor.send({ type: 'relate', from: 'nodeA', to: 'nodeB', relation: 'supports' });
+        await actor.waitFor((message) => message.type === 'related' && message.action === 'created');
+        await subscriber.waitFor((message) => message.type === 'relation-update' && message.action === 'created');
+        actor.send({
+            type: 'unrelate',
+            from: 'nodeA',
+            to: 'nodeB',
+            relation: 'supports',
+            requestId: 'real-unrelate',
+        });
+        await actor.waitFor((message) => message.requestId === 'real-unrelate');
+        await subscriber.waitFor((message) => message.type === 'relation-update' && message.action === 'deleted');
+
+        subscriber.send({ type: 'subscribe', key: 'ghost' });
+        await subscriber.waitFor((message) => message.type === 'subscribed' && message.key === 'ghost');
+        const deleteCountBeforeNoop = subscriber.messages
+            .filter((message) => message.type === 'update' && message.key === 'ghost' && message.action === 'deleted')
+            .length;
+        actor.send({ type: 'delete', key: 'ghost', requestId: 'noop-delete' });
+        assert.deepEqual(await actor.waitFor((message) => message.requestId === 'noop-delete'), {
+            type: 'deleted',
+            key: 'ghost',
+            removed: false,
+            revision: null,
+            requestId: 'noop-delete',
+        });
+        await sleep(50);
+        assert.equal(
+            subscriber.messages
+                .filter((message) => message.type === 'update' && message.key === 'ghost' && message.action === 'deleted')
+                .length,
+            deleteCountBeforeNoop,
+        );
+        assert.equal(suggestionEngine.calls.removes.includes('ghost'), false);
+
+        actor.send({ type: 'set', key: 'ghost', value: 'real', summary: 'real ghost' });
+        await actor.waitFor((message) => message.type === 'ok' && message.key === 'ghost');
+        await subscriber.waitFor((message) => message.type === 'update' && message.key === 'ghost' && message.entry);
+        actor.send({ type: 'delete', key: 'ghost', requestId: 'real-delete' });
+        assert.deepEqual(await actor.waitFor((message) => message.requestId === 'real-delete'), {
+            type: 'deleted',
+            key: 'ghost',
+            removed: true,
+            revision: 1,
+            requestId: 'real-delete',
+        });
+        await subscriber.waitFor(
+            (message) => message.type === 'update' && message.key === 'ghost' && message.action === 'deleted',
+        );
+        assert.equal(suggestionEngine.calls.removes.includes('ghost'), true);
+    } finally {
+        await appServer.close();
+    }
+});
+
+test('snapshot export, validation, and import roundtrip over websocket', async () => {
+    const { appServer, httpUrl, wsUrl } = await startServer();
+
+    try {
+        const actor = await connectClient(wsUrl);
+        await actor.waitFor((message) => message.type === 'welcome');
+        actor.send({ type: 'register', agentId: 'actor' });
+        await actor.waitFor((message) => message.type === 'registered');
+
+        const observer = await connectClient(wsUrl);
+        await observer.waitFor((message) => message.type === 'welcome');
+        observer.send({ type: 'register', agentId: 'observer' });
+        await observer.waitFor((message) => message.type === 'registered');
+
+        actor.send({
+            type: 'set',
+            key: 'project.architecture',
+            value: { body: 'architecture' },
+            summary: 'Architecture summary',
+            tags: ['architecture'],
+            importance: 8,
+        });
+        await actor.waitFor((message) => message.type === 'ok' && message.key === 'project.architecture');
+        actor.send({
+            type: 'set',
+            key: 'project.database',
+            value: { body: 'database' },
+            summary: 'Database summary',
+            tags: ['database'],
+            importance: 7,
+        });
+        await actor.waitFor((message) => message.type === 'ok' && message.key === 'project.database');
+        actor.send({
+            type: 'relate',
+            from: 'project.database',
+            to: 'project.architecture',
+            relation: 'depends_on',
+            weight: 0.8,
+        });
+        await actor.waitFor((message) => message.type === 'related');
+
+        actor.send({ type: 'export', requestId: 'export-1' });
+        const exported = await actor.waitFor((message) => message.requestId === 'export-1');
+        assert.equal(exported.type, 'export-result');
+        assert.deepEqual(exported.stats, { entryCount: 2, edgeCount: 1 });
+        assert.deepEqual(Object.keys(exported.snapshot.entries), ['project.architecture', 'project.database']);
+
+        actor.send({ type: 'validate-import', snapshot: exported.snapshot, requestId: 'validate-1' });
+        assert.deepEqual(await actor.waitFor((message) => message.requestId === 'validate-1'), {
+            type: 'import-validation',
+            ok: true,
+            errors: [],
+            stats: { entryCount: 2, edgeCount: 1 },
+            requestId: 'validate-1',
+        });
+
+        actor.send({ type: 'delete', key: 'project.database' });
+        await actor.waitFor((message) => message.type === 'deleted' && message.key === 'project.database');
+        actor.send({ type: 'set', key: 'trash', value: 'temporary', summary: 'Temporary trash' });
+        await actor.waitFor((message) => message.type === 'ok' && message.key === 'trash');
+
+        actor.send({
+            type: 'import',
+            snapshot: {
+                entries: exported.snapshot.entries,
+                edges: [{ from: 'project.database', to: 'missing', relation: 'depends_on', reason: '', weight: 1, updatedAt: 1, updatedBy: null }],
+            },
+            requestId: 'bad-import',
+        });
+        const badImport = await actor.waitFor((message) => message.requestId === 'bad-import');
+        assert.equal(badImport.type, 'import-result');
+        assert.equal(badImport.ok, false);
+        assert.equal(badImport.error, 'invalid-snapshot');
+        assert.ok(badImport.errors.some((error) => error.message === 'dangling-edge'));
+
+        actor.send({ type: 'get', key: 'trash', requestId: 'trash-still-present' });
+        assert.equal((await actor.waitFor((message) => message.requestId === 'trash-still-present')).entry.value, 'temporary');
+
+        actor.send({ type: 'import', snapshot: exported.snapshot, requestId: 'import-1' });
+        assert.deepEqual(await actor.waitFor((message) => message.requestId === 'import-1'), {
+            type: 'import-result',
+            ok: true,
+            stats: { entryCount: 2, edgeCount: 1 },
+            requestId: 'import-1',
+        });
+
+        const update = await observer.waitFor((message) => message.type === 'snapshot-update');
+        assert.deepEqual(update, {
+            type: 'snapshot-update',
+            action: 'imported',
+            mode: 'replace',
+            stats: { entryCount: 2, edgeCount: 1 },
+        });
+        assert.equal(Object.prototype.hasOwnProperty.call(update, 'requestId'), false);
+
+        actor.send({ type: 'get', key: 'project.database', requestId: 'restored-db' });
+        assert.deepEqual((await actor.waitFor((message) => message.requestId === 'restored-db')).entry.value, { body: 'database' });
+        actor.send({ type: 'get', key: 'trash', requestId: 'trash-gone' });
+        assert.equal((await actor.waitFor((message) => message.requestId === 'trash-gone')).entry, null);
+        actor.send({ type: 'map', key: 'project.architecture', requestId: 'map-restored' });
+        const graph = await actor.waitFor((message) => message.requestId === 'map-restored');
+        assert.deepEqual(graph.edges.map((edge) => edge.relation), ['depends_on']);
+
+        const status = await fetch(`${httpUrl}/status`).then((response) => response.json());
+        assert.equal(typeof status.snapshot.lastExportedAt, 'number');
+        assert.equal(typeof status.snapshot.lastImportedAt, 'number');
+        assert.deepEqual(status.snapshot.lastImportStats, { entryCount: 2, edgeCount: 1 });
+    } finally {
+        await appServer.close();
+    }
+});
+
+test('snapshot import refreshes suggestion index after replacement', async () => {
+    const suggestionEngine = createFakeSuggestionEngine();
+    const { appServer, wsUrl } = await startServer({ suggestionEngine });
+
+    try {
+        const client = await connectClient(wsUrl);
+        await client.waitFor((message) => message.type === 'welcome');
+        client.send({ type: 'register', agentId: 'agentA' });
+        await client.waitFor((message) => message.type === 'registered');
+
+        client.send({ type: 'set', key: 'old', value: 'old', summary: 'Old memory' });
+        await client.waitFor((message) => message.type === 'ok' && message.key === 'old');
+        await sleep(10);
+        assert.ok(suggestionEngine.calls.upserts.some((call) => call.key === 'old'));
+
+        const snapshot = {
+            entries: {
+                imported: {
+                    value: 'new',
+                    summary: 'Imported memory',
+                    tags: ['imported'],
+                    importance: 6,
+                    expiresAt: null,
+                    updatedAt: 100,
+                    updatedBy: 'snapshot',
+                },
+            },
+            edges: [],
+        };
+
+        client.send({ type: 'import', snapshot, requestId: 'import-suggestions' });
+        await client.waitFor((message) => message.requestId === 'import-suggestions');
+        await sleep(10);
+
+        assert.ok(suggestionEngine.calls.removes.includes('old'));
+        assert.ok(suggestionEngine.calls.upserts.some((call) => call.key === 'imported'));
+    } finally {
+        await appServer.close();
+    }
+});
+
+test('snapshot commands are protected by auth', async () => {
+    const { appServer, wsUrl } = await startServer({ authToken: 'secret' });
+
+    try {
+        const client = await connectClient(wsUrl);
+        await client.waitFor((message) => message.type === 'welcome');
+
+        for (const [type, extra] of [
+            ['export', {}],
+            ['validate-import', { snapshot: { entries: {}, edges: [] } }],
+            ['import', { snapshot: { entries: {}, edges: [] } }],
+        ]) {
+            client.send({ type, ...extra, requestId: `blocked-${type}` });
+            assert.deepEqual(await client.waitFor((message) => message.requestId === `blocked-${type}`), {
+                type: 'error',
+                message: 'unauthorized',
+                requestId: `blocked-${type}`,
+            });
+        }
+
+        client.send({ type: 'auth', token: 'secret', requestId: 'auth-ok' });
+        await client.waitFor((message) => message.requestId === 'auth-ok');
+        client.send({ type: 'export', requestId: 'export-after-auth' });
+        assert.equal((await client.waitFor((message) => message.requestId === 'export-after-auth')).type, 'export-result');
     } finally {
         await appServer.close();
     }
@@ -642,6 +1352,7 @@ test('link, unlink, and offline linked targets are safe', async () => {
             type: 'ok',
             action: 'set',
             key: 'safe',
+            revision: 1,
         });
 
         agent.send({ type: 'unlink', target: 'offlineTarget' });
@@ -710,6 +1421,203 @@ test('search validates filters and rejects invalid input', async () => {
     }
 });
 
+test('touch and expiry validation use requestId-aware response shapes', async () => {
+    let currentTime = 1000;
+    const { appServer, wsUrl } = await startServer({
+        clock: () => currentTime,
+        pruneIntervalMs: 0,
+    });
+
+    try {
+        const client = await connectClient(wsUrl);
+        await client.waitFor((message) => message.type === 'welcome');
+        client.send({ type: 'register', agentId: 'agentA' });
+        await client.waitFor((message) => message.type === 'registered');
+
+        client.send({ type: 'set', key: 'bad', value: true, ttlMs: 0, requestId: 'bad-ttl' });
+        assert.deepEqual(await client.waitFor((message) => message.requestId === 'bad-ttl'), {
+            type: 'error',
+            message: 'invalid-expiry',
+            requestId: 'bad-ttl',
+        });
+
+        client.send({
+            type: 'set',
+            key: 'bad2',
+            value: true,
+            ttlMs: 100,
+            expiresAt: 2000,
+            requestId: 'both',
+        });
+        assert.deepEqual(await client.waitFor((message) => message.requestId === 'both'), {
+            type: 'error',
+            message: 'invalid-expiry',
+            requestId: 'both',
+        });
+
+        client.send({ type: 'set', key: 'session', value: 'work', ttlMs: 100, requestId: 'set-session' });
+        await client.waitFor((message) => message.type === 'ok' && message.requestId === 'set-session');
+
+        currentTime = 1050;
+        client.send({ type: 'touch', key: 'session', ttlMs: 500, requestId: 'touch-extend' });
+        const touched = await client.waitFor((message) => message.type === 'touched');
+        assert.equal(touched.requestId, 'touch-extend');
+        assert.equal(touched.entry.expiresAt, 1550);
+
+        client.send({ type: 'touch', key: 'session', requestId: 'touch-clear' });
+        const cleared = await client.waitFor((message) => message.requestId === 'touch-clear');
+        assert.equal(cleared.entry.expiresAt, null);
+    } finally {
+        await appServer.close();
+    }
+});
+
+test('prune expires nodes and emits expired plus cascade notifications', async () => {
+    let currentTime = 1000;
+    const { appServer, wsUrl } = await startServer({
+        clock: () => currentTime,
+        pruneIntervalMs: 0,
+    });
+
+    try {
+        const client = await connectClient(wsUrl);
+        await client.waitFor((message) => message.type === 'welcome');
+        client.send({ type: 'register', agentId: 'agentA' });
+        await client.waitFor((message) => message.type === 'registered');
+
+        client.send({ type: 'set', key: 'expiring', value: 'gone', ttlMs: 100 });
+        await client.waitFor((message) => message.type === 'ok' && message.key === 'expiring');
+        client.send({ type: 'set', key: 'neighbor', value: 'stay' });
+        await client.waitFor((message) => message.type === 'ok' && message.key === 'neighbor');
+        client.send({ type: 'relate', from: 'expiring', to: 'neighbor', relation: 'related_to' });
+        await client.waitFor((message) => message.type === 'related');
+
+        client.send({ type: 'subscribe', key: 'expiring' });
+        await client.waitFor((message) => message.type === 'subscribed' && message.key === 'expiring');
+        await client.waitFor((message) => message.type === 'update' && message.key === 'expiring');
+        client.send({ type: 'subscribe', key: 'neighbor' });
+        await client.waitFor((message) => message.type === 'subscribed' && message.key === 'neighbor');
+        await client.waitFor((message) => message.type === 'update' && message.key === 'neighbor');
+
+        currentTime = 1200;
+        client.send({ type: 'prune', requestId: 'prune-1' });
+        assert.deepEqual(await client.waitFor((message) => message.type === 'pruned'), {
+            type: 'pruned',
+            keys: ['expiring'],
+            count: 1,
+            requestId: 'prune-1',
+        });
+
+        const expiredUpdate = await client.waitFor(
+            (message) => message.type === 'update' && message.key === 'expiring' && message.action === 'expired',
+        );
+        assert.equal(expiredUpdate.entry, null);
+
+        const cascade = await client.waitFor(
+            (message) => message.type === 'relation-update' && message.action === 'cascade-deleted',
+        );
+        assert.equal(cascade.edge.from, 'expiring');
+        assert.equal(cascade.edge.to, 'neighbor');
+    } finally {
+        await appServer.close();
+    }
+});
+
+test('background prune runs through injected scheduler and status exposes expiry fields', async () => {
+    let currentTime = 1000;
+    const scheduled = new Map();
+    let nextId = 1;
+    const pruneScheduler = {
+        setInterval(fn) {
+            const id = nextId;
+            nextId += 1;
+            scheduled.set(id, fn);
+            return id;
+        },
+        clearInterval(id) {
+            scheduled.delete(id);
+        },
+    };
+    const { appServer, httpUrl, wsUrl } = await startServer({
+        clock: () => currentTime,
+        pruneIntervalMs: 250,
+        pruneScheduler,
+    });
+
+    try {
+        assert.equal(scheduled.size, 1);
+
+        const client = await connectClient(wsUrl);
+        await client.waitFor((message) => message.type === 'welcome');
+        client.send({ type: 'register', agentId: 'agentA' });
+        await client.waitFor((message) => message.type === 'registered');
+        client.send({ type: 'set', key: 'expiring', value: 'gone', ttlMs: 100 });
+        await client.waitFor((message) => message.type === 'ok' && message.key === 'expiring');
+        client.send({ type: 'subscribe', key: 'expiring' });
+        await client.waitFor((message) => message.type === 'subscribed' && message.key === 'expiring');
+        await client.waitFor((message) => message.type === 'update' && message.key === 'expiring');
+
+        currentTime = 1200;
+        const pendingPrune = Array.from(scheduled.values())[0];
+        pendingPrune();
+
+        await client.waitFor(
+            (message) => message.type === 'update' && message.key === 'expiring' && message.action === 'expired',
+        );
+
+        const status = await fetch(`${httpUrl}/status`).then((response) => response.json());
+        assert.equal(status.expiredMemoryCount, 0);
+        assert.equal(status.pruneIntervalMs, 250);
+        assert.equal(status.lastPrunedAt, 1200);
+    } finally {
+        await appServer.close();
+    }
+    assert.equal(scheduled.size, 0);
+});
+
+test('expired entries are hidden from get, map, and search over websocket', async () => {
+    let currentTime = 1000;
+    const { appServer, wsUrl } = await startServer({
+        clock: () => currentTime,
+        pruneIntervalMs: 0,
+    });
+
+    try {
+        const client = await connectClient(wsUrl);
+        await client.waitFor((message) => message.type === 'welcome');
+        client.send({ type: 'register', agentId: 'agentA' });
+        await client.waitFor((message) => message.type === 'registered');
+
+        client.send({ type: 'set', key: 'root', value: 'root', summary: 'root' });
+        await client.waitFor((message) => message.type === 'ok' && message.key === 'root');
+        client.send({ type: 'set', key: 'old', value: 'old', summary: 'old memory', ttlMs: 100 });
+        await client.waitFor((message) => message.type === 'ok' && message.key === 'old');
+        client.send({ type: 'relate', from: 'root', to: 'old', relation: 'related_to' });
+        await client.waitFor((message) => message.type === 'related');
+
+        currentTime = 1200;
+        client.send({ type: 'get', key: 'old', requestId: 'get-old' });
+        assert.deepEqual(await client.waitFor((message) => message.requestId === 'get-old'), {
+            type: 'result',
+            key: 'old',
+            entry: null,
+            requestId: 'get-old',
+        });
+
+        client.send({ type: 'map', key: 'root', depth: 1, limit: 10, requestId: 'map-root' });
+        const graph = await client.waitFor((message) => message.requestId === 'map-root');
+        assert.deepEqual(graph.nodes.map((node) => node.key), ['root']);
+        assert.deepEqual(graph.edges, []);
+
+        client.send({ type: 'search', query: 'old', requestId: 'search-old' });
+        const search = await client.waitFor((message) => message.requestId === 'search-old');
+        assert.equal(search.total, 0);
+        assert.deepEqual(search.results, []);
+    } finally {
+        await appServer.close();
+    }
+});
+
 test('requestId echoes on success acks across every command type', async () => {
     const { appServer, wsUrl } = await startServer();
 
@@ -727,6 +1635,10 @@ test('requestId echoes on success acks across every command type', async () => {
 
         client.send({ type: 'set', key: 'k2', value: 'v2', requestId: 'r-set-2' });
         await client.waitFor((message) => message.type === 'ok' && message.key === 'k2');
+
+        client.send({ type: 'touch', key: 'k1', ttlMs: 1000, requestId: 'r-touch' });
+        const touchAck = await client.waitFor((message) => message.type === 'touched' && message.key === 'k1');
+        assert.equal(touchAck.requestId, 'r-touch');
 
         client.send({ type: 'get', key: 'k1', requestId: 'r-get' });
         const getResult = await client.waitFor((message) => message.type === 'result' && message.key === 'k1');
@@ -767,6 +1679,10 @@ test('requestId echoes on success acks across every command type', async () => {
         client.send({ type: 'search', query: 'k', requestId: 'r-search' });
         const searchResult = await client.waitFor((message) => message.type === 'search-result');
         assert.equal(searchResult.requestId, 'r-search');
+
+        client.send({ type: 'prune', requestId: 'r-prune' });
+        const pruneResult = await client.waitFor((message) => message.type === 'pruned');
+        assert.equal(pruneResult.requestId, 'r-prune');
 
         client.send({
             type: 'unrelate', from: 'k1', to: 'k2', relation: 'related_to', requestId: 'r-unrelate',
@@ -899,6 +1815,199 @@ test('broadcasts (update, relation-update, cross-agent linked) carry no requestI
             (message) => message.type === 'relation-update' && message.action === 'created',
         );
         assert.equal(Object.prototype.hasOwnProperty.call(relationUpdate, 'requestId'), false);
+    } finally {
+        await appServer.close();
+    }
+});
+
+test('suggest command uses injected engine and echoes requestId', async () => {
+    const suggestionEngine = createFakeSuggestionEngine();
+    const { appServer, httpUrl, wsUrl } = await startServer({ suggestionEngine });
+
+    try {
+        const client = await connectClient(wsUrl);
+        await client.waitFor((message) => message.type === 'welcome');
+        client.send({ type: 'register', agentId: 'agentA' });
+        await client.waitFor((message) => message.type === 'registered');
+
+        client.send({
+            type: 'set',
+            key: 'project.architecture',
+            value: 'details',
+            summary: 'Architecture summary',
+            tags: ['architecture'],
+            importance: 8,
+        });
+        await client.waitFor((message) => message.type === 'ok' && message.key === 'project.architecture');
+        assert.equal(suggestionEngine.calls.upserts.length, 1);
+        assert.equal(suggestionEngine.calls.upserts[0].key, 'project.architecture');
+        assert.equal(suggestionEngine.calls.upserts[0].entry.summary, 'Architecture summary');
+
+        client.send({
+            type: 'suggest',
+            context: 'architecture planning',
+            tags: ['architecture'],
+            limit: 3,
+            requestId: 'suggest-1',
+        });
+        assert.deepEqual(await client.waitFor((message) => message.type === 'suggest-result'), {
+            type: 'suggest-result',
+            suggestions: [{
+                key: 'project.architecture',
+                summary: 'Architecture summary',
+                tags: ['architecture'],
+                importance: 8,
+                score: 0.87,
+                reasons: ['semantic-match', 'high-importance'],
+            }],
+            requestId: 'suggest-1',
+        });
+        assert.deepEqual(suggestionEngine.calls.suggests[0], {
+            context: 'architecture planning',
+            tags: ['architecture'],
+            limit: 3,
+            agentId: 'agentA',
+        });
+
+        const status = await fetch(`${httpUrl}/status`).then((response) => response.json());
+        assert.deepEqual(status.suggestions, suggestionEngine.status());
+    } finally {
+        await appServer.close();
+    }
+
+    assert.equal(suggestionEngine.calls.closed, true);
+});
+
+test('suggest validates input and remains protected by auth', async () => {
+    const suggestionEngine = createFakeSuggestionEngine();
+    const { appServer, wsUrl } = await startServer({
+        authToken: 'secret',
+        suggestionEngine,
+    });
+
+    try {
+        const client = await connectClient(wsUrl);
+        await client.waitFor((message) => message.type === 'welcome');
+
+        client.send({ type: 'suggest', context: 'blocked', requestId: 'blocked-suggest' });
+        assert.deepEqual(await client.waitFor((message) => message.requestId === 'blocked-suggest'), {
+            type: 'error',
+            message: 'unauthorized',
+            requestId: 'blocked-suggest',
+        });
+
+        client.send({ type: 'auth', token: 'secret', requestId: 'auth-ok' });
+        await client.waitFor((message) => message.type === 'authenticated' && message.requestId === 'auth-ok');
+
+        client.send({ type: 'suggest', requestId: 'missing-context' });
+        assert.deepEqual(await client.waitFor((message) => message.requestId === 'missing-context'), {
+            type: 'error',
+            message: 'missing-context',
+            requestId: 'missing-context',
+        });
+
+        client.send({ type: 'suggest', context: '   ', requestId: 'blank-context' });
+        assert.deepEqual(await client.waitFor((message) => message.requestId === 'blank-context'), {
+            type: 'error',
+            message: 'invalid-context',
+            requestId: 'blank-context',
+        });
+
+        client.send({ type: 'suggest', context: 'x', limit: 21, requestId: 'bad-limit' });
+        assert.deepEqual(await client.waitFor((message) => message.requestId === 'bad-limit'), {
+            type: 'error',
+            message: 'invalid-limit',
+            requestId: 'bad-limit',
+        });
+
+        client.send({ type: 'suggest', context: 'x', tags: ['ok', ''], requestId: 'bad-tags' });
+        assert.deepEqual(await client.waitFor((message) => message.requestId === 'bad-tags'), {
+            type: 'error',
+            message: 'invalid-tags',
+            requestId: 'bad-tags',
+        });
+
+        assert.equal(suggestionEngine.calls.suggests.length, 0);
+    } finally {
+        await appServer.close();
+    }
+});
+
+test('real suggestion engine indexes memory through debounced queue and returns metadata only', async () => {
+    let currentTime = 1000;
+    const { scheduler, scheduled, runNext } = createSuggestionScheduler();
+    const { appServer, httpUrl, wsUrl } = await startServer({
+        clock: () => currentTime,
+        pruneIntervalMs: 0,
+        suggestions: {
+            enabled: true,
+            embedder: createKeywordEmbedder(),
+            scheduler,
+            debounceMs: 500,
+            clock: () => currentTime,
+        },
+    });
+
+    try {
+        const client = await connectClient(wsUrl);
+        await client.waitFor((message) => message.type === 'welcome');
+        client.send({ type: 'register', agentId: 'agentA' });
+        await client.waitFor((message) => message.type === 'registered');
+
+        client.send({
+            type: 'set',
+            key: 'project.architecture',
+            value: 'secret-architecture-value',
+            summary: 'architecture decisions',
+            tags: ['architecture'],
+            importance: 8,
+        });
+        await client.waitFor((message) => message.type === 'ok' && message.key === 'project.architecture');
+        client.send({
+            type: 'set',
+            key: 'project.database',
+            value: 'secret-database-value',
+            summary: 'database migration',
+            tags: ['database'],
+            importance: 6,
+        });
+        await client.waitFor((message) => message.type === 'ok' && message.key === 'project.database');
+
+        let status = await fetch(`${httpUrl}/status`).then((response) => response.json());
+        assert.equal(status.suggestions.queuedUpdateCount, 2);
+        assert.equal(status.suggestions.activeIndexedCount, 0);
+        assert.equal(scheduled.size, 1);
+
+        await runNext();
+
+        status = await fetch(`${httpUrl}/status`).then((response) => response.json());
+        assert.equal(status.suggestions.queuedUpdateCount, 0);
+        assert.equal(status.suggestions.activeIndexedCount, 2);
+        assert.equal(status.suggestions.modelId, 'fake-keyword-embedder');
+        assert.equal(status.suggestions.modelLoaded, true);
+
+        client.send({
+            type: 'suggest',
+            context: 'database task',
+            requestId: 'suggest-database',
+        });
+        const result = await client.waitFor((message) => message.requestId === 'suggest-database');
+        assert.equal(result.type, 'suggest-result');
+        assert.equal(result.suggestions[0].key, 'project.database');
+        assert.equal(Object.prototype.hasOwnProperty.call(result.suggestions[0], 'value'), false);
+
+        client.send({ type: 'delete', key: 'project.database', requestId: 'delete-database' });
+        await client.waitFor((message) => message.requestId === 'delete-database');
+        assert.equal(scheduled.size, 1);
+        await runNext();
+
+        client.send({
+            type: 'suggest',
+            context: 'database task',
+            requestId: 'suggest-after-delete',
+        });
+        const afterDelete = await client.waitFor((message) => message.requestId === 'suggest-after-delete');
+        assert.deepEqual(afterDelete.suggestions.map((suggestion) => suggestion.key), []);
     } finally {
         await appServer.close();
     }
