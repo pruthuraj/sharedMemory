@@ -5,7 +5,7 @@
       "args": [
         "--input-type=module",
         "-e",
-        "const { pathToFileURL } = await import('node:url'); const path = await import('node:path'); const configuredRoot = process.env.SHARED_MEMORY_PLUGIN_ROOT || ''; const root = configuredRoot.includes('${') ? process.cwd() : (configuredRoot || process.cwd()); await import(pathToFileURL(path.resolve(root, 'scripts/plugin-start.mjs')).href);"
+        "const { pathToFileURL } = await import('node:url'); const path = await import('node:path'); const configuredRoot = process.env.SHARED_MEMORY_PLUGIN_ROOT || ''; const root = configuredRoot.includes('${') ? process.cwd() : (configuredRoot || process.cwd()); await import(pathToFileURL(path.resolve(root, '.codex-plugin/plugin-start.mjs')).href);"
       ],
       "env": {
         "SHARED_MEMORY_PLUGIN_ROOT": "${pluginDir}"

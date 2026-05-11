@@ -34,6 +34,9 @@ const RELATION_TYPES = new Set([
     'mentions',
     'derived_from',
     'next_step',
+    'implements',
+    'documents',
+    'blocks',
 ]);
 
 function isPlainObject(value) {
