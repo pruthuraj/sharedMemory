@@ -41,6 +41,10 @@ function normalizeTags(tags) {
     return tags.map((tag) => tag.trim()).filter(Boolean);
 }
 
+function hasValidTags(tags) {
+    return Array.isArray(tags) && tags.every(isNonEmptyString);
+}
+
 function nodeMetadata(key, entry) {
     return {
         key,
@@ -48,6 +52,7 @@ function nodeMetadata(key, entry) {
         tags: entry.tags.slice(),
         importance: entry.importance,
         revision: entry.revision,
+        expiresAt: entry.expiresAt,
         updatedAt: entry.updatedAt,
         updatedBy: entry.updatedBy,
     };
@@ -564,7 +569,7 @@ function rowToEdge(row) {
  * @param {Function} [options.clock] - Clock returning ms since epoch (default: Date.now).
  * @param {object} [options.persistence] - Enables SQLite persistence when set with a file path.
  * @param {string} options.persistence.file - Path to the SQLite database file.
- * @param {number} [options.persistence.debounceMs=500] - Debounce window for dirty-flag acknowledgment.
+ * @param {number} [options.persistence.debounceMs=500] - Debounce window for WAL checkpoint/status cleanup.
  * @param {object} [options.persistence.scheduler] - Injectable {setTimeout, clearTimeout} for testing.
  * @param {number} [options.pruneIntervalMs=600000] - Advisory interval hint for callers of pruneExpired.
  */
@@ -600,6 +605,9 @@ function createMemoryStore(options = {}) {
     let lastLoadedAt = dbFile !== null ? Date.now() : null;
     let lastFlushedAt = null;
     let lastFlushError = null;
+    let lastCheckpointAt = null;
+    let lastCheckpointMode = null;
+    let lastCheckpointError = null;
     let lastPrunedAt = null;
     const testHooks = options.testHooks || {};
 
@@ -964,6 +972,9 @@ function createMemoryStore(options = {}) {
     function checkpointWal(mode) {
         if (!persistence.enabled) return;
         db.exec(`PRAGMA wal_checkpoint(${mode});`);
+        lastCheckpointAt = Date.now();
+        lastCheckpointMode = mode;
+        lastCheckpointError = null;
     }
 
     function recordFlushSuccess() {
@@ -975,16 +986,17 @@ function createMemoryStore(options = {}) {
     function recordFlushFailure(error) {
         dirty = true;
         lastFlushError = error.message;
+        lastCheckpointError = error.message;
     }
 
     // Async flush; returns Promise<boolean> (true if checkpointed). SQLite commits are immediate;
-    // this coalesces status cleanup and bounds WAL growth after bursty writes.
+    // this coalesces status cleanup and uses RESTART checkpointing to bound WAL growth.
     async function flush() {
         if (!persistence.enabled) return false;
         clearPendingFlush();
         if (!dirty) return false;
         try {
-            checkpointWal('PASSIVE');
+            checkpointWal('RESTART');
             recordFlushSuccess();
             return true;
         } catch (error) {
@@ -1015,6 +1027,9 @@ function createMemoryStore(options = {}) {
             lastLoadedAt,
             lastFlushedAt,
             lastFlushError,
+            lastCheckpointAt,
+            lastCheckpointMode,
+            lastCheckpointError,
         };
     }
 
@@ -1183,8 +1198,42 @@ function createMemoryStore(options = {}) {
         return { key, nodes, edges: selectedEdges };
     }
 
+    function searchSqlParts({ query, tags, minImportance, t }) {
+        const fromSql = query
+            ? 'fts_entries f JOIN entries e ON e.rowid = f.rowid'
+            : 'entries e';
+        const where = [];
+        const params = [];
+
+        if (query) {
+            where.push('f.body MATCH ?');
+            params.push(`"${query.replace(/"/g, '""')}"`);
+        }
+
+        where.push('(e.expires_at IS NULL OR e.expires_at > ?)');
+        params.push(t);
+
+        if (minImportance !== null) {
+            where.push('e.importance >= ?');
+            params.push(minImportance);
+        }
+
+        if (tags) {
+            tags.forEach((tag, index) => {
+                where.push(`EXISTS (SELECT 1 FROM tags t${index} WHERE t${index}.key = e.key AND LOWER(t${index}.tag) = ?)`);
+                params.push(tag);
+            });
+        }
+
+        return {
+            fromSql,
+            whereSql: where.join(' AND '),
+            params,
+        };
+    }
+
     // query matches key, summary, and tags through SQLite FTS5 trigram search.
-    // tags is an AND filter. Returns { results, total } where total is the pre-limit match count.
+    // tags is an AND filter. Returns { results, total } where total is the pre-limit visible match count.
     function search(filters = {}) {
         const rawQuery = typeof filters.query === 'string' ? filters.query.trim() : '';
         const query = rawQuery.length > 0 ? rawQuery : null;
@@ -1198,43 +1247,24 @@ function createMemoryStore(options = {}) {
         const limit = Number.isInteger(filters.limit) && filters.limit > 0 ? filters.limit : 20;
         const t = now();
 
-        // When a text query is present, use the FTS5 index (O(log n)); otherwise scan all visible entries.
-        let candidateKeys = null;
-        if (query) {
-            // Wrap in double-quoted phrase so FTS5 treats the input as a literal string, not syntax.
-            const ftsPhrase = '"' + query.replace(/"/g, '""') + '"';
-            const ftsRows = stmts.ftsSearch.all(ftsPhrase);
-            if (ftsRows.length === 0) return { results: [], total: 0 };
-            candidateKeys = new Set(ftsRows.map((r) => r.key));
-        }
+        const { fromSql, whereSql, params } = searchSqlParts({ query, tags, minImportance, t });
+        const total = db.prepare(`SELECT COUNT(*) AS total FROM ${fromSql} WHERE ${whereSql}`).get(...params).total;
+        if (total === 0) return { results: [], total: 0 };
 
-        // Load tags for candidates only (or all) in one query to avoid N+1 selects.
-        const allTagRows = stmts.allTags.all();
-        const tagsByKey = {};
-        for (const row of allTagRows) {
-            if (candidateKeys && !candidateKeys.has(row.key)) continue;
-            if (!tagsByKey[row.key]) tagsByKey[row.key] = [];
-            tagsByKey[row.key].push(row.tag);
-        }
+        const rows = db.prepare(`
+            SELECT e.*
+            FROM ${fromSql}
+            WHERE ${whereSql}
+            ORDER BY e.importance DESC, e.updated_at DESC, e.key ASC
+            LIMIT ?
+        `).all(...params, limit);
 
-        const candidateRows = candidateKeys
-            ? Array.from(candidateKeys).map((key) => stmts.getVisibleEntry.get(key, t)).filter(Boolean)
-            : stmts.allVisibleEntries.all(t);
+        const results = rows.map((row) => {
+            const entryTags = stmts.getTagsForKey.all(row.key).map((tagRow) => tagRow.tag);
+            return nodeMetadata(row.key, rowToEntry(row, entryTags));
+        });
 
-        const matched = [];
-        for (const row of candidateRows) {
-            if (minImportance !== null && row.importance < minImportance) continue;
-            const entryTags = tagsByKey[row.key] || [];
-            if (tags) {
-                const entryTagsLower = entryTags.map((tag) => tag.toLowerCase());
-                if (!tags.every((tag) => entryTagsLower.includes(tag))) continue;
-            }
-            matched.push({ key: row.key, entry: rowToEntry(row, entryTags) });
-        }
-
-        matched.sort(sortNodeRecords);
-        const results = matched.slice(0, limit).map(({ key, entry }) => nodeMetadata(key, entry));
-        return { results, total: matched.length };
+        return { results, total };
     }
 
     // Returns zombie/orphan/duplicate/stale/expired lists plus summary counts.
@@ -1301,86 +1331,192 @@ function createMemoryStore(options = {}) {
         };
     }
 
-    const doBulkSet = inTransaction((entries, updatedBy) => {
-        let changed = false;
-        const results = entries.map((item, index) => {
-            let itemResult;
-            if (!item || typeof item !== 'object' || Array.isArray(item)) {
-                itemResult = { ok: false, error: 'invalid-item' };
-            } else {
-                try {
-                    const summary = item.summary || safeSummary(item.value);
-                    const tags = normalizeTags(item.tags);
-                    const importance = item.importance ?? DEFAULT_IMPORTANCE;
-                    const expiresAt = normalizeExpiry(item);
-                    const ts = now();
-                    const ifRevision = hasOwn(item, 'ifRevision') ? item.ifRevision : undefined;
-                    const valueJson = JSON.stringify(item.value);
-                    const result = applySet(item.key, valueJson, summary, importance, expiresAt, ts, updatedBy, tags, ifRevision);
-                    if (result && result.ok === false) {
-                        itemResult = {
-                            key: item.key,
-                            ok: false,
-                            error: result.error,
-                            currentRevision: result.currentRevision,
-                        };
-                    } else {
-                        changed = true;
-                        itemResult = { key: item.key, ok: true, revision: result.revision };
-                    }
-                } catch (error) {
-                    itemResult = { key: item.key, ok: false, error: error.message };
-                }
+    function bulkValidationFailure(results) {
+        return {
+            ok: false,
+            error: 'bulk-validation-failed',
+            results: results.map((result) => (result.ok ? { ...result, ok: false, error: 'not-applied' } : result)),
+        };
+    }
+
+    function setItemFailure(item, error, extra = {}) {
+        return { key: item && item.key, ok: false, error, ...extra };
+    }
+
+    function relationItemFailure(item, error) {
+        return {
+            from: item && item.from,
+            to: item && item.to,
+            relation: item && item.relation,
+            ok: false,
+            error,
+        };
+    }
+
+    function validateSetItemShape(item) {
+        if (!isPlainObject(item)) return 'invalid-item';
+        if (!isNonEmptyString(item.key)) return 'missing-key';
+        if (!hasOwn(item, 'value') || !canSerializeJsonValue(item.value)) return 'invalid-value';
+        if (hasOwn(item, 'ttlMs') && hasOwn(item, 'expiresAt')) return 'invalid-expiry';
+        if (hasOwn(item, 'ttlMs') && !isPositiveInteger(item.ttlMs)) return 'invalid-expiry';
+        if (hasOwn(item, 'expiresAt') && !isPositiveInteger(item.expiresAt)) return 'invalid-expiry';
+        if (hasOwn(item, 'summary') && !isNonEmptyString(item.summary)) return 'invalid-summary';
+        if (hasOwn(item, 'tags') && !hasValidTags(item.tags)) return 'invalid-tags';
+        if (hasOwn(item, 'importance') && !isValidImportance(item.importance)) return 'invalid-importance';
+        if (hasOwn(item, 'ifRevision')) {
+            if (item.ifRevision !== null && !isPositiveInteger(item.ifRevision)) return 'invalid-ifRevision';
+        }
+        return null;
+    }
+
+    function prepareBulkSet(entries) {
+        const seenKeys = new Set();
+        const prepared = [];
+        const results = [];
+
+        for (const item of entries) {
+            const shapeError = validateSetItemShape(item);
+            if (shapeError) {
+                results.push(setItemFailure(item, shapeError));
+                continue;
             }
 
-            if (itemResult.ok && testHooks.afterBulkSetItem) {
-                testHooks.afterBulkSetItem({ index, item, result: itemResult });
+            if (seenKeys.has(item.key)) {
+                results.push(setItemFailure(item, 'duplicate-key'));
+                continue;
             }
-            return itemResult;
-        });
+            seenKeys.add(item.key);
 
-        return { results, changed };
-    });
+            const ts = now();
+            const ifRevision = hasOwn(item, 'ifRevision') ? item.ifRevision : undefined;
+            const existing = stmts.getEntryWithRowid.get(item.key);
+            const revisionError = validateRevisionCheck(item.key, existing, ifRevision, ts, true);
+            if (revisionError) {
+                results.push(setItemFailure(item, revisionError.error, { currentRevision: revisionError.currentRevision }));
+                continue;
+            }
 
-    const doBulkRelate = inTransaction((relations, updatedBy) => {
-        let changed = false;
-        const results = relations.map((item, index) => {
-            let itemResult;
-            if (!item || typeof item !== 'object' || Array.isArray(item)) {
-                itemResult = { ok: false, error: 'invalid-item' };
-            } else {
-                const result = applyRelate(item.from, item.to, item.relation, updatedBy, {
+            prepared.push({
+                key: item.key,
+                valueJson: JSON.stringify(item.value),
+                summary: item.summary || safeSummary(item.value),
+                tags: normalizeTags(item.tags),
+                importance: item.importance ?? DEFAULT_IMPORTANCE,
+                expiresAt: normalizeExpiry(item),
+                ts,
+                ifRevision,
+                source: item,
+            });
+            results.push({ key: item.key, ok: true });
+        }
+
+        if (results.some((result) => !result.ok)) return bulkValidationFailure(results);
+        return { ok: true, prepared };
+    }
+
+    function validateRelationItemShape(item) {
+        if (!isPlainObject(item)) return 'invalid-item';
+        if (!isNonEmptyString(item.from)) return 'missing-from';
+        if (!isNonEmptyString(item.to)) return 'missing-to';
+        if (item.from === item.to) return 'self-relation-not-allowed';
+        if (!isNonEmptyString(item.relation) || !RELATION_TYPES.has(item.relation)) return 'invalid-relation';
+        if (hasOwn(item, 'reason') && !isNonEmptyString(item.reason)) return 'invalid-reason';
+        if (hasOwn(item, 'weight') && !isValidWeight(item.weight)) return 'invalid-weight';
+        return null;
+    }
+
+    function prepareBulkRelate(relations) {
+        const seenEdges = new Set();
+        const prepared = [];
+        const results = [];
+
+        for (const item of relations) {
+            const shapeError = validateRelationItemShape(item);
+            if (shapeError) {
+                results.push(relationItemFailure(item, shapeError));
+                continue;
+            }
+
+            const id = edgeId(item.from, item.relation, item.to);
+            if (seenEdges.has(id)) {
+                results.push(relationItemFailure(item, 'duplicate-edge'));
+                continue;
+            }
+            seenEdges.add(id);
+
+            const t = now();
+            if (!stmts.getVisibleEntry.get(item.from, t) || !stmts.getVisibleEntry.get(item.to, t)) {
+                results.push(relationItemFailure(item, 'missing-node'));
+                continue;
+            }
+
+            prepared.push({
+                from: item.from,
+                to: item.to,
+                relation: item.relation,
+                metadata: {
                     reason: item.reason,
                     weight: item.weight,
-                });
-                if (!result.ok) {
-                    itemResult = {
-                        from: item.from,
-                        to: item.to,
-                        relation: item.relation,
-                        ok: false,
-                        error: result.error,
-                    };
-                } else {
-                    changed = true;
-                    itemResult = {
-                        from: item.from,
-                        to: item.to,
-                        relation: item.relation,
-                        ok: true,
-                        action: result.action,
-                        edge: result.edge,
-                    };
-                }
+                },
+                t,
+                source: item,
+            });
+            results.push({ from: item.from, to: item.to, relation: item.relation, ok: true });
+        }
+
+        if (results.some((result) => !result.ok)) return bulkValidationFailure(results);
+        return { ok: true, prepared };
+    }
+
+    const doBulkSet = inTransaction((preparedEntries, updatedBy) => {
+        const results = preparedEntries.map((item, index) => {
+            const result = applySet(
+                item.key,
+                item.valueJson,
+                item.summary,
+                item.importance,
+                item.expiresAt,
+                item.ts,
+                updatedBy,
+                item.tags,
+                item.ifRevision,
+            );
+            if (result && result.ok === false) {
+                throw new Error(result.error);
             }
 
-            if (itemResult.ok && testHooks.afterBulkRelateItem) {
-                testHooks.afterBulkRelateItem({ index, item, result: itemResult });
+            const itemResult = { key: item.key, ok: true, revision: result.revision };
+            if (testHooks.afterBulkSetItem) {
+                testHooks.afterBulkSetItem({ index, item: item.source, result: itemResult });
             }
             return itemResult;
         });
 
-        return { results, changed };
+        return { results, changed: results.length > 0 };
+    });
+
+    const doBulkRelate = inTransaction((preparedRelations, updatedBy) => {
+        const results = preparedRelations.map((item, index) => {
+            const result = applyRelate(item.from, item.to, item.relation, updatedBy, item.metadata, item.t);
+            if (!result.ok) {
+                throw new Error(result.error);
+            }
+
+            const itemResult = {
+                from: item.from,
+                to: item.to,
+                relation: item.relation,
+                ok: true,
+                action: result.action,
+                edge: result.edge,
+            };
+            if (testHooks.afterBulkRelateItem) {
+                testHooks.afterBulkRelateItem({ index, item: item.source, result: itemResult });
+            }
+            return itemResult;
+        });
+
+        return { results, changed: results.length > 0 };
     });
 
     return {
@@ -1547,31 +1683,43 @@ function createMemoryStore(options = {}) {
         },
 
         importState(state) {
-            doImport(state);
+            const validation = validateSnapshot(state);
+            if (!validation.ok) return validation;
+            doImport(validation.snapshot);
+            markDirty();
+            return { ok: true, errors: [], stats: validation.stats };
         },
 
-        // Applies many set calls in one SQLite transaction with per-item failure isolation.
+        // Applies many set calls in one SQLite transaction; any item failure rolls back the batch.
         bulkSet(entries, updatedBy) {
-            if (!Array.isArray(entries)) return [];
-            const { results, changed } = doBulkSet(entries, updatedBy);
-            if (changed) markDirty();
-            return results;
+            if (!Array.isArray(entries)) {
+                return { ok: false, error: 'missing-entries', results: [] };
+            }
+            const prepared = prepareBulkSet(entries);
+            if (!prepared.ok) return prepared;
+            const result = doBulkSet(prepared.prepared, updatedBy);
+            if (result.changed) markDirty();
+            return { ok: true, results: result.results };
         },
 
-        // Applies many relate calls in one SQLite transaction with per-item failure isolation.
+        // Applies many relate calls in one SQLite transaction; any item failure rolls back the batch.
         bulkRelate(relations, updatedBy) {
-            if (!Array.isArray(relations)) return [];
-            const { results, changed } = doBulkRelate(relations, updatedBy);
-            if (changed) markDirty();
-            return results;
+            if (!Array.isArray(relations)) {
+                return { ok: false, error: 'missing-relations', results: [] };
+            }
+            const prepared = prepareBulkRelate(relations);
+            if (!prepared.ok) return prepared;
+            const result = doBulkRelate(prepared.prepared, updatedBy);
+            if (result.changed) markDirty();
+            return { ok: true, results: result.results };
         },
 
         audit,
 
-        // Async flush; returns Promise<boolean> (true if acknowledged). Coalesces concurrent calls.
+        // Async flush; returns Promise<boolean> (true if checkpointed). Coalesces concurrent calls.
         flush,
 
-        // Synchronous flush for SIGINT/SIGTERM handlers. Returns true if acknowledged.
+        // Synchronous flush for SIGINT/SIGTERM handlers. Returns true if checkpointed.
         flushSync,
 
         persistenceStatus,

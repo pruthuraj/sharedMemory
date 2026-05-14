@@ -395,6 +395,51 @@ test('MCP merge import rejects invalid snapshots without mutation', async () => 
     assert.deepEqual(memory.keys(), ['existing']);
 });
 
+test('MCP bulk handlers use all-or-nothing domain failures', async () => {
+    const memory = createMemoryStore();
+    const suggestionEngine = createFakeSuggestionEngine(true);
+    const handlers = createSharedMemoryToolHandlers({
+        memory,
+        suggestionEngine,
+        updatedBy: 'mcp-test',
+    });
+
+    assert.deepEqual(await handlers.memory_bulk_set({
+        entries: [
+            { key: 'project.bulk-a', value: 'A', summary: 'A', tags: ['bulk'], importance: 5 },
+            { key: 'project.bulk-b', value: 'B', summary: 'B', tags: ['bulk'], importance: 4 },
+        ],
+    }), {
+        ok: true,
+        results: [
+            { key: 'project.bulk-a', ok: true, revision: 1 },
+            { key: 'project.bulk-b', ok: true, revision: 1 },
+        ],
+    });
+    assert.deepEqual(suggestionEngine.calls.upserts.map((call) => call.key).sort(), ['project.bulk-a', 'project.bulk-b']);
+
+    const failedSet = await handlers.memory_bulk_set({
+        entries: [
+            { key: 'project.bulk-c', value: 'C', summary: 'C', tags: ['bulk'], importance: 5 },
+            { key: 'project.bulk-a', value: 'stale', summary: 'stale', tags: ['bulk'], importance: 5, ifRevision: 999 },
+        ],
+    });
+    assert.equal(failedSet.ok, false);
+    assert.equal(failedSet.error, 'bulk-validation-failed');
+    assert.deepEqual(failedSet.results.map((item) => item.error), ['not-applied', 'revision-conflict']);
+    assert.equal(memory.get('project.bulk-c'), null);
+
+    const failedRelate = await handlers.memory_bulk_relate({
+        relations: [
+            { from: 'project.bulk-a', to: 'project.bulk-b', relation: 'supports' },
+            { from: 'project.bulk-a', to: 'missing', relation: 'supports' },
+        ],
+    });
+    assert.equal(failedRelate.ok, false);
+    assert.equal(failedRelate.error, 'bulk-validation-failed');
+    assert.equal(memory.relationCount(), 0);
+});
+
 test('memory_suggest returns empty when disabled and refreshes visible memory when enabled', async () => {
     const memory = createMemoryStore();
     memory.set('project.database', 'Database details', 'agentA', {

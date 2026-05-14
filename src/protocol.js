@@ -2,6 +2,26 @@
 
 const PROTOCOL_VERSION = 1;
 
+const KNOWN_KEY_PREFIXES = Object.freeze([
+    'project.',
+    'arch.',
+    'api.',
+    'data.',
+    'feature.',
+    'decision.',
+    'insight.',
+    'task.',
+    'blocker.',
+    'setup.',
+    'reference.',
+    'agent.',
+    'preference.',
+    'session.',
+    'session-section.',
+    'file.',
+    'evidence.',
+]);
+
 const COMMAND_TYPE_LIST = Object.freeze([
     'auth',
     'register',
@@ -195,6 +215,41 @@ function validateRelationFields(message) {
     return null;
 }
 
+function validateBulkSetItem(item) {
+    if (!isPlainObject(item)) {
+        return { ok: false, error: 'invalid-item' };
+    }
+
+    if (!isNonEmptyString(item.key)) {
+        return { ok: false, error: 'missing-key' };
+    }
+
+    if (!hasOwn(item, 'value')) {
+        return { ok: false, error: 'missing-value' };
+    }
+
+    return validateSetMetadata(item, { allowNull: true });
+}
+
+function validateBulkRelationItem(item) {
+    if (!isPlainObject(item)) {
+        return { ok: false, error: 'invalid-item' };
+    }
+
+    const relationError = validateRelationFields(item);
+    if (relationError) return relationError;
+
+    if (hasOwn(item, 'reason') && !isNonEmptyString(item.reason)) {
+        return { ok: false, error: 'invalid-reason' };
+    }
+
+    if (hasOwn(item, 'weight') && !isNumberInRange(item.weight, 0, 1)) {
+        return { ok: false, error: 'invalid-weight' };
+    }
+
+    return null;
+}
+
 /**
  * Parse and validate a raw WebSocket message.
  *
@@ -282,11 +337,19 @@ function validateMessage(message) {
             if (!Array.isArray(message.entries)) {
                 return { ok: false, error: 'missing-entries' };
             }
+            for (const item of message.entries) {
+                const itemError = validateBulkSetItem(item);
+                if (itemError) return itemError;
+            }
             return { ok: true, message };
 
         case 'bulk_relate':
             if (!Array.isArray(message.relations)) {
                 return { ok: false, error: 'missing-relations' };
+            }
+            for (const item of message.relations) {
+                const itemError = validateBulkRelationItem(item);
+                if (itemError) return itemError;
             }
             return { ok: true, message };
 
@@ -387,9 +450,37 @@ function validateMessage(message) {
     }
 }
 
+/**
+ * Soft-warn audit for a key + metadata pair on the set write path.
+ * Returns an array of warning strings; empty array means clean.
+ * Never blocks the write — callers include warnings in their response.
+ */
+function auditMetadata(key, metadata = {}) {
+    const warnings = [];
+
+    if (!isNonEmptyString(metadata.summary)) {
+        warnings.push('missing-summary');
+    }
+
+    if (!Array.isArray(metadata.tags) || metadata.tags.length === 0) {
+        warnings.push('missing-tags');
+    }
+
+    if (metadata.importance === undefined || metadata.importance === null) {
+        warnings.push('missing-importance');
+    }
+
+    if (isNonEmptyString(key) && !KNOWN_KEY_PREFIXES.some(prefix => key.startsWith(prefix))) {
+        warnings.push('unknown-key-prefix');
+    }
+
+    return warnings;
+}
+
 module.exports = {
     parseMessage,
     protocolMetadata,
+    auditMetadata,
     PROTOCOL_VERSION,
     COMMAND_TYPE_LIST,
     COMMAND_TYPES,
@@ -398,4 +489,5 @@ module.exports = {
     DIRECT_RESPONSE_TYPES,
     BROADCAST_TYPES,
     MCP_TOOL_NAMES,
+    KNOWN_KEY_PREFIXES,
 };

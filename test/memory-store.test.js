@@ -145,6 +145,9 @@ test('persistence starts empty when file is missing', () => {
         lastLoadedAt: memory.persistenceStatus().lastLoadedAt,
         lastFlushedAt: null,
         lastFlushError: null,
+        lastCheckpointAt: null,
+        lastCheckpointMode: null,
+        lastCheckpointError: null,
     });
     assert.equal(typeof memory.persistenceStatus().lastLoadedAt, 'number');
 });
@@ -182,6 +185,8 @@ test('flush persists entries and edges, and restart reloads them', async () => {
     assert.equal(memory.persistenceStatus().dirty, true);
     assert.equal(await memory.flush(), true);
     assert.equal(memory.persistenceStatus().dirty, false);
+    assert.equal(memory.persistenceStatus().lastCheckpointMode, 'RESTART');
+    assert.equal(typeof memory.persistenceStatus().lastCheckpointAt, 'number');
 
     const restored = createMemoryStore({ persistence: { file } });
     assert.deepEqual(restored.keys().sort(), ['project.architecture', 'project.database']);
@@ -193,10 +198,11 @@ test('flush persists entries and edges, and restart reloads them', async () => {
     assert.equal(graph.edges[0].reason, 'Database choices shape architecture.');
 });
 
-test('persistence drops dangling edges during load', () => {
+test('importState rejects dangling edges and leaves current graph unchanged', () => {
     const memory = createTimedStore();
+    memory.set('existing', 'safe', 'agentA', { summary: 'safe', importance: 2 });
 
-    memory.importState({
+    const result = memory.importState({
         entries: {
             nodeA: { value: 'A', summary: 'A', tags: [], importance: 1, updatedAt: 100, updatedBy: 'agentA' },
         },
@@ -205,8 +211,10 @@ test('persistence drops dangling edges during load', () => {
         ],
     });
 
+    assert.equal(result.ok, false);
     assert.equal(memory.relationCount(), 0);
-    assert.deepEqual(memory.map('nodeA', { depth: 1, limit: 10 }).edges, []);
+    assert.equal(memory.get('nodeA'), null);
+    assert.equal(memory.get('existing').value, 'safe');
 });
 
 test('snapshot export includes full entries and strict validation accepts it', () => {
@@ -671,6 +679,7 @@ test('flushSync marks store as not dirty and data persists', () => {
     memory.set('nodeA', 'A', 'agentA', { summary: 'Node A', importance: 4 });
     assert.equal(memory.flushSync(), true);
     assert.equal(memory.persistenceStatus().dirty, false);
+    assert.equal(memory.persistenceStatus().lastCheckpointMode, 'TRUNCATE');
 
     const restored = createMemoryStore({ persistence: { file } });
     assert.equal(restored.get('nodeA').summary, 'Node A');
@@ -876,6 +885,66 @@ test('bulkSet rolls back the SQLite transaction if interrupted mid-batch', () =>
     assert.equal(memory.count(), 0);
 });
 
+test('search filters expired FTS matches in SQL before returning metadata', () => {
+    let currentTime = 1000;
+    const memory = createMemoryStore({ clock: () => currentTime });
+
+    for (let index = 0; index < 50; index += 1) {
+        memory.set(`expired-${index}`, 'needle', 'agentA', {
+            summary: `needle expired ${index}`,
+            tags: ['needle'],
+            importance: 9,
+            expiresAt: 1100,
+        });
+    }
+    memory.set('visible', 'needle', 'agentA', {
+        summary: 'needle visible',
+        tags: ['needle'],
+        importance: 5,
+        expiresAt: 5000,
+    });
+
+    currentTime = 1200;
+    const result = memory.search({ query: 'needle', tags: ['needle'], limit: 5 });
+    assert.equal(result.total, 1);
+    assert.deepEqual(result.results.map((record) => record.key), ['visible']);
+    assert.equal(result.results[0].expiresAt, 5000);
+});
+
+test('bulkSet is all-or-nothing when one item fails validation', () => {
+    const memory = createMemoryStore();
+
+    const result = memory.bulkSet([
+        { key: 'bulk.valid', value: 'A', summary: 'A', tags: ['bulk'], importance: 4 },
+        { key: 'bulk.invalid', value: 'B', summary: '', tags: ['bulk'], importance: 4 },
+    ], 'bulk-agent');
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error, 'bulk-validation-failed');
+    assert.deepEqual(result.results.map((item) => item.ok), [false, false]);
+    assert.equal(result.results[0].error, 'not-applied');
+    assert.equal(result.results[1].error, 'invalid-summary');
+    assert.equal(memory.get('bulk.valid'), null);
+    assert.equal(memory.get('bulk.invalid'), null);
+});
+
+test('bulkSet is all-or-nothing on revision conflicts', () => {
+    const memory = createMemoryStore();
+    memory.set('bulk.existing', 'old', 'agentA', { summary: 'old' });
+
+    const result = memory.bulkSet([
+        { key: 'bulk.new', value: 'new', summary: 'new' },
+        { key: 'bulk.existing', value: 'newer', summary: 'newer', ifRevision: 999 },
+    ], 'bulk-agent');
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error, 'bulk-validation-failed');
+    assert.equal(result.results[1].error, 'revision-conflict');
+    assert.equal(result.results[1].currentRevision, 1);
+    assert.equal(memory.get('bulk.new'), null);
+    assert.equal(memory.get('bulk.existing').value, 'old');
+});
+
 test('bulkRelate rolls back the SQLite transaction if interrupted mid-batch', () => {
     const memory = createMemoryStore({
         testHooks: {
@@ -899,4 +968,22 @@ test('bulkRelate rolls back the SQLite transaction if interrupted mid-batch', ()
 
     assert.equal(memory.relationCount(), 0);
     assert.deepEqual(memory.map('bulk.a', { depth: 2, limit: 10 }).edges, []);
+});
+
+test('bulkRelate is all-or-nothing when one relation is invalid', () => {
+    const memory = createMemoryStore();
+    memory.set('bulk.a', 'A', 'bulk-agent', { summary: 'A' });
+    memory.set('bulk.b', 'B', 'bulk-agent', { summary: 'B' });
+    memory.set('bulk.c', 'C', 'bulk-agent', { summary: 'C' });
+
+    const result = memory.bulkRelate([
+        { from: 'bulk.a', to: 'bulk.b', relation: 'supports' },
+        { from: 'bulk.b', to: 'missing', relation: 'supports' },
+        { from: 'bulk.b', to: 'bulk.c', relation: 'supports' },
+    ], 'bulk-agent');
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error, 'bulk-validation-failed');
+    assert.deepEqual(result.results.map((item) => item.error), ['not-applied', 'missing-node', 'not-applied']);
+    assert.equal(memory.relationCount(), 0);
 });

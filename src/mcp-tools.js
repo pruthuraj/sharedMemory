@@ -1,6 +1,6 @@
 // Shared MCP tool handlers kept transport-independent for deterministic tests.
 
-const { RELATION_TYPES } = require('./protocol.js');
+const { RELATION_TYPES, auditMetadata } = require('./protocol.js');
 
 function isPlainObject(value) {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -290,7 +290,12 @@ function createSharedMemoryToolHandlers(options) {
                 await suggestionEngine.upsertMemory(input.key, entry);
             }
 
-            return ok({ key: input.key, entry: metadataOnly(entry) });
+            const warnings = auditMetadata(input.key, {
+                summary: input.summary,
+                tags: input.tags,
+                importance: input.importance,
+            });
+            return ok({ key: input.key, entry: metadataOnly(entry), ...(warnings.length ? { warnings } : {}) });
         },
 
         async memory_get(input = {}) {
@@ -431,23 +436,25 @@ function createSharedMemoryToolHandlers(options) {
         async memory_bulk_set(input = {}) {
             const entries = coerceArray(input.entries);
             if (!Array.isArray(entries)) return fail('missing-entries');
-            const results = memory.bulkSet(entries, updatedBy);
+            const result = memory.bulkSet(entries, updatedBy);
+            if (!result.ok) return fail(result.error, { results: result.results });
             if (suggestionEngine && typeof suggestionEngine.upsertMemory === 'function') {
-                for (const r of results) {
+                for (const r of result.results) {
                     if (r.ok) {
                         const entry = memory.get(r.key);
                         if (entry) await suggestionEngine.upsertMemory(r.key, entry);
                     }
                 }
             }
-            return ok({ results });
+            return ok({ results: result.results });
         },
 
         async memory_bulk_relate(input = {}) {
             const relations = coerceArray(input.relations);
             if (!Array.isArray(relations)) return fail('missing-relations');
-            const results = memory.bulkRelate(relations, updatedBy);
-            return ok({ results });
+            const result = memory.bulkRelate(relations, updatedBy);
+            if (!result.ok) return fail(result.error, { results: result.results });
+            return ok({ results: result.results });
         },
     };
 }

@@ -193,6 +193,7 @@ test('register, set, get, list, and status remain compatible', async () => {
             action: 'set',
             key: 'greeting',
             revision: 1,
+            warnings: ['missing-summary', 'missing-tags', 'missing-importance', 'unknown-key-prefix'],
         });
 
         client.send({ type: 'get', key: 'greeting' });
@@ -237,6 +238,9 @@ test('register, set, get, list, and status remain compatible', async () => {
                 lastLoadedAt: null,
                 lastFlushedAt: null,
                 lastFlushError: null,
+                lastCheckpointAt: null,
+                lastCheckpointMode: null,
+                lastCheckpointError: null,
             },
             suggestions: {
                 enabled: false,
@@ -615,6 +619,7 @@ test('auth enabled blocks protected commands until valid auth unlocks the socket
             action: 'set',
             key: 'allowed',
             revision: 1,
+            warnings: ['missing-summary', 'missing-tags', 'missing-importance', 'unknown-key-prefix'],
             requestId: 'allowed-1',
         });
     } finally {
@@ -778,6 +783,7 @@ test('versioned WebSocket writes expose revisions and reject stale mutations', a
             action: 'set',
             key: 'versioned',
             revision: 1,
+            warnings: ['unknown-key-prefix'],
             requestId: 'create-only',
         });
         await observer.waitFor(
@@ -815,6 +821,7 @@ test('versioned WebSocket writes expose revisions and reject stale mutations', a
             action: 'set',
             key: 'versioned',
             revision: 2,
+            warnings: ['unknown-key-prefix'],
             requestId: 'set-v2',
         });
 
@@ -1436,6 +1443,86 @@ test('invalid messages return protocol errors instead of crashing', async () => 
     }
 });
 
+test('bulk commands validate at the edge and fail all-or-nothing on domain errors', async () => {
+    const suggestionEngine = createFakeSuggestionEngine();
+    const { appServer, wsUrl } = await startServer({ suggestionEngine });
+
+    try {
+        const client = await connectClient(wsUrl);
+        await client.waitFor((message) => message.type === 'welcome');
+        client.send({ type: 'register', agentId: 'bulk-agent' });
+        await client.waitFor((message) => message.type === 'registered');
+
+        client.send({
+            type: 'bulk_set',
+            entries: [
+                { key: 'project.bulk-a', value: 'A', summary: 'A', tags: ['bulk'], importance: 5 },
+                { key: 'project.bulk-b', value: 'B', summary: 'B', tags: ['bulk'], importance: 4 },
+            ],
+            requestId: 'bulk-ok',
+        });
+        assert.deepEqual(await client.waitFor((message) => message.requestId === 'bulk-ok'), {
+            type: 'bulk-set-result',
+            ok: true,
+            results: [
+                { key: 'project.bulk-a', ok: true, revision: 1 },
+                { key: 'project.bulk-b', ok: true, revision: 1 },
+            ],
+            requestId: 'bulk-ok',
+        });
+        assert.deepEqual(suggestionEngine.calls.upserts.map((call) => call.key).sort(), ['project.bulk-a', 'project.bulk-b']);
+
+        client.send({
+            type: 'bulk_set',
+            entries: [
+                { key: 'project.bulk-c', value: 'C', summary: 'C', tags: ['bulk'], importance: 5 },
+                { key: 'project.bulk-a', value: 'new', summary: 'new', tags: ['bulk'], importance: 5, ifRevision: 999 },
+            ],
+            requestId: 'bulk-conflict',
+        });
+        const conflict = await client.waitFor((message) => message.requestId === 'bulk-conflict');
+        assert.equal(conflict.type, 'bulk-set-result');
+        assert.equal(conflict.ok, false);
+        assert.equal(conflict.error, 'bulk-validation-failed');
+        assert.equal(conflict.results[0].error, 'not-applied');
+        assert.equal(conflict.results[1].error, 'revision-conflict');
+
+        client.send({ type: 'get', key: 'project.bulk-c', requestId: 'bulk-c-get' });
+        assert.deepEqual(await client.waitFor((message) => message.requestId === 'bulk-c-get'), {
+            type: 'result',
+            key: 'project.bulk-c',
+            entry: null,
+            requestId: 'bulk-c-get',
+        });
+
+        client.send({
+            type: 'bulk_relate',
+            relations: [
+                { from: 'project.bulk-a', to: 'project.bulk-b', relation: 'supports' },
+                { from: 'project.bulk-b', to: 'missing-node', relation: 'supports' },
+            ],
+            requestId: 'bulk-relate-fail',
+        });
+        const relationFailure = await client.waitFor((message) => message.requestId === 'bulk-relate-fail');
+        assert.equal(relationFailure.type, 'bulk-relate-result');
+        assert.equal(relationFailure.ok, false);
+        assert.equal(relationFailure.error, 'bulk-validation-failed');
+
+        client.send({
+            type: 'bulk_set',
+            entries: [{ key: 'project.bad', value: 'bad', summary: '' }],
+            requestId: 'bulk-edge-invalid',
+        });
+        assert.deepEqual(await client.waitFor((message) => message.requestId === 'bulk-edge-invalid'), {
+            type: 'error',
+            message: 'invalid-summary',
+            requestId: 'bulk-edge-invalid',
+        });
+    } finally {
+        await appServer.close();
+    }
+});
+
 test('duplicate live agent IDs are rejected and offline IDs can be reclaimed', async () => {
     const { appServer, wsUrl } = await startServer();
 
@@ -1488,6 +1575,7 @@ test('link, unlink, and offline linked targets are safe', async () => {
             action: 'set',
             key: 'safe',
             revision: 1,
+            warnings: ['missing-summary', 'missing-tags', 'missing-importance', 'unknown-key-prefix'],
         });
 
         agent.send({ type: 'unlink', target: 'offlineTarget' });

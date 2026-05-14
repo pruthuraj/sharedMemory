@@ -15,7 +15,7 @@ Two protocols share the same SQLite-backed store:
 - **Typed graph relations.** Official relation types are `related_to`, `depends_on`, `supports`, `contradicts`, `mentions`, `derived_from`, `next_step`, `implements`, `documents`, and `blocks`.
 - **Low-token recall.** `map`, `search`, and `suggest` return metadata-only results; full values stay behind `get` or snapshot export.
 - **Live notifications.** Subscribers receive memory `update`, `relation-update`, and snapshot import events.
-- **Durability.** `MEMORY_FILE` enables SQLite persistence using Node 24 `node:sqlite`.
+- **Durability.** `MEMORY_FILE` enables SQLite WAL persistence using Node 24 `node:sqlite`; writes commit synchronously and flush performs checkpoint/status cleanup.
 - **Operations visibility.** `/status` exposes health, persistence, suggestions, audit counts, and runtime identity. `/protocol` exposes live command and response mappings.
 
 ## Quick Start
@@ -81,6 +81,8 @@ Broadcasts do not include `requestId`.
 The stdio adapter exposes:
 
 `memory_set`, `memory_get`, `memory_search`, `memory_suggest`, `memory_map`, `memory_relate`, `memory_unrelate`, `memory_export`, `memory_validate_import`, `memory_import`, `memory_audit`, `memory_bulk_set`, and `memory_bulk_relate`.
+
+Bulk tools and WebSocket `bulk_set` / `bulk_relate` are all-or-nothing: any invalid item or domain conflict returns `bulk-validation-failed` and commits nothing.
 
 ## Operational Notes
 

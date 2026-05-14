@@ -14,7 +14,7 @@ const {
     safeSend,
 } = require('./delivery');
 const { createMemoryStore } = require('./memory-store');
-const { parseMessage, protocolMetadata } = require('./protocol');
+const { parseMessage, protocolMetadata, auditMetadata } = require('./protocol');
 const { createSuggestionEngine } = require('./suggestion-engine');
 const packageInfo = require('../package.json');
 
@@ -356,11 +356,13 @@ function createSharedMemoryServer(options = {}) {
                         break;
                     }
 
+                    const setWarnings = auditMetadata(data.key, metadata);
                     safeSend(ws, {
                         type: 'ok',
                         action: 'set',
                         key: data.key,
                         revision: entry.revision,
+                        ...(setWarnings.length ? { warnings: setWarnings } : {}),
                         requestId,
                     });
                     upsertSuggestionMemory(data.key, entry);
@@ -607,9 +609,16 @@ function createSharedMemoryServer(options = {}) {
                 }
 
                 case 'bulk_set': {
-                    const results = memory.bulkSet(data.entries, agentId);
-                    safeSend(ws, { type: 'bulk-set-result', results, requestId });
-                    for (const r of results) {
+                    const result = memory.bulkSet(data.entries, agentId);
+                    safeSend(ws, {
+                        type: 'bulk-set-result',
+                        ok: result.ok,
+                        ...(result.ok ? {} : { error: result.error }),
+                        results: result.results,
+                        requestId,
+                    });
+                    if (!result.ok) break;
+                    for (const r of result.results) {
                         if (r.ok) {
                             const entry = memory.get(r.key);
                             if (entry) {
@@ -622,9 +631,16 @@ function createSharedMemoryServer(options = {}) {
                 }
 
                 case 'bulk_relate': {
-                    const results = memory.bulkRelate(data.relations, agentId);
-                    safeSend(ws, { type: 'bulk-relate-result', results, requestId });
-                    for (const r of results) {
+                    const result = memory.bulkRelate(data.relations, agentId);
+                    safeSend(ws, {
+                        type: 'bulk-relate-result',
+                        ok: result.ok,
+                        ...(result.ok ? {} : { error: result.error }),
+                        results: result.results,
+                        requestId,
+                    });
+                    if (!result.ok) break;
+                    for (const r of result.results) {
                         if (r.ok) {
                             notifyRelationUpdate(agents, r.action, publicEdge(r.edge));
                         }

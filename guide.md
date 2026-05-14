@@ -128,6 +128,8 @@ Important direct response mappings:
 | `bulk_set` | `bulk-set-result` |
 | `bulk_relate` | `bulk-relate-result` |
 
+Bulk writes are all-or-nothing. If any entry/relation is invalid, stale, duplicated, or references a missing node, the response includes `ok: false`, `error: "bulk-validation-failed"`, and no item is committed.
+
 ## WebSocket Protocol
 
 Connect to:
@@ -275,6 +277,8 @@ MCP results use JSON envelopes:
 { "ok": true }
 { "ok": false, "error": "missing-node" }
 ```
+
+`memory_bulk_set` and `memory_bulk_relate` use the same all-or-nothing contract as WebSocket bulk commands.
 
 ## Operations
 
