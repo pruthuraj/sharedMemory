@@ -50,18 +50,30 @@ function buildDetailBodyHtml(key, entry, recencyColor) {
     const tagsHtml = buildDetailTagsHtml(entry);
     const expiryHtml = buildExpiryHtml(entry);
 
+    const category = getNodeCategory(key);
+    const catColor = getCategoryColor(key);
+    const importance = Math.max(0, Math.min(10, Number(entry.importance) || 0));
+    const connCount = (currentEdges || []).filter((e) => e.from === key || e.to === key).length;
+
+    const dots = Array.from({ length: 10 }, (_, i) =>
+        `<span class="dp-imp-dot${i < importance ? ' filled' : ''}"></span>`
+    ).join('');
+
     return `
 <div class="dp-key">${esc(key)}</div>
 
-<div class="dp-ts" style="color:${recencyColor}">
-  ${esc(date)}${age ? ` - ${esc(age)}` : ''}
+<div class="dp-meta-row">
+  <span class="dp-type-badge" style="background:${catColor}22;color:${catColor};border-color:${catColor}44">${esc(category)}</span>
+  <span class="dp-ts" style="color:${recencyColor};margin:0">${age ? esc(age) + ' ago' : esc(date)}</span>
+  <span class="dp-conn-count">${connCount} link${connCount !== 1 ? 's' : ''}</span>
 </div>
 
-<div class="dp-value">${esc(value)}</div>
+<div class="dp-summary">${esc(entry.summary || '—')}</div>
 
-<div class="dp-row">
-  <span class="dp-rl">Summary</span>
-  <span class="dp-rv">${esc(entry.summary || '-')}</span>
+<div class="dp-imp-row">
+  <span class="dp-rl">Importance</span>
+  <span class="dp-imp-dots">${dots}</span>
+  <span class="dp-imp-num" style="color:#a5b4fc">${importance > 0 ? importance : '—'}</span>
 </div>
 
 <div class="dp-row">
@@ -70,21 +82,26 @@ function buildDetailBodyHtml(key, entry, recencyColor) {
 </div>
 
 <div class="dp-row">
-  <span class="dp-rl">Importance</span>
-  <span class="dp-rv" style="color:#a5b4fc">${entry.importance ?? '-'}</span>
+  <span class="dp-rl">Updated</span>
+  <span class="dp-rv" style="color:${recencyColor}">${esc(date)}</span>
 </div>
 
 <div class="dp-row">
   <span class="dp-rl">Revision</span>
-  <span class="dp-rv">${entry.revision ?? '-'}</span>
+  <span class="dp-rv">${entry.revision ?? '—'}</span>
 </div>
 
 <div class="dp-row">
-  <span class="dp-rl">Updated by</span>
-  <span class="dp-rv">${esc(entry.updatedBy || '-')}</span>
+  <span class="dp-rl">Author</span>
+  <span class="dp-rv">${esc(entry.updatedBy || '—')}</span>
 </div>
 
-${expiryHtml}`;
+${expiryHtml}
+
+<details class="dp-raw-details">
+  <summary class="dp-raw-toggle">Raw value</summary>
+  <pre class="dp-raw-pre">${esc(value)}</pre>
+</details>`;
 }
 
 // ── Detail Panel Rendering ─────────────────────────────────────────────

@@ -282,12 +282,18 @@ function handleEntryUpdate(msg) {
         if (!currentEntries[msg.key]) return true;
 
         removeNodeAndConnectedEdges(msg.key);
+        if (typeof visibleNodeIds !== 'undefined') {
+            visibleNodeIds.delete(msg.key);
+            expandedNodeIds.delete(msg.key);
+            if (typeof recomputeVisibleEdges === 'function') recomputeVisibleEdges();
+        }
 
         if (selectedKey === msg.key) {
             document.getElementById('dp-close')?.click();
         }
 
         renderLiveGraph();
+        if (typeof refreshSlideshow === 'function') refreshSlideshow();
         return true;
     }
 
@@ -295,6 +301,7 @@ function handleEntryUpdate(msg) {
 
     currentEntries[msg.key] = msg.entry;
     subscribeToKey(msg.key);
+    if (typeof syncMainNodeVisibility === 'function') syncMainNodeVisibility();
 
     if (changed) {
         renderLiveGraph();
@@ -591,6 +598,12 @@ function applySnapshot(snapshot, options = {}) {
 
     syncSubscriptions();
 
+    if (options.preserveView && typeof syncMainNodeVisibility === 'function') {
+        syncMainNodeVisibility();
+    } else if (typeof initVisibility === 'function') {
+        initVisibility();
+    }
+
     renderGraph(currentEntries, currentEdges, {
         preserveSelection: Boolean(options.preserveView),
         preservePositions: Boolean(options.preservePositions),
@@ -598,6 +611,8 @@ function applySnapshot(snapshot, options = {}) {
     });
 
     updateStatusCount();
+
+    if (typeof refreshSlideshow === 'function') refreshSlideshow();
 }
 
 async function loadGraph(options = {}) {

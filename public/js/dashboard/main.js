@@ -185,6 +185,26 @@ function bindFullscreenControls() {
     on(document, 'fullscreenchange', handleFullscreenChange);
 }
 
+// ── Graph Expansion Controls ───────────────────────────────────────────
+
+function bindExpansionControls() {
+    on(getEl('main-nodes-btn'), 'click', () => {
+        if (typeof showMainNodesOnly === 'function') showMainNodesOnly();
+    });
+
+    on(getEl('expand-all-btn'), 'click', () => {
+        if (typeof expandAllVisible !== 'function' || !cy) return;
+        expandAllVisible();
+        renderGraph(currentEntries, currentEdges, { preserveSelection: true, preservePositions: true, fit: false });
+        if (typeof refreshSlideshow === 'function') refreshSlideshow();
+        updateStatusCount();
+    });
+
+    on(getEl('collapse-all-btn'), 'click', () => {
+        if (typeof showMainNodesOnly === 'function') showMainNodesOnly();
+    });
+}
+
 // ── Connection Controls ────────────────────────────────────────────────
 
 function handleTokenInputKeydown(event) {
@@ -210,6 +230,8 @@ function initAppBindings() {
     bindGlobalCloseHandlers();
     bindFullscreenControls();
     bindConnectionControls();
+    bindExpansionControls();
+    if (typeof initSlideshowBindings === 'function') initSlideshowBindings();
 }
 
 function startGraphApp() {

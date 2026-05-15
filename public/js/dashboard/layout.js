@@ -233,6 +233,19 @@ function restoreSavedPositions(savedPositions) {
     resolveNodeCollisions({ pinnedKeys });
 }
 
+// ── Expand/Collapse Badge ──────────────────────────────────────────────
+
+function getNodeExpandBadge(key) {
+    if (typeof expandedNodeIds === 'undefined' || typeof visibleNodeIds === 'undefined') return null;
+    if (expandedNodeIds.has(key)) return { text: '−', color: '#22c55e' };
+    if (typeof getNeighborKeys === 'function') {
+        for (const n of getNeighborKeys(key)) {
+            if (!visibleNodeIds.has(n)) return { text: '+', color: '#f59e0b' };
+        }
+    }
+    return null;
+}
+
 // ── Node SVG Card ──────────────────────────────────────────────────────
 
 function buildNodeSvg(key) {
@@ -256,6 +269,9 @@ function buildNodeSvg(key) {
     const subkeyY = nsText ? 36 : 30;
     const summaryY = nsText ? 53 : 47;
 
+    const catColor = typeof getCategoryColor === 'function' ? getCategoryColor(key) : '#475569';
+    const badge = typeof getNodeExpandBadge === 'function' ? getNodeExpandBadge(key) : null;
+
     const impDots = importance > 0
         ? Array.from({ length: 5 }, (_, i) => {
               const filled = i < Math.round(importance / 2);
@@ -263,14 +279,22 @@ function buildNodeSvg(key) {
           }).join('')
         : '';
 
+    const badgeSvg = badge
+        ? `<circle cx="10" cy="${H - 11}" r="7" fill="${x(badge.color)}33" stroke="${x(badge.color)}88" stroke-width="1"/>` +
+          `<text x="10" y="${H - 7}" text-anchor="middle" font-family="system-ui,sans-serif" font-size="10" font-weight="900" fill="${x(badge.color)}">${badge.text}</text>`
+        : '';
+
     const lines = [
         `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}">`,
         `<rect width="${W}" height="${H}" rx="8" fill="#0d0d1a"/>`,
         `<rect width="4" height="${H}" rx="2" fill="${x(color)}"/>`,
+        `<rect x="4" y="${H - 3}" width="${W - 4}" height="3" fill="${x(catColor)}55"/>`,
+        `<circle cx="${W - 10}" cy="10" r="4" fill="${x(catColor)}99"/>`,
         nsText ? `<text x="12" y="16" font-family="system-ui,sans-serif" font-size="10" fill="#64748b">${x(nsText)}</text>` : '',
         `<text x="12" y="${subkeyY}" font-family="system-ui,sans-serif" font-size="13" font-weight="700" fill="#f1f5f9" letter-spacing="0.3">${x(subkeyText)}</text>`,
         summaryText ? `<text x="12" y="${summaryY}" font-family="system-ui,sans-serif" font-size="10" fill="#4b5a6f">${x(summaryText)}</text>` : '',
         impDots,
+        badgeSvg,
         '</svg>',
     ];
 
@@ -286,8 +310,14 @@ function buildCyStyle() {
             style: {
                 'shape': 'round-rectangle',
                 'corner-radius': 8,
-                'width': () => cardW(),
-                'height': () => cardH(),
+                'width': (node) => {
+                    const scale = typeof getNodeWidthScale === 'function' ? getNodeWidthScale(node.id()) : 1;
+                    return cardW() * scale;
+                },
+                'height': (node) => {
+                    const scale = typeof getNodeWidthScale === 'function' ? getNodeWidthScale(node.id()) : 1;
+                    return cardH() * scale;
+                },
                 'background-color': '#0d0d1a',
                 'background-image': (node) => buildNodeSvg(node.id()),
                 'background-fit': 'cover',
@@ -317,10 +347,31 @@ function buildCyStyle() {
             },
         },
         {
+            selector: 'node.slideshow-active',
+            style: {
+                'border-width': 3,
+                'border-color': (node) => typeof getCategoryColor === 'function'
+                    ? getCategoryColor(node.id()) : nodeIdentityColor(node.id()),
+                'shadow-blur': 36,
+                'shadow-color': (node) => typeof getCategoryColor === 'function'
+                    ? getCategoryColor(node.id()) : nodeIdentityColor(node.id()),
+                'shadow-opacity': 0.88,
+                'shadow-offset-x': 0,
+                'shadow-offset-y': 0,
+                'z-index': 20,
+            },
+        },
+        {
             selector: 'node.hover-main',
             style: {
-                'width': () => cardW() * 1.12,
-                'height': () => cardH() * 1.12,
+                'width': (node) => {
+                    const scale = typeof getNodeWidthScale === 'function' ? getNodeWidthScale(node.id()) : 1;
+                    return cardW() * scale * 1.12;
+                },
+                'height': (node) => {
+                    const scale = typeof getNodeWidthScale === 'function' ? getNodeWidthScale(node.id()) : 1;
+                    return cardH() * scale * 1.12;
+                },
                 'border-width': 2,
                 'border-color': (node) => nodeIdentityColor(node.id()),
                 'shadow-blur': 24,
@@ -371,9 +422,9 @@ function buildCyStyle() {
                 'width': (edge) => {
                     const weight = Number(edge.data('weight')) || 0;
                     const scale = Number(graphSettings?.edgeThickness) || 1;
-                    return (1.5 + weight * 2.5) * scale;
+                    return (0.9 + weight * 1.4) * scale;
                 },
-                'opacity': 0.5,
+                'opacity': 0.22,
                 'label': (edge) => {
                     const mode = graphSettings?.edgeLabelMode;
                     if (mode === 'off' || mode === 'none') return '';
@@ -405,7 +456,7 @@ function buildCyStyle() {
         {
             selector: 'edge.highlight',
             style: {
-                'opacity': 0.95,
+                'opacity': 0.80,
                 'width': (edge) => {
                     const weight = Number(edge.data('weight')) || 0;
                     const scale = Number(graphSettings?.edgeThickness) || 1;
@@ -456,7 +507,7 @@ function initCytoscape() {
         const entry = currentEntries[key];
 
         hideNodeTooltip();
-
+        if (typeof toggleExpansionAnimated === 'function') toggleExpansionAnimated(key);
         if (entry) openDetail(key, entry);
     });
 
@@ -557,6 +608,7 @@ function filteredGraph(entries, edges) {
 
     for (const [key, entry] of Object.entries(entries || {})) {
         if ((entry?.importance ?? 0) < minImportance) continue;
+        if (visibleNodeIds.size > 0 && !visibleNodeIds.has(key)) continue;
 
         visibleEntries[key] = entry;
     }
@@ -668,4 +720,160 @@ function renderGraph(rawEntries, rawEdges, options = {}) {
     } else {
         applyFocusState();
     }
+}
+
+// ── Progressive Expand / Collapse Animations ───────────────────────────
+
+let _revealVersion = 0; // incremented on each expand to cancel stale callbacks
+
+function toggleExpansionAnimated(key) {
+    if (!currentEntries[key]) return;
+
+    const { action, newKeys, removed } = toggleNodeExpansion(key);
+
+    if (action === 'expand' && newKeys && newKeys.length > 0) {
+        _addNodesToGraphProgressive(key, newKeys);
+        // refreshSlideshow/updateStatus called at end of progressive animation
+    } else {
+        if (action === 'collapse' && removed && removed.size > 0) {
+            _removeNodesFromGraph(removed);
+        }
+        cy.style().update(); // refresh SVG badges (+/−)
+        if (typeof refreshSlideshow === 'function') refreshSlideshow();
+        updateStatusCount();
+        updateLegend();
+    }
+}
+
+function _addNodesToGraphProgressive(parentKey, newKeys) {
+    if (!cy || !newKeys.length) return;
+
+    const token = ++_revealVersion; // cancel stale runs if user clicks again
+
+    const parentNode = cy.$id(parentKey);
+    const parentPos  = parentNode.length
+        ? parentNode.position()
+        : { x: cy.width() / 2, y: cy.height() / 2 };
+
+    const n = newKeys.length;
+    // Spread radius — wider for more children, min 380px
+    const radius = Math.max(380, 220 + n * 52);
+
+    // Pre-compute radial positions (arc spread, not full circle for small counts)
+    const positions = newKeys.map((_, i) => {
+        const spreadAngle = n <= 3 ? Math.PI * 0.6 : n <= 6 ? Math.PI * 1.2 : Math.PI * 2;
+        const startAngle  = -Math.PI / 2 - spreadAngle / 2;
+        const angle = n > 1 ? startAngle + (spreadAngle * i) / (n - 1) : -Math.PI / 2;
+        return {
+            x: parentPos.x + Math.cos(angle) * radius,
+            y: parentPos.y + Math.sin(angle) * radius,
+        };
+    });
+
+    // Track which edges have been added to avoid duplicates
+    const addedEdgeIds = new Set();
+    cy.edges().forEach((e) => addedEdgeIds.add(e.id()));
+
+    const CHILD_STEP_MS = 130; // delay between each child reveal
+
+    function revealChild(index) {
+        if (token !== _revealVersion) return; // cancelled by a newer expand/collapse
+        if (index >= newKeys.length) {
+            // All done — update styles and UI
+            cy.style().update();
+            renderIdentityPanel();
+            if (typeof refreshSlideshow === 'function') refreshSlideshow();
+            updateStatusCount();
+            updateLegend();
+            return;
+        }
+
+        const childKey = newKeys[index];
+        const pos      = positions[index];
+        const entry    = currentEntries[childKey] || {};
+
+        // Add node (might already exist if it's a shared neighbor)
+        if (!cy.$id(childKey).length) {
+            const nodeEl = cy.add({
+                group: 'nodes',
+                data: { id: childKey, importance: entry.importance || 0 },
+                position: pos,
+            });
+            nodeEl.style('opacity', 0);
+            nodeEl.animate({ style: { opacity: 1 } }, { duration: 280, easing: 'ease-out' });
+        }
+
+        // Add direct edges: parentKey ↔ childKey only
+        window.setTimeout(() => {
+            if (token !== _revealVersion) return;
+
+            for (const edge of currentEdges || []) {
+                if (!visibleEdgeIds.has(edgeKey(edge))) continue;
+                const connects =
+                    (edge.from === parentKey && edge.to === childKey) ||
+                    (edge.to   === parentKey && edge.from === childKey);
+                if (!connects) continue;
+
+                const eid = edgeKey(edge);
+                if (addedEdgeIds.has(eid)) continue;
+                addedEdgeIds.add(eid);
+
+                const edgeEl = cy.add({
+                    group: 'edges',
+                    data: {
+                        id:       eid,
+                        source:   edge.from,
+                        target:   edge.to,
+                        relation: edge.relation || 'related_to',
+                        weight:   Number(edge.weight) || 0,
+                    },
+                });
+                edgeEl.style('opacity', 0);
+                edgeEl.animate({ style: { opacity: 0.28 } }, { duration: 240 });
+            }
+
+            // Reveal next child after a short gap
+            window.setTimeout(() => revealChild(index + 1), 55);
+        }, 95);
+    }
+
+    revealChild(0);
+}
+
+function _removeNodesFromGraph(removedSet) {
+    if (!cy) return;
+
+    const toRemove = cy.collection();
+    for (const k of removedSet) {
+        const node = cy.$id(k);
+        if (node.length) {
+            toRemove.merge(node);
+            node.connectedEdges().forEach((e) => {
+                if (removedSet.has(e.source().id()) || removedSet.has(e.target().id())) {
+                    toRemove.merge(e);
+                }
+            });
+        }
+    }
+
+    if (!toRemove.length) return;
+
+    toRemove.animate({ style: { opacity: 0 } }, {
+        duration: 220,
+        easing: 'ease-in',
+        complete: () => {
+            cy.remove(toRemove);
+            cy.style().update();
+            renderIdentityPanel();
+            updateLegend();
+        },
+    });
+}
+
+// ── Show Main Nodes Only ───────────────────────────────────────────────
+
+function showMainNodesOnly() {
+    collapseAll();
+    renderGraph(currentEntries, currentEdges, { preserveSelection: false, fit: true });
+    if (typeof refreshSlideshow === 'function') refreshSlideshow();
 }
