@@ -1,7 +1,7 @@
 ---
 name: memory-curator
 description: 'Audits and curates the sharedMemory MCP store — finds duplicates, orphans (no graph relations), low-quality entries (missing summary/tags/importance), and stale items. Use when the user asks to "audit memory", "clean up memory", "check for duplicate entries", "find orphan memories", or before a milestone where memory hygiene matters. Read-only by default; only mutates when explicitly authorized in the prompt.'
-tools: "mcp__memory-mcp__memory_search, mcp__memory-mcp__memory_get, mcp__memory-mcp__memory_map, mcp__memory-mcp__memory_set, mcp__memory-mcp__memory_export, Bash"
+tools: "mcp__shared-memory__memory_search, mcp__shared-memory__memory_get, mcp__shared-memory__memory_map, mcp__shared-memory__memory_set, mcp__shared-memory__memory_export, Bash"
 model: haiku
 ---
 
