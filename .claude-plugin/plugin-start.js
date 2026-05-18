@@ -1,11 +1,8 @@
 import { spawn, execSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import os from 'node:os';
 
-const DEFAULT_DIR = process.platform === 'win32'
-  ? 'C:\\sharedMemory'
-  : join(os.homedir(), '.shared-memory');
+const DEFAULT_DIR = 'C:\\sharedMemory';
 
 const installDir = process.env.SHARED_MEMORY_INSTALL_DIR || DEFAULT_DIR;
 

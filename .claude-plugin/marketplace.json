@@ -1,6 +1,6 @@
 {
   "name": "pruthuraj",
-  "description": "Local shared-memory plugin",
+  "description": "shared-memory plugin",
   "owner": { "name": "pruthu" },
   "plugins": [
     {
