@@ -517,8 +517,13 @@ function initCytoscape() {
         const entry = currentEntries[key];
 
         hideNodeTooltip();
-        if (typeof toggleExpansionAnimated === 'function') toggleExpansionAnimated(key);
         if (entry) openDetail(key, entry);
+    });
+
+    cy.on('dbltap', 'node', (event) => {
+        const key = event.target.id();
+        hideNodeTooltip();
+        if (typeof toggleExpansionAnimated === 'function') toggleExpansionAnimated(key);
     });
 
     cy.on('tap', (event) => {
