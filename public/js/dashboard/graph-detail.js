@@ -79,6 +79,19 @@ function buildDetailBodyHtml(key, entry, recencyColor) {
   ${parentKey ? `<span class="dp-hier-item">↑ <span class="dp-hier-parent">${esc(parentKey)}</span></span>` : ''}
 </div>` : '';
 
+    const stats = (entry.value && typeof entry.value === 'object' && entry.value.stats) || null;
+    const statsHtml = stats ? `
+<div class="dp-project-stats">
+  <div class="dp-stats-title">Project descendants</div>
+  <div class="dp-stats-grid">
+    <span class="dp-stats-label">Count</span><span class="dp-stats-value">${Number(stats.count) || 0}</span>
+    <span class="dp-stats-label">Avg importance</span><span class="dp-stats-value">${Number(stats.avgImportance || 0).toFixed(2)}</span>
+    <span class="dp-stats-label">Sum</span><span class="dp-stats-value">${Number(stats.sum) || 0}</span>
+    <span class="dp-stats-label">Threshold</span><span class="dp-stats-value">${Number(stats.threshold || 0).toFixed(2)}</span>
+  </div>
+  <div class="dp-stats-note">Leaves below threshold (${Number(stats.threshold || 0).toFixed(2)}) have no direct edges to this project root.</div>
+</div>` : '';
+
     return `
 <div class="dp-key">${esc(key)}</div>
 
@@ -89,6 +102,8 @@ function buildDetailBodyHtml(key, entry, recencyColor) {
 </div>
 
 ${hierarchyHtml}
+
+${statsHtml}
 
 <div class="dp-summary">${esc(entry.summary || '—')}</div>
 

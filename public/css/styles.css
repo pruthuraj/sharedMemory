@@ -434,6 +434,45 @@ body.inspector-open #viewport {
     white-space: nowrap;
 }
 
+.dp-project-stats {
+    margin: 8px 0;
+    padding: 8px 10px;
+    background: var(--surface-bg-2, #ffffff07);
+    border-left: 3px solid var(--accent-2);
+    border-radius: 4px;
+}
+
+.dp-stats-title {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-faint, #9ca3af);
+    margin-bottom: 4px;
+}
+
+.dp-stats-grid {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 2px 12px;
+    font-size: 12px;
+}
+
+.dp-stats-label {
+    color: var(--text-faint, #9ca3af);
+}
+
+.dp-stats-value {
+    color: var(--accent-2);
+    font-weight: 600;
+}
+
+.dp-stats-note {
+    font-size: 10px;
+    color: var(--text-faint, #9ca3af);
+    margin-top: 6px;
+    font-style: italic;
+}
+
 .dp-summary {
     font-size: 12px;
     color: var(--text-primary);
