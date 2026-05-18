@@ -13,20 +13,33 @@
   <div id="toolbar">
     <h1>Memory Graph</h1>
     <div class="tb-sep"></div>
-    <div class="ld" id="ld-nodes"><span class="dot" style="background:#10b981"></span><span>-</span></div>
-    <div class="ld" id="ld-edges"><span class="dot" style="background:#6366f1"></span><span>-</span></div>
+    <div class="tb-group">
+      <div class="ld" id="ld-nodes"><span class="dot" style="background:#10b981"></span><span>-</span></div>
+      <div class="ld" id="ld-edges"><span class="dot" style="background:#6366f1"></span><span>-</span></div>
+    </div>
+    <div class="tb-sep"></div>
+    <div class="tb-group">
+      <button id="main-nodes-btn" title="Show only project and session nodes">Main</button>
+      <button id="expand-all-btn" title="Expand all visible nodes one level">Expand All</button>
+      <button id="collapse-all-btn" title="Collapse to main nodes only">Collapse</button>
+    </div>
     <div class="tb-spacer"></div>
-    <span id="status-text">Not connected</span>
-    <input type="password" id="token-input" placeholder="Token (optional)" autocomplete="off" />
-    <button class="primary" id="connect-btn">Connect</button>
-    <button id="refresh-btn" disabled>Refresh</button>
-    <button id="identity-btn" title="Node identity legend" aria-expanded="false"
-      aria-controls="identity-panel">Identity</button>
-    <button id="import-btn" title="Import memory snapshot JSON" disabled>Import JSON</button>
-    <button id="export-btn" title="Export memory snapshot as JSON" disabled>Export JSON</button>
-    <button id="settings-btn" title="Graph settings" aria-expanded="false"
-      aria-controls="settings-panel">Settings</button>
-    <button id="fullscreen-btn" title="Fullscreen">[ ]</button>
+    <div class="tb-group">
+      <span id="status-text">Not connected</span>
+      <input type="password" id="token-input" placeholder="Token (optional)" autocomplete="off" />
+      <button class="primary" id="connect-btn">Connect</button>
+      <button id="refresh-btn" disabled>Refresh</button>
+    </div>
+    <div class="tb-sep"></div>
+    <div class="tb-group">
+      <button id="identity-btn" title="Node identity legend" aria-expanded="false"
+        aria-controls="identity-panel">Identity</button>
+      <button id="import-btn" title="Import memory snapshot JSON" disabled>Import JSON</button>
+      <button id="export-btn" title="Export memory snapshot as JSON" disabled>Export JSON</button>
+      <button id="settings-btn" title="Graph settings" aria-expanded="false"
+        aria-controls="settings-panel">Settings</button>
+      <button id="fullscreen-btn" title="Fullscreen">[ ]</button>
+    </div>
   </div>
 
   <div id="viewport">
@@ -100,6 +113,28 @@
     </div>
   </div>
 
+  <!-- ── Node Slideshow ──────────────────────────────────────────────── -->
+  <div id="node-slideshow" aria-hidden="true">
+    <div id="slideshow-card">
+      <div class="ss-key-row">
+        <span id="ss-key"></span>
+        <span id="ss-imp"></span>
+      </div>
+      <div id="ss-summary"></div>
+      <div class="ss-meta-row">
+        <span id="ss-age"></span>
+        <span id="ss-category"></span>
+      </div>
+      <div id="ss-tags"></div>
+      <div class="ss-controls">
+        <button id="ss-prev-btn" title="Previous node">◀</button>
+        <div id="ss-dots"></div>
+        <button id="ss-play-btn" title="Pause/play">⏸</button>
+        <button id="ss-next-btn" title="Next node">▶</button>
+      </div>
+    </div>
+  </div>
+
   <div id="node-tooltip" hidden></div>
 
   <div id="peek-strip" aria-live="polite" hidden>
@@ -127,6 +162,8 @@
   <script src="js/settings/index.js"></script>
   <script src="js/dashboard/state.js"></script>
   <script src="js/dashboard/utils.js"></script>
+  <script src="js/dashboard/expansion.js"></script>
+  <script src="js/dashboard/slideshow.js"></script>
   <script src="js/dashboard/layout.js"></script>
   <script src="js/dashboard/edges.js"></script>
   <script src="js/dashboard/nodes.js"></script>

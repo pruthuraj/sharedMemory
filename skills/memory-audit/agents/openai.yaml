@@ -1,0 +1,12 @@
+interface:
+  display_name: "Memory Audit"
+  short_description: "Audit memory health"
+  default_prompt: "Use $memory-audit to check shared memory quality."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "shared-memory"
+      description: "SharedMemory MCP server with memory_audit."
+      transport: "stdio"
+policy:
+  allow_implicit_invocation: true

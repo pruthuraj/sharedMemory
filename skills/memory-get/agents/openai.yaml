@@ -1,0 +1,12 @@
+interface:
+  display_name: "Memory Get"
+  short_description: "Read full memory entries"
+  default_prompt: "Use $memory-get to inspect a known memory key."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "shared-memory"
+      description: "SharedMemory MCP server with memory_get."
+      transport: "stdio"
+policy:
+  allow_implicit_invocation: true

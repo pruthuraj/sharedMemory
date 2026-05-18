@@ -1,0 +1,42 @@
+{
+  "name": "shared-memory",
+  "version": "0.1.0",
+  "description": "Local SQLite-backed shared memory for Codex and MCP agents. Exposes focused memory tools for write, read, search, map, suggestion, relation, snapshot, audit, and bulk workflows.",
+  "author": {
+    "name": "pruthu"
+  },
+  "homepage": "https://github.com/pruthuraj/sharedMemory",
+  "repository": "https://github.com/pruthuraj/sharedMemory",
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "mcp",
+    "sqlite",
+    "agents",
+    "codex"
+  ],
+  "skills": "./skills/",
+  "agents": "./agents/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Shared Memory",
+    "shortDescription": "SQLite shared memory tools for Codex agents",
+    "longDescription": "Shared Memory provides a local SQLite-backed memory graph for Codex and MCP-compatible agents. It supports durable memory entries, metadata search, graph maps, semantic suggestions when enabled, snapshots, audits, and bulk writes through a stdio MCP adapter.",
+    "developerName": "pruthu",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/pruthuraj/sharedMemory",
+    "privacyPolicyURL": "https://github.com/pruthuraj/sharedMemory",
+    "termsOfServiceURL": "https://github.com/pruthuraj/sharedMemory",
+    "defaultPrompt": [
+      "Use shared memory to save this project decision.",
+      "Search shared memory before planning this change.",
+      "Audit shared memory for stale or duplicate notes."
+    ],
+    "brandColor": "#6366F1",
+    "screenshots": []
+  }
+}

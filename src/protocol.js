@@ -1,6 +1,28 @@
 // WebSocket message parser and per-command field validator.
 
-const COMMAND_TYPES = new Set([
+const PROTOCOL_VERSION = 1;
+
+const KNOWN_KEY_PREFIXES = Object.freeze([
+    'project.',
+    'arch.',
+    'api.',
+    'data.',
+    'feature.',
+    'decision.',
+    'insight.',
+    'task.',
+    'blocker.',
+    'setup.',
+    'reference.',
+    'agent.',
+    'preference.',
+    'session.',
+    'session-section.',
+    'file.',
+    'evidence.',
+]);
+
+const COMMAND_TYPE_LIST = Object.freeze([
     'auth',
     'register',
     'set',
@@ -26,7 +48,9 @@ const COMMAND_TYPES = new Set([
     'bulk_relate',
 ]);
 
-const RELATION_TYPES = new Set([
+const COMMAND_TYPES = new Set(COMMAND_TYPE_LIST);
+
+const RELATION_TYPE_LIST = Object.freeze([
     'related_to',
     'depends_on',
     'supports',
@@ -34,7 +58,74 @@ const RELATION_TYPES = new Set([
     'mentions',
     'derived_from',
     'next_step',
+    'implements',
+    'documents',
+    'blocks',
+    'child_of',
 ]);
+
+const RELATION_TYPES = new Set(RELATION_TYPE_LIST);
+
+const DIRECT_RESPONSE_TYPES = Object.freeze({
+    auth: 'authenticated',
+    register: 'registered',
+    set: 'ok',
+    get: 'result',
+    subscribe: 'subscribed',
+    unsubscribe: 'unsubscribed',
+    touch: 'touched',
+    link: 'linked',
+    unlink: 'unlinked',
+    list: 'list',
+    relate: 'related',
+    unrelate: 'unrelated',
+    delete: 'deleted',
+    map: 'map-result',
+    search: 'search-result',
+    suggest: 'suggest-result',
+    prune: 'pruned',
+    export: 'export-result',
+    'validate-import': 'import-validation',
+    import: 'import-result',
+    audit: 'audit-result',
+    bulk_set: 'bulk-set-result',
+    bulk_relate: 'bulk-relate-result',
+});
+
+const BROADCAST_TYPES = Object.freeze([
+    'welcome',
+    'update',
+    'relation-update',
+    'linked',
+    'snapshot-update',
+]);
+
+const MCP_TOOL_NAMES = Object.freeze([
+    'memory_set',
+    'memory_get',
+    'memory_search',
+    'memory_suggest',
+    'memory_map',
+    'memory_relate',
+    'memory_unrelate',
+    'memory_export',
+    'memory_validate_import',
+    'memory_import',
+    'memory_audit',
+    'memory_bulk_set',
+    'memory_bulk_relate',
+]);
+
+function protocolMetadata() {
+    return {
+        protocolVersion: PROTOCOL_VERSION,
+        commands: COMMAND_TYPE_LIST.slice(),
+        relationTypes: RELATION_TYPE_LIST.slice(),
+        directResponseTypes: { ...DIRECT_RESPONSE_TYPES },
+        broadcastTypes: BROADCAST_TYPES.slice(),
+        mcpTools: MCP_TOOL_NAMES.slice(),
+    };
+}
 
 function isPlainObject(value) {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -120,6 +211,41 @@ function validateRelationFields(message) {
 
     if (!isNonEmptyString(message.relation) || !RELATION_TYPES.has(message.relation)) {
         return { ok: false, error: 'invalid-relation' };
+    }
+
+    return null;
+}
+
+function validateBulkSetItem(item) {
+    if (!isPlainObject(item)) {
+        return { ok: false, error: 'invalid-item' };
+    }
+
+    if (!isNonEmptyString(item.key)) {
+        return { ok: false, error: 'missing-key' };
+    }
+
+    if (!hasOwn(item, 'value')) {
+        return { ok: false, error: 'missing-value' };
+    }
+
+    return validateSetMetadata(item, { allowNull: true });
+}
+
+function validateBulkRelationItem(item) {
+    if (!isPlainObject(item)) {
+        return { ok: false, error: 'invalid-item' };
+    }
+
+    const relationError = validateRelationFields(item);
+    if (relationError) return relationError;
+
+    if (hasOwn(item, 'reason') && !isNonEmptyString(item.reason)) {
+        return { ok: false, error: 'invalid-reason' };
+    }
+
+    if (hasOwn(item, 'weight') && !isNumberInRange(item.weight, 0, 1)) {
+        return { ok: false, error: 'invalid-weight' };
     }
 
     return null;
@@ -212,11 +338,19 @@ function validateMessage(message) {
             if (!Array.isArray(message.entries)) {
                 return { ok: false, error: 'missing-entries' };
             }
+            for (const item of message.entries) {
+                const itemError = validateBulkSetItem(item);
+                if (itemError) return itemError;
+            }
             return { ok: true, message };
 
         case 'bulk_relate':
             if (!Array.isArray(message.relations)) {
                 return { ok: false, error: 'missing-relations' };
+            }
+            for (const item of message.relations) {
+                const itemError = validateBulkRelationItem(item);
+                if (itemError) return itemError;
             }
             return { ok: true, message };
 
@@ -317,7 +451,44 @@ function validateMessage(message) {
     }
 }
 
+/**
+ * Soft-warn audit for a key + metadata pair on the set write path.
+ * Returns an array of warning strings; empty array means clean.
+ * Never blocks the write — callers include warnings in their response.
+ */
+function auditMetadata(key, metadata = {}) {
+    const warnings = [];
+
+    if (!isNonEmptyString(metadata.summary)) {
+        warnings.push('missing-summary');
+    }
+
+    if (!Array.isArray(metadata.tags) || metadata.tags.length === 0) {
+        warnings.push('missing-tags');
+    }
+
+    if (metadata.importance === undefined || metadata.importance === null) {
+        warnings.push('missing-importance');
+    }
+
+    if (isNonEmptyString(key) && !KNOWN_KEY_PREFIXES.some(prefix => key.startsWith(prefix))) {
+        warnings.push('unknown-key-prefix');
+    }
+
+    return warnings;
+}
+
 module.exports = {
     parseMessage,
+    protocolMetadata,
+    auditMetadata,
+    PROTOCOL_VERSION,
+    COMMAND_TYPE_LIST,
+    COMMAND_TYPES,
+    RELATION_TYPE_LIST,
     RELATION_TYPES,
+    DIRECT_RESPONSE_TYPES,
+    BROADCAST_TYPES,
+    MCP_TOOL_NAMES,
+    KNOWN_KEY_PREFIXES,
 };

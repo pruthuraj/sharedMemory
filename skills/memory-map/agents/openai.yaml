@@ -1,0 +1,12 @@
+interface:
+  display_name: "Memory Map"
+  short_description: "Traverse memory graph"
+  default_prompt: "Use $memory-map to inspect nearby memory context."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "shared-memory"
+      description: "SharedMemory MCP server with memory_map."
+      transport: "stdio"
+policy:
+  allow_implicit_invocation: true

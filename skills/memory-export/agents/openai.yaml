@@ -1,0 +1,12 @@
+interface:
+  display_name: "Memory Export"
+  short_description: "Export memory snapshots"
+  default_prompt: "Use $memory-export to back up shared memory."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "shared-memory"
+      description: "SharedMemory MCP server with memory_export."
+      transport: "stdio"
+policy:
+  allow_implicit_invocation: true

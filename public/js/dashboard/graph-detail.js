@@ -50,18 +50,67 @@ function buildDetailBodyHtml(key, entry, recencyColor) {
     const tagsHtml = buildDetailTagsHtml(entry);
     const expiryHtml = buildExpiryHtml(entry);
 
+    const category = getNodeCategory(key);
+    const catColor = getCategoryColor(key);
+    const importance = Math.max(0, Math.min(10, Number(entry.importance) || 0));
+
+    const edgeCounts = {};
+    for (const e of (currentEdges || [])) {
+        if (e.from === key || e.to === key) {
+            edgeCounts[e.relation] = (edgeCounts[e.relation] || 0) + 1;
+        }
+    }
+    const connCount = Object.values(edgeCounts).reduce((s, n) => s + n, 0);
+    const breakdown = Object.entries(edgeCounts)
+        .sort((a, b) => b[1] - a[1])
+        .map(([r, n]) => `${esc(r.replace(/_/g, ' '))} ×${n}`)
+        .join(', ');
+    const childCount = (currentEdges || []).filter((e) => e.from === key && e.relation === 'child_of').length;
+    const parentEdge = (currentEdges || []).find((e) => e.from === key && e.relation === 'child_of');
+    const parentKey = parentEdge ? parentEdge.to : null;
+
+    const dots = Array.from({ length: 10 }, (_, i) =>
+        `<span class="dp-imp-dot${i < importance ? ' filled' : ''}"></span>`
+    ).join('');
+
+    const hierarchyHtml = (childCount > 0 || parentKey)
+        ? `<div class="dp-hierarchy">
+  ${childCount > 0 ? `<span class="dp-hier-item">↓ ${childCount} child${childCount !== 1 ? 'ren' : ''}</span>` : ''}
+  ${parentKey ? `<span class="dp-hier-item">↑ <span class="dp-hier-parent">${esc(parentKey)}</span></span>` : ''}
+</div>` : '';
+
+    const stats = (entry.value && typeof entry.value === 'object' && entry.value.stats) || null;
+    const statsHtml = stats ? `
+<div class="dp-project-stats">
+  <div class="dp-stats-title">Descendant stats</div>
+  <div class="dp-stats-grid">
+    <span class="dp-stats-label">Count</span><span class="dp-stats-value">${Number(stats.count) || 0}</span>
+    <span class="dp-stats-label">Avg importance</span><span class="dp-stats-value">${Number(stats.avgImportance || 0).toFixed(2)}</span>
+    <span class="dp-stats-label">Sum</span><span class="dp-stats-value">${Number(stats.sum) || 0}</span>
+    <span class="dp-stats-label">Threshold</span><span class="dp-stats-value">${Number(stats.threshold || 0).toFixed(2)}</span>
+  </div>
+  <div class="dp-stats-note">Children below threshold (${Number(stats.threshold || 0).toFixed(2)}) have no direct edges to this node.</div>
+</div>` : '';
+
     return `
 <div class="dp-key">${esc(key)}</div>
 
-<div class="dp-ts" style="color:${recencyColor}">
-  ${esc(date)}${age ? ` - ${esc(age)}` : ''}
+<div class="dp-meta-row">
+  <span class="dp-type-badge" style="background:${catColor}22;color:${catColor};border-color:${catColor}44">${esc(category)}</span>
+  <span class="dp-ts" style="color:${recencyColor};margin:0">${age ? esc(age) + ' ago' : esc(date)}</span>
+  <span class="dp-conn-count" title="${breakdown}">${connCount} link${connCount !== 1 ? 's' : ''}</span>
 </div>
 
-<div class="dp-value">${esc(value)}</div>
+${hierarchyHtml}
 
-<div class="dp-row">
-  <span class="dp-rl">Summary</span>
-  <span class="dp-rv">${esc(entry.summary || '-')}</span>
+${statsHtml}
+
+<div class="dp-summary">${esc(entry.summary || '—')}</div>
+
+<div class="dp-imp-row">
+  <span class="dp-rl">Importance</span>
+  <span class="dp-imp-dots">${dots}</span>
+  <span class="dp-imp-num" style="color:#a5b4fc">${importance > 0 ? importance : '—'}</span>
 </div>
 
 <div class="dp-row">
@@ -70,21 +119,26 @@ function buildDetailBodyHtml(key, entry, recencyColor) {
 </div>
 
 <div class="dp-row">
-  <span class="dp-rl">Importance</span>
-  <span class="dp-rv" style="color:#a5b4fc">${entry.importance ?? '-'}</span>
+  <span class="dp-rl">Updated</span>
+  <span class="dp-rv" style="color:${recencyColor}">${esc(date)}</span>
 </div>
 
 <div class="dp-row">
   <span class="dp-rl">Revision</span>
-  <span class="dp-rv">${entry.revision ?? '-'}</span>
+  <span class="dp-rv">${entry.revision ?? '—'}</span>
 </div>
 
 <div class="dp-row">
-  <span class="dp-rl">Updated by</span>
-  <span class="dp-rv">${esc(entry.updatedBy || '-')}</span>
+  <span class="dp-rl">Author</span>
+  <span class="dp-rv">${esc(entry.updatedBy || '—')}</span>
 </div>
 
-${expiryHtml}`;
+${expiryHtml}
+
+<details class="dp-raw-details">
+  <summary class="dp-raw-toggle">Raw value</summary>
+  <pre class="dp-raw-pre">${esc(value)}</pre>
+</details>`;
 }
 
 // ── Detail Panel Rendering ─────────────────────────────────────────────

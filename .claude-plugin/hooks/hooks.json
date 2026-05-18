@@ -1,5 +1,17 @@
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${pluginDir}/../scripts/session-start-recall.js\"",
+            "timeout": 8,
+            "statusMessage": "Recalling project memory..."
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [
@@ -8,6 +20,18 @@
             "command": "node \"${pluginDir}/../scripts/memory-hook.js\"",
             "timeout": 5,
             "statusMessage": "Loading shared memories..."
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${pluginDir}/../scripts/file-affect-record.js\"",
+            "timeout": 5
           }
         ]
       }

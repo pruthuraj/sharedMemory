@@ -1,0 +1,12 @@
+interface:
+  display_name: "Memory Set"
+  short_description: "Write shared memory entries"
+  default_prompt: "Use $memory-set to save a durable project decision."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "shared-memory"
+      description: "SharedMemory MCP server with memory_set."
+      transport: "stdio"
+policy:
+  allow_implicit_invocation: true

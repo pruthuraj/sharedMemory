@@ -1,0 +1,22 @@
+{
+  "name": "shared-memory-local",
+  "interface": {
+    "displayName": "Shared Memory Local"
+  },
+  "plugins": [
+    {
+      "name": "shared-memory",
+      "source": {
+        "source": "local",
+        "path": "../.."
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL",
+        "memoryPolicy": "docs/policy.md",
+        "captureDirective": "prompts/memory-capture.md"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

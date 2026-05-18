@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "shared-memory": {
+      "command": "node",
+      "args": [
+        "--input-type=module",
+        "-e",
+        "const { pathToFileURL } = await import('node:url'); const path = await import('node:path'); const os = await import('node:os'); const fs = await import('node:fs'); const usable = (v) => v && !String(v).includes('${'); const canonical = process.platform === 'win32' ? 'C:\\\\sharedMemory' : path.join(os.homedir(), '.sharedMemory'); const candidates = [process.env.SHARED_MEMORY_PLUGIN_ROOT, process.env.CODEX_PLUGIN_DIR, process.env.CODEX_PLUGIN_ROOT, process.env.PLUGIN_DIR, process.cwd(), canonical].filter(usable).map((p) => path.resolve(p)); const root = candidates.find((p) => fs.existsSync(path.join(p, '.codex-plugin', 'plugin-start.mjs'))); if (!root) throw new Error('sharedMemory plugin-start.mjs was not found. Checked: ' + candidates.join(', ')); await import(pathToFileURL(path.join(root, '.codex-plugin', 'plugin-start.mjs')).href);"
+      ],
+      "env": {
+        "SHARED_MEMORY_PLUGIN_ROOT": "${pluginDir}",
+        "SHARED_MEMORY_PORT": "3001"
+      },
+      "description": "SharedMemory stdio MCP server exposing memory_set, memory_get, memory_search, memory_suggest, memory_map, relation, snapshot, audit, and bulk tools."
+    }
+  }
+}

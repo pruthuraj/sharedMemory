@@ -150,5 +150,44 @@ function focusIdentityNode(key) {
 
     if (!entry) return;
 
+    if (!visibleNodeIds.has(key)) {
+        revealPathToNode(key);
+        renderGraph(currentEntries, currentEdges, { preserveSelection: true, preservePositions: true, fit: false });
+        if (typeof refreshSlideshow === 'function') refreshSlideshow();
+    }
+
     openDetail(key, entry);
+
+    if (cy) {
+        const node = cy.$id(key);
+        if (node.length) cy.animate({ fit: { eles: node, padding: 80 }, duration: 280 });
+    }
+}
+
+// ── Identity Panel Keyboard Navigation ────────────────────────────────
+
+function handleIdentityKeydown(event) {
+    if (!['ArrowDown', 'ArrowUp', 'Enter'].includes(event.key)) return;
+
+    event.preventDefault();
+
+    const items = [...identityList.querySelectorAll('.identity-item')];
+    if (!items.length) return;
+
+    const active = identityList.querySelector('.identity-item.kb-focus');
+    const idx = active ? items.indexOf(active) : -1;
+
+    if (event.key === 'ArrowDown') {
+        const next = items[idx + 1] || items[0];
+        active?.classList.remove('kb-focus');
+        next.classList.add('kb-focus');
+        next.scrollIntoView({ block: 'nearest' });
+    } else if (event.key === 'ArrowUp') {
+        const prev = items[idx - 1] || items[items.length - 1];
+        active?.classList.remove('kb-focus');
+        prev.classList.add('kb-focus');
+        prev.scrollIntoView({ block: 'nearest' });
+    } else if (event.key === 'Enter' && active) {
+        focusIdentityNode(active.dataset.key);
+    }
 }

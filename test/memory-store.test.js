@@ -5,6 +5,7 @@ const path = require('path');
 const test = require('node:test');
 
 const { createMemoryStore } = require('../src/memory-store');
+const { RELATION_TYPE_LIST } = require('../src/protocol');
 
 function tempPath(name) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'shared-memory-test-'));
@@ -67,6 +68,71 @@ test('map orders nodes deterministically before applying the limit', () => {
     assert.deepEqual(result.nodes.map((node) => node.key), ['root', 'high-new', 'high-old']);
 });
 
+test('memory store accepts every protocol relation type', () => {
+    const memory = createTimedStore();
+
+    memory.set('from', 'from', 'test', { summary: 'From' });
+    memory.set('to', 'to', 'test', { summary: 'To' });
+
+    for (const relation of RELATION_TYPE_LIST) {
+        const result = memory.relate('from', 'to', relation, 'test', {
+            reason: `${relation} reason`,
+            weight: 0.5,
+        });
+        assert.equal(result.ok, true);
+        assert.equal(result.edge.relation, relation);
+    }
+
+    const graph = memory.map('from', { depth: 1, limit: 20 });
+    assert.deepEqual(graph.edges.map((edge) => edge.relation).sort(), RELATION_TYPE_LIST.slice().sort());
+});
+
+test('snapshot validation accepts every protocol relation type', () => {
+    const memory = createTimedStore();
+    const entries = {
+        from: {
+            value: 'from',
+            summary: 'From',
+            tags: [],
+            importance: 0,
+            revision: 1,
+            expiresAt: null,
+            updatedAt: 100,
+            updatedBy: 'test',
+        },
+        to: {
+            value: 'to',
+            summary: 'To',
+            tags: [],
+            importance: 0,
+            revision: 1,
+            expiresAt: null,
+            updatedAt: 100,
+            updatedBy: 'test',
+        },
+    };
+    const edges = RELATION_TYPE_LIST.map((relation, index) => ({
+        from: 'from',
+        to: 'to',
+        relation,
+        reason: `${relation} reason`,
+        weight: 0.5,
+        updatedAt: 200 + index,
+        updatedBy: 'test',
+    }));
+
+    const result = memory.validateSnapshot({ entries, edges });
+    assert.equal(result.ok, true);
+    assert.equal(result.stats.edgeCount, RELATION_TYPE_LIST.length);
+
+    const invalid = memory.validateSnapshot({
+        entries,
+        edges: [{ ...edges[0], relation: 'not_real' }],
+    });
+    assert.equal(invalid.ok, false);
+    assert.ok(invalid.errors.some((error) => error.message === 'invalid-relation'));
+});
+
 test('persistence starts empty when file is missing', () => {
     const file = tempPath('memory.db');
     const memory = createMemoryStore({ persistence: { file } });
@@ -79,6 +145,9 @@ test('persistence starts empty when file is missing', () => {
         lastLoadedAt: memory.persistenceStatus().lastLoadedAt,
         lastFlushedAt: null,
         lastFlushError: null,
+        lastCheckpointAt: null,
+        lastCheckpointMode: null,
+        lastCheckpointError: null,
     });
     assert.equal(typeof memory.persistenceStatus().lastLoadedAt, 'number');
 });
@@ -116,6 +185,8 @@ test('flush persists entries and edges, and restart reloads them', async () => {
     assert.equal(memory.persistenceStatus().dirty, true);
     assert.equal(await memory.flush(), true);
     assert.equal(memory.persistenceStatus().dirty, false);
+    assert.equal(memory.persistenceStatus().lastCheckpointMode, 'RESTART');
+    assert.equal(typeof memory.persistenceStatus().lastCheckpointAt, 'number');
 
     const restored = createMemoryStore({ persistence: { file } });
     assert.deepEqual(restored.keys().sort(), ['project.architecture', 'project.database']);
@@ -127,10 +198,11 @@ test('flush persists entries and edges, and restart reloads them', async () => {
     assert.equal(graph.edges[0].reason, 'Database choices shape architecture.');
 });
 
-test('persistence drops dangling edges during load', () => {
+test('importState rejects dangling edges and leaves current graph unchanged', () => {
     const memory = createTimedStore();
+    memory.set('existing', 'safe', 'agentA', { summary: 'safe', importance: 2 });
 
-    memory.importState({
+    const result = memory.importState({
         entries: {
             nodeA: { value: 'A', summary: 'A', tags: [], importance: 1, updatedAt: 100, updatedBy: 'agentA' },
         },
@@ -139,8 +211,10 @@ test('persistence drops dangling edges during load', () => {
         ],
     });
 
+    assert.equal(result.ok, false);
     assert.equal(memory.relationCount(), 0);
-    assert.deepEqual(memory.map('nodeA', { depth: 1, limit: 10 }).edges, []);
+    assert.equal(memory.get('nodeA'), null);
+    assert.equal(memory.get('existing').value, 'safe');
 });
 
 test('snapshot export includes full entries and strict validation accepts it', () => {
@@ -605,6 +679,7 @@ test('flushSync marks store as not dirty and data persists', () => {
     memory.set('nodeA', 'A', 'agentA', { summary: 'Node A', importance: 4 });
     assert.equal(memory.flushSync(), true);
     assert.equal(memory.persistenceStatus().dirty, false);
+    assert.equal(memory.persistenceStatus().lastCheckpointMode, 'TRUNCATE');
 
     const restored = createMemoryStore({ persistence: { file } });
     assert.equal(restored.get('nodeA').summary, 'Node A');
@@ -787,3 +862,181 @@ function createTimedStoreWithPersistence(file) {
         persistence: { file },
     });
 }
+
+test('bulkSet rolls back the SQLite transaction if interrupted mid-batch', () => {
+    const memory = createMemoryStore({
+        testHooks: {
+            afterBulkSetItem() {
+                throw new Error('simulated bulk interruption');
+            },
+        },
+    });
+
+    assert.throws(
+        () => memory.bulkSet([
+            { key: 'bulk.a', value: 'A', summary: 'A' },
+            { key: 'bulk.b', value: 'B', summary: 'B' },
+        ], 'bulk-agent'),
+        /simulated bulk interruption/,
+    );
+
+    assert.equal(memory.get('bulk.a'), null);
+    assert.equal(memory.get('bulk.b'), null);
+    assert.equal(memory.count(), 0);
+});
+
+test('search filters expired FTS matches in SQL before returning metadata', () => {
+    let currentTime = 1000;
+    const memory = createMemoryStore({ clock: () => currentTime });
+
+    for (let index = 0; index < 50; index += 1) {
+        memory.set(`expired-${index}`, 'needle', 'agentA', {
+            summary: `needle expired ${index}`,
+            tags: ['needle'],
+            importance: 9,
+            expiresAt: 1100,
+        });
+    }
+    memory.set('visible', 'needle', 'agentA', {
+        summary: 'needle visible',
+        tags: ['needle'],
+        importance: 5,
+        expiresAt: 5000,
+    });
+
+    currentTime = 1200;
+    const result = memory.search({ query: 'needle', tags: ['needle'], limit: 5 });
+    assert.equal(result.total, 1);
+    assert.deepEqual(result.results.map((record) => record.key), ['visible']);
+    assert.equal(result.results[0].expiresAt, 5000);
+});
+
+test('bulkSet is all-or-nothing when one item fails validation', () => {
+    const memory = createMemoryStore();
+
+    const result = memory.bulkSet([
+        { key: 'bulk.valid', value: 'A', summary: 'A', tags: ['bulk'], importance: 4 },
+        { key: 'bulk.invalid', value: 'B', summary: '', tags: ['bulk'], importance: 4 },
+    ], 'bulk-agent');
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error, 'bulk-validation-failed');
+    assert.deepEqual(result.results.map((item) => item.ok), [false, false]);
+    assert.equal(result.results[0].error, 'not-applied');
+    assert.equal(result.results[1].error, 'invalid-summary');
+    assert.equal(memory.get('bulk.valid'), null);
+    assert.equal(memory.get('bulk.invalid'), null);
+});
+
+test('bulkSet is all-or-nothing on revision conflicts', () => {
+    const memory = createMemoryStore();
+    memory.set('bulk.existing', 'old', 'agentA', { summary: 'old' });
+
+    const result = memory.bulkSet([
+        { key: 'bulk.new', value: 'new', summary: 'new' },
+        { key: 'bulk.existing', value: 'newer', summary: 'newer', ifRevision: 999 },
+    ], 'bulk-agent');
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error, 'bulk-validation-failed');
+    assert.equal(result.results[1].error, 'revision-conflict');
+    assert.equal(result.results[1].currentRevision, 1);
+    assert.equal(memory.get('bulk.new'), null);
+    assert.equal(memory.get('bulk.existing').value, 'old');
+});
+
+test('bulkRelate rolls back the SQLite transaction if interrupted mid-batch', () => {
+    const memory = createMemoryStore({
+        testHooks: {
+            afterBulkRelateItem() {
+                throw new Error('simulated relation interruption');
+            },
+        },
+    });
+
+    memory.set('bulk.a', 'A', 'bulk-agent', { summary: 'A' });
+    memory.set('bulk.b', 'B', 'bulk-agent', { summary: 'B' });
+    memory.set('bulk.c', 'C', 'bulk-agent', { summary: 'C' });
+
+    assert.throws(
+        () => memory.bulkRelate([
+            { from: 'bulk.a', to: 'bulk.b', relation: 'supports' },
+            { from: 'bulk.b', to: 'bulk.c', relation: 'supports' },
+        ], 'bulk-agent'),
+        /simulated relation interruption/,
+    );
+
+    assert.equal(memory.relationCount(), 0);
+    assert.deepEqual(memory.map('bulk.a', { depth: 2, limit: 10 }).edges, []);
+});
+
+test('bulkRelate is all-or-nothing when one relation is invalid', () => {
+    const memory = createMemoryStore();
+    memory.set('bulk.a', 'A', 'bulk-agent', { summary: 'A' });
+    memory.set('bulk.b', 'B', 'bulk-agent', { summary: 'B' });
+    memory.set('bulk.c', 'C', 'bulk-agent', { summary: 'C' });
+
+    const result = memory.bulkRelate([
+        { from: 'bulk.a', to: 'bulk.b', relation: 'supports' },
+        { from: 'bulk.b', to: 'missing', relation: 'supports' },
+        { from: 'bulk.b', to: 'bulk.c', relation: 'supports' },
+    ], 'bulk-agent');
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error, 'bulk-validation-failed');
+    assert.deepEqual(result.results.map((item) => item.error), ['not-applied', 'missing-node', 'not-applied']);
+    assert.equal(memory.relationCount(), 0);
+});
+
+test('child_of is a valid relation type', () => {
+    assert.ok(RELATION_TYPE_LIST.includes('child_of'));
+});
+
+test('cascade: updating a leaf auto-updates submain and project summaries', () => {
+    const memory = createTimedStore();
+
+    memory.set('project.app', {}, 'agent', { summary: 'App root', importance: 9, tags: ['project'] });
+    memory.set('feature.auth', {}, 'agent', { summary: 'Auth feature', importance: 7, tags: ['feature'] });
+    memory.set('task.auth.token', {}, 'agent', { summary: 'Token expiry fix', importance: 5, tags: ['task'] });
+
+    memory.relate('feature.auth', 'project.app', 'child_of', 'agent');
+    memory.relate('task.auth.token', 'feature.auth', 'child_of', 'agent');
+
+    // Update the leaf — cascade should propagate upward
+    memory.set('task.auth.token', {}, 'agent', { summary: 'Token expiry now 24h', importance: 5, tags: ['task'] });
+
+    const featureNode = memory.get('feature.auth');
+    assert.ok(featureNode, 'feature.auth must exist');
+    assert.ok(featureNode.summary.includes('token'), `feature.auth summary should contain leaf subkey; got: ${featureNode.summary}`);
+
+    const projectNode = memory.get('project.app');
+    assert.ok(projectNode, 'project.app must exist');
+    assert.ok(projectNode.summary.includes('children'), `project.app summary should be a rollup; got: ${projectNode.summary}`);
+});
+
+test('cascade: no-op when node has no child_of parents', () => {
+    const memory = createTimedStore();
+    memory.set('arch.db', {}, 'agent', { summary: 'Database layer', importance: 7, tags: ['arch'] });
+    // No child_of edges — set should still succeed normally
+    memory.set('arch.db', { updated: true }, 'agent', { summary: 'Database layer v2', importance: 7, tags: ['arch'] });
+    assert.equal(memory.get('arch.db').summary, 'Database layer v2');
+});
+
+test('cascade: max 2 hops (does not propagate beyond project)', () => {
+    const memory = createTimedStore();
+    memory.set('meta.root', {}, 'agent', { summary: 'Meta root', importance: 10, tags: ['meta'] });
+    memory.set('project.app', {}, 'agent', { summary: 'App root', importance: 9, tags: ['project'] });
+    memory.set('feature.auth', {}, 'agent', { summary: 'Auth', importance: 7, tags: ['feature'] });
+    memory.set('task.auth.x', {}, 'agent', { summary: 'Task X', importance: 5, tags: ['task'] });
+
+    // 3-level chain: task → feature → project → meta (should stop at project)
+    memory.relate('project.app', 'meta.root', 'child_of', 'agent');
+    memory.relate('feature.auth', 'project.app', 'child_of', 'agent');
+    memory.relate('task.auth.x', 'feature.auth', 'child_of', 'agent');
+
+    const metaBefore = memory.get('meta.root').summary;
+    memory.set('task.auth.x', {}, 'agent', { summary: 'Task X updated', importance: 5, tags: ['task'] });
+
+    // meta.root is 3 hops away — cascade must stop at 2, so meta.root summary unchanged
+    assert.equal(memory.get('meta.root').summary, metaBefore, 'cascade must not exceed 2 hops');
+});

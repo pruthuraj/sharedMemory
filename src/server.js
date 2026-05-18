@@ -14,8 +14,9 @@ const {
     safeSend,
 } = require('./delivery');
 const { createMemoryStore } = require('./memory-store');
-const { parseMessage } = require('./protocol');
+const { parseMessage, protocolMetadata, auditMetadata } = require('./protocol');
 const { createSuggestionEngine } = require('./suggestion-engine');
+const packageInfo = require('../package.json');
 
 const DEFAULT_PRUNE_INTERVAL_MS = 600000;
 
@@ -42,6 +43,8 @@ function createSharedMemoryServer(options = {}) {
     const app = express();
     const server = http.createServer(app);
     const wss = new WebSocket.Server({ server });
+    const startedAt = Date.now();
+    let configuredPort = options.port ?? process.env.SHARED_MEMORY_PORT ?? process.env.PORT ?? null;
     const configuredAuthToken = hasOwn(options, 'authToken') ? options.authToken : process.env.MEMORY_TOKEN;
     const authToken = typeof configuredAuthToken === 'string' && configuredAuthToken.length > 0
         ? configuredAuthToken
@@ -80,9 +83,47 @@ function createSharedMemoryServer(options = {}) {
 
     app.use(express.static(path.join(__dirname, '..', 'public')));
 
+    function isAuthorizedHttpRequest(req) {
+        return !authToken || req.get('authorization') === `Bearer ${authToken}`;
+    }
+
+    function rejectUnauthorized(res) {
+        res.status(401).json({ error: 'unauthorized' });
+    }
+
+    function runtimeStatus() {
+        const address = server.address();
+        const listenPort = address && typeof address === 'object'
+            ? address.port
+            : configuredPort;
+        const persistenceStatus = memory.persistenceStatus();
+
+        return {
+            pid: process.pid,
+            cwd: process.cwd(),
+            sourceRoot: path.resolve(__dirname, '..'),
+            entrypoint: path.resolve(options.entrypoint || (require.main && require.main.filename) || process.argv[1] || __filename),
+            startedAt,
+            nodeVersion: process.version,
+            packageName: packageInfo.name,
+            packageVersion: packageInfo.version,
+            memoryFile: persistenceStatus.file,
+            port: listenPort == null ? null : Number(listenPort),
+        };
+    }
+
+    app.get('/protocol', (req, res) => {
+        if (!isAuthorizedHttpRequest(req)) {
+            rejectUnauthorized(res);
+            return;
+        }
+
+        res.json(protocolMetadata());
+    });
+
     app.get('/status', (req, res) => {
-        if (authToken && req.get('authorization') !== `Bearer ${authToken}`) {
-            res.status(401).json({ error: 'unauthorized' });
+        if (!isAuthorizedHttpRequest(req)) {
+            rejectUnauthorized(res);
             return;
         }
 
@@ -98,6 +139,7 @@ function createSharedMemoryServer(options = {}) {
             suggestions: suggestionStatus(),
             snapshot: snapshotStatus(),
             audit: auditResult.counts,
+            runtime: runtimeStatus(),
         });
     });
 
@@ -314,11 +356,13 @@ function createSharedMemoryServer(options = {}) {
                         break;
                     }
 
+                    const setWarnings = auditMetadata(data.key, metadata);
                     safeSend(ws, {
                         type: 'ok',
                         action: 'set',
                         key: data.key,
                         revision: entry.revision,
+                        ...(setWarnings.length ? { warnings: setWarnings } : {}),
                         requestId,
                     });
                     upsertSuggestionMemory(data.key, entry);
@@ -565,9 +609,16 @@ function createSharedMemoryServer(options = {}) {
                 }
 
                 case 'bulk_set': {
-                    const results = memory.bulkSet(data.entries, agentId);
-                    safeSend(ws, { type: 'bulk-set-result', results, requestId });
-                    for (const r of results) {
+                    const result = memory.bulkSet(data.entries, agentId);
+                    safeSend(ws, {
+                        type: 'bulk-set-result',
+                        ok: result.ok,
+                        ...(result.ok ? {} : { error: result.error }),
+                        results: result.results,
+                        requestId,
+                    });
+                    if (!result.ok) break;
+                    for (const r of result.results) {
                         if (r.ok) {
                             const entry = memory.get(r.key);
                             if (entry) {
@@ -580,9 +631,16 @@ function createSharedMemoryServer(options = {}) {
                 }
 
                 case 'bulk_relate': {
-                    const results = memory.bulkRelate(data.relations, agentId);
-                    safeSend(ws, { type: 'bulk-relate-result', results, requestId });
-                    for (const r of results) {
+                    const result = memory.bulkRelate(data.relations, agentId);
+                    safeSend(ws, {
+                        type: 'bulk-relate-result',
+                        ok: result.ok,
+                        ...(result.ok ? {} : { error: result.error }),
+                        results: result.results,
+                        requestId,
+                    });
+                    if (!result.ok) break;
+                    for (const r of result.results) {
                         if (r.ok) {
                             notifyRelationUpdate(agents, r.action, publicEdge(r.edge));
                         }
@@ -609,7 +667,19 @@ function createSharedMemoryServer(options = {}) {
         suggestionEngine,
 
         listen(...args) {
-            return server.listen(...args);
+            const normalizedArgs = [...args];
+            if (typeof normalizedArgs[0] === 'string' && /^\d+$/.test(normalizedArgs[0])) {
+                normalizedArgs[0] = Number(normalizedArgs[0]);
+            }
+
+            const firstArg = normalizedArgs[0];
+            if (typeof firstArg === 'number' || typeof firstArg === 'string') {
+                configuredPort = firstArg;
+            } else if (firstArg && typeof firstArg === 'object' && hasOwn(firstArg, 'port')) {
+                configuredPort = firstArg.port;
+            }
+
+            return server.listen(...normalizedArgs);
         },
 
         // Flushes memory, terminates all WS clients, then closes both WSS and HTTP server.

@@ -30,14 +30,14 @@
     };
 
     const RELATION_COLOR_PRESETS = {
-        aurora: { related_to: '#6366f1', depends_on: '#f59e0b', supports: '#22c55e', contradicts: '#ef4444', mentions: '#06b6d4', derived_from: '#a855f7', next_step: '#f97316' },
-        ocean: { related_to: '#38bdf8', depends_on: '#60a5fa', supports: '#14b8a6', contradicts: '#f43f5e', mentions: '#22d3ee', derived_from: '#818cf8', next_step: '#0ea5e9' },
-        ember: { related_to: '#fb7185', depends_on: '#fb923c', supports: '#f97316', contradicts: '#ef4444', mentions: '#f59e0b', derived_from: '#c084fc', next_step: '#fdba74' },
-        forest: { related_to: '#4ade80', depends_on: '#84cc16', supports: '#22c55e', contradicts: '#f87171', mentions: '#10b981', derived_from: '#34d399', next_step: '#a3e635' },
-        mono: { related_to: '#e5e7eb', depends_on: '#cbd5e1', supports: '#94a3b8', contradicts: '#9ca3af', mentions: '#d1d5db', derived_from: '#f3f4f6', next_step: '#6b7280' },
+        aurora: { related_to: '#6366f1', depends_on: '#f59e0b', supports: '#22c55e', contradicts: '#ef4444', mentions: '#06b6d4', derived_from: '#a855f7', next_step: '#f97316', child_of: '#94a3b8' },
+        ocean:  { related_to: '#38bdf8', depends_on: '#60a5fa', supports: '#14b8a6', contradicts: '#f43f5e', mentions: '#22d3ee', derived_from: '#818cf8', next_step: '#0ea5e9',  child_of: '#64748b' },
+        ember:  { related_to: '#fb7185', depends_on: '#fb923c', supports: '#f97316', contradicts: '#ef4444', mentions: '#f59e0b', derived_from: '#c084fc', next_step: '#fdba74',  child_of: '#9ca3af' },
+        forest: { related_to: '#4ade80', depends_on: '#84cc16', supports: '#22c55e', contradicts: '#f87171', mentions: '#10b981', derived_from: '#34d399', next_step: '#a3e635',  child_of: '#6b7280' },
+        mono:   { related_to: '#e5e7eb', depends_on: '#cbd5e1', supports: '#94a3b8', contradicts: '#9ca3af', mentions: '#d1d5db', derived_from: '#f3f4f6', next_step: '#6b7280',  child_of: '#6b7280' },
     };
 
-    const RELATION_TYPES = ['related_to', 'depends_on', 'supports', 'contradicts', 'mentions', 'derived_from', 'next_step'];
+    const RELATION_TYPES = ['related_to', 'depends_on', 'supports', 'contradicts', 'mentions', 'derived_from', 'next_step', 'child_of'];
 
     const DEFAULT_RELATION_FILTERS = Object.fromEntries(RELATION_TYPES.map((r) => [r, true]));
 

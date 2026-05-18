@@ -4,9 +4,11 @@
   "description": "Local shared-memory service with WebSocket coordination and stdio MCP tools",
   "main": "server.js",
   "scripts": {
+    "doctor": "node scripts/shared-memory-doctor.js",
     "mcp": "node mcp-server.mjs",
+    "restart": "node scripts/restart-server.js",
     "smoke:suggest": "node scripts/smoke-suggest.js",
-    "start": "cross-env MEMORY_FILE=data/memory.db node server.js",
+    "start": "node --env-file=.env server.js",
     "test": "node --test"
   },
   "engines": {

@@ -1,0 +1,12 @@
+interface:
+  display_name: "Memory Bulk Set"
+  short_description: "Write many memory entries"
+  default_prompt: "Use $memory-bulk-set to capture several memory entries."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "shared-memory"
+      description: "SharedMemory MCP server with memory_bulk_set."
+      transport: "stdio"
+policy:
+  allow_implicit_invocation: true

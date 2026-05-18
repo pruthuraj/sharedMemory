@@ -3,6 +3,7 @@ const test = require('node:test');
 
 const { createSharedMemoryToolHandlers, mcpToolResult } = require('../src/mcp-tools');
 const { createMemoryStore } = require('../src/memory-store');
+const { RELATION_TYPE_LIST } = require('../src/protocol');
 
 function createFakeSuggestionEngine(enabled = true) {
     const calls = {
@@ -115,8 +116,9 @@ test('MCP handlers set, get, search, and map memory with stable envelopes', asyn
 });
 
 test('MCP handlers validate inputs with protocol-compatible domain errors', async () => {
+    const memory = createMemoryStore();
     const handlers = createSharedMemoryToolHandlers({
-        memory: createMemoryStore(),
+        memory,
         suggestionEngine: createFakeSuggestionEngine(false),
     });
 
@@ -148,6 +150,44 @@ test('MCP handlers validate inputs with protocol-compatible domain errors', asyn
         ok: false,
         error: 'missing-snapshot',
     });
+
+    await handlers.memory_set({ key: 'a', value: true });
+    await handlers.memory_set({ key: 'b', value: true });
+    assert.deepEqual(await handlers.memory_relate({
+        from: 'a',
+        to: 'b',
+        relation: 'supports',
+        weight: 5,
+    }), {
+        ok: false,
+        error: 'invalid-weight',
+    });
+    assert.equal(memory.relationCount(), 0);
+});
+
+test('MCP relate accepts every official protocol relation type', async () => {
+    const memory = createMemoryStore();
+    const handlers = createSharedMemoryToolHandlers({
+        memory,
+        suggestionEngine: createFakeSuggestionEngine(false),
+    });
+
+    await handlers.memory_set({ key: 'from', value: true, summary: 'From' });
+    await handlers.memory_set({ key: 'to', value: true, summary: 'To' });
+
+    for (const relation of RELATION_TYPE_LIST) {
+        const result = await handlers.memory_relate({
+            from: 'from',
+            to: 'to',
+            relation,
+            reason: `${relation} reason`,
+            weight: 0.5,
+        });
+        assert.equal(result.ok, true);
+        assert.equal(result.edge.relation, relation);
+    }
+
+    assert.equal(memory.relationCount(), RELATION_TYPE_LIST.length);
 });
 
 test('MCP handlers export, validate, and import strict snapshots', async () => {
@@ -353,6 +393,51 @@ test('MCP merge import rejects invalid snapshots without mutation', async () => 
     assert.equal(result.error, 'invalid-snapshot');
     assert.ok(result.errors.some((error) => error.message === 'dangling-edge'));
     assert.deepEqual(memory.keys(), ['existing']);
+});
+
+test('MCP bulk handlers use all-or-nothing domain failures', async () => {
+    const memory = createMemoryStore();
+    const suggestionEngine = createFakeSuggestionEngine(true);
+    const handlers = createSharedMemoryToolHandlers({
+        memory,
+        suggestionEngine,
+        updatedBy: 'mcp-test',
+    });
+
+    assert.deepEqual(await handlers.memory_bulk_set({
+        entries: [
+            { key: 'project.bulk-a', value: 'A', summary: 'A', tags: ['bulk'], importance: 5 },
+            { key: 'project.bulk-b', value: 'B', summary: 'B', tags: ['bulk'], importance: 4 },
+        ],
+    }), {
+        ok: true,
+        results: [
+            { key: 'project.bulk-a', ok: true, revision: 1 },
+            { key: 'project.bulk-b', ok: true, revision: 1 },
+        ],
+    });
+    assert.deepEqual(suggestionEngine.calls.upserts.map((call) => call.key).sort(), ['project.bulk-a', 'project.bulk-b']);
+
+    const failedSet = await handlers.memory_bulk_set({
+        entries: [
+            { key: 'project.bulk-c', value: 'C', summary: 'C', tags: ['bulk'], importance: 5 },
+            { key: 'project.bulk-a', value: 'stale', summary: 'stale', tags: ['bulk'], importance: 5, ifRevision: 999 },
+        ],
+    });
+    assert.equal(failedSet.ok, false);
+    assert.equal(failedSet.error, 'bulk-validation-failed');
+    assert.deepEqual(failedSet.results.map((item) => item.error), ['not-applied', 'revision-conflict']);
+    assert.equal(memory.get('project.bulk-c'), null);
+
+    const failedRelate = await handlers.memory_bulk_relate({
+        relations: [
+            { from: 'project.bulk-a', to: 'project.bulk-b', relation: 'supports' },
+            { from: 'project.bulk-a', to: 'missing', relation: 'supports' },
+        ],
+    });
+    assert.equal(failedRelate.ok, false);
+    assert.equal(failedRelate.error, 'bulk-validation-failed');
+    assert.equal(memory.relationCount(), 0);
 });
 
 test('memory_suggest returns empty when disabled and refreshes visible memory when enabled', async () => {

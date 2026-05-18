@@ -1,30 +1,27 @@
-import { spawn, execSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
-import os from 'node:os';
+#!/usr/bin/env node
+'use strict';
 
-const DEFAULT_DIR = process.platform === 'win32'
-  ? 'C:\\sharedMemory'
-  : join(os.homedir(), '.shared-memory');
+// CommonJS compatibility wrapper for hosts that still invoke scripts/plugin-start.js.
 
-const installDir = process.env.SHARED_MEMORY_INSTALL_DIR || DEFAULT_DIR;
+const { spawn } = require('node:child_process');
+const path = require('node:path');
 
-if (!existsSync(installDir)) {
-  process.stderr.write(`[shared-memory] First run: installing to ${installDir}\n`);
-  execSync(`git clone https://github.com/pruthuraj/sharedMemory "${installDir}"`, { stdio: 'inherit' });
-  execSync(`npm install`, { cwd: installDir, stdio: 'inherit' });
-}
-
-const child = spawn(
-  process.execPath,
-  [join(installDir, 'mcp-server.mjs')],
-  {
-    cwd: installDir,
+const child = spawn(process.execPath, [path.join(__dirname, 'plugin-start.mjs')], {
     stdio: 'inherit',
-    env: { ...process.env, MCP_ENABLED: 'true' }
-  }
-);
+    env: process.env,
+    windowsHide: true,
+});
 
-child.on('exit', (code) => process.exit(code ?? 0));
-process.on('SIGTERM', () => child.kill('SIGTERM'));
-process.on('SIGINT',  () => child.kill('SIGINT'));
+child.on('error', (error) => {
+    console.error(`[shared-memory] failed to start plugin wrapper: ${error.message}`);
+    process.exit(1);
+});
+
+child.on('exit', (code, signal) => {
+    if (signal === 'SIGINT') process.exit(130);
+    if (signal === 'SIGTERM') process.exit(143);
+    process.exit(code ?? 0);
+});
+
+process.once('SIGINT', () => child.kill('SIGINT'));
+process.once('SIGTERM', () => child.kill('SIGTERM'));

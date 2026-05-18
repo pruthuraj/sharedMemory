@@ -1,0 +1,12 @@
+interface:
+  display_name: "Memory Unrelate"
+  short_description: "Remove memory graph edges"
+  default_prompt: "Use $memory-unrelate to remove an incorrect graph relation."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "shared-memory"
+      description: "SharedMemory MCP server with memory_unrelate."
+      transport: "stdio"
+policy:
+  allow_implicit_invocation: true

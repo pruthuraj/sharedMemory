@@ -1,0 +1,12 @@
+interface:
+  display_name: "Memory Validate Import"
+  short_description: "Check snapshot imports"
+  default_prompt: "Use $memory-validate-import before importing a memory file."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "shared-memory"
+      description: "SharedMemory MCP server with memory_validate_import."
+      transport: "stdio"
+policy:
+  allow_implicit_invocation: true

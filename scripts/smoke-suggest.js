@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // Manual smoke test for the real Transformers.js suggestion path.
 
-const WebSocket = require('ws');
+const { SharedMemoryWsClient, defaultWsUrl, httpUrlFromWsUrl } = require('./shared-memory-client');
 
-const wsUrl = process.env.MCP_URL || process.env.SMOKE_WS_URL || 'ws://127.0.0.1:3000';
-const httpUrl = process.env.SMOKE_HTTP_URL || wsUrl.replace(/^ws/, 'http');
+const wsUrl = process.env.MCP_URL || process.env.SMOKE_WS_URL || defaultWsUrl();
+const httpUrl = process.env.SMOKE_HTTP_URL || httpUrlFromWsUrl(wsUrl);
 const token = process.env.MEMORY_TOKEN || '';
 const timeoutMs = Number.parseInt(process.env.SMOKE_TIMEOUT_MS || '120000', 10);
 
@@ -48,55 +48,6 @@ async function fetchStatus() {
     return response.json();
 }
 
-async function connect() {
-    const ws = new WebSocket(wsUrl);
-    const messages = [];
-    const waiters = [];
-
-    ws.on('message', (raw) => {
-        const message = JSON.parse(raw.toString());
-        messages.push(message);
-        for (let index = waiters.length - 1; index >= 0; index -= 1) {
-            const waiter = waiters[index];
-            if (waiter.predicate(message)) {
-                clearTimeout(waiter.timeout);
-                waiters.splice(index, 1);
-                waiter.resolve(message);
-            }
-        }
-    });
-
-    await new Promise((resolve, reject) => {
-        ws.once('open', resolve);
-        ws.once('error', reject);
-    });
-
-    function waitFor(predicate, waitMs = 30000) {
-        const existing = messages.find(predicate);
-        if (existing) return Promise.resolve(existing);
-        return new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => reject(new Error('Timed out waiting for WebSocket message')), waitMs);
-            waiters.push({ predicate, resolve, timeout });
-        });
-    }
-
-    function send(payload) {
-        ws.send(JSON.stringify(payload));
-    }
-
-    async function request(payload) {
-        const requestId = payload.requestId || `smoke-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-        send({ ...payload, requestId });
-        const response = await waitFor((message) => message.requestId === requestId, timeoutMs);
-        if (response.type === 'error') {
-            throw new Error(`${payload.type} failed: ${response.message}`);
-        }
-        return response;
-    }
-
-    return { ws, waitFor, request };
-}
-
 async function waitForIndex() {
     const started = Date.now();
     while (Date.now() - started < timeoutMs) {
@@ -123,12 +74,10 @@ async function waitForIndex() {
 
 async function main() {
     console.log(`Connecting to ${wsUrl}`);
-    const client = await connect();
+    const client = await new SharedMemoryWsClient({ wsUrl, httpUrl, token, timeoutMs }).connect();
     await client.waitFor((message) => message.type === 'welcome');
 
-    if (token) {
-        await client.request({ type: 'auth', token });
-    }
+    await client.authenticate();
 
     await client.request({ type: 'register', agentId: 'smoke-suggest-agent' });
 
@@ -152,7 +101,7 @@ async function main() {
     }
 
     console.log('suggestions:', result.suggestions);
-    client.ws.close();
+    await client.close();
 }
 
 main().catch((error) => {
