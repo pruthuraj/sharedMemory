@@ -685,6 +685,18 @@ function createMemoryStore(options = {}) {
         // Wrap query in double-quoted phrase to prevent FTS5 syntax interpretation.
         ftsSearch: db.prepare('SELECT key FROM fts_entries WHERE body MATCH ?'),
         ftsDeleteAll: db.prepare('DELETE FROM fts_entries'),
+        getChildrenOf: db.prepare(
+            `SELECT e.from_key FROM edges e
+             JOIN entries en ON en.key = e.from_key
+             WHERE e.to_key = ? AND e.relation = 'child_of'
+             AND (en.expires_at IS NULL OR en.expires_at > ?)`,
+        ),
+        getParentsOf: db.prepare(
+            `SELECT to_key FROM edges WHERE from_key = ? AND relation = 'child_of'`,
+        ),
+        updateSummary: db.prepare(
+            `UPDATE entries SET summary = ?, updated_at = ?, updated_by = ? WHERE key = ?`,
+        ),
     };
 
     // Wraps a function in a BEGIN/COMMIT/ROLLBACK transaction.
@@ -731,6 +743,34 @@ function createMemoryStore(options = {}) {
         return row.revision === ifRevision ? null : revisionConflict(key, row.revision);
     }
 
+    function computeRollupSummary(parentKey, t) {
+        const children = stmts.getChildrenOf.all(parentKey, t);
+        if (children.length === 0) return null;
+        const rows = children
+            .map((c) => stmts.getEntry.get(c.from_key))
+            .filter(Boolean)
+            .sort((a, b) => b.importance - a.importance)
+            .slice(0, 5);
+        const parts = rows.map((r) => {
+            const subkey = r.key.split('.').pop();
+            const snippet = r.summary ? r.summary.slice(0, 60) : '';
+            return `${subkey}: ${snippet}`;
+        });
+        return `[${children.length} children] ${parts.join(' | ')}`;
+    }
+
+    function cascadeUp(key, t, depth) {
+        if (depth >= 2) return;
+        const parents = stmts.getParentsOf.all(key);
+        for (const { to_key } of parents) {
+            const rollup = computeRollupSummary(to_key, t);
+            if (rollup) {
+                stmts.updateSummary.run(rollup, t, 'system:cascade', to_key);
+                cascadeUp(to_key, t, depth + 1);
+            }
+        }
+    }
+
     function applySet(key, valueJson, summary, importance, expiresAt, ts, updatedBy, tags, ifRevision) {
         const existing = stmts.getEntryWithRowid.get(key);
         const revisionError = validateRevisionCheck(key, existing, ifRevision, ts, true);
@@ -745,6 +785,7 @@ function createMemoryStore(options = {}) {
         if (existing) stmts.ftsDelete.run(existing.rowid);
         const current = stmts.getEntryRowid.get(key);
         stmts.ftsInsert.run(current.rowid, key, ftsBody(key, summary, tags));
+        cascadeUp(key, ts, 0);
         return { ok: true, revision: nextRevision };
     }
 

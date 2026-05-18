@@ -61,6 +61,7 @@ const RELATION_TYPE_LIST = Object.freeze([
     'implements',
     'documents',
     'blocks',
+    'child_of',
 ]);
 
 const RELATION_TYPES = new Set(RELATION_TYPE_LIST);

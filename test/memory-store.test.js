@@ -987,3 +987,56 @@ test('bulkRelate is all-or-nothing when one relation is invalid', () => {
     assert.deepEqual(result.results.map((item) => item.error), ['not-applied', 'missing-node', 'not-applied']);
     assert.equal(memory.relationCount(), 0);
 });
+
+test('child_of is a valid relation type', () => {
+    assert.ok(RELATION_TYPE_LIST.includes('child_of'));
+});
+
+test('cascade: updating a leaf auto-updates submain and project summaries', () => {
+    const memory = createTimedStore();
+
+    memory.set('project.app', {}, 'agent', { summary: 'App root', importance: 9, tags: ['project'] });
+    memory.set('feature.auth', {}, 'agent', { summary: 'Auth feature', importance: 7, tags: ['feature'] });
+    memory.set('task.auth.token', {}, 'agent', { summary: 'Token expiry fix', importance: 5, tags: ['task'] });
+
+    memory.relate('feature.auth', 'project.app', 'child_of', 'agent');
+    memory.relate('task.auth.token', 'feature.auth', 'child_of', 'agent');
+
+    // Update the leaf — cascade should propagate upward
+    memory.set('task.auth.token', {}, 'agent', { summary: 'Token expiry now 24h', importance: 5, tags: ['task'] });
+
+    const featureNode = memory.get('feature.auth');
+    assert.ok(featureNode, 'feature.auth must exist');
+    assert.ok(featureNode.summary.includes('token'), `feature.auth summary should contain leaf subkey; got: ${featureNode.summary}`);
+
+    const projectNode = memory.get('project.app');
+    assert.ok(projectNode, 'project.app must exist');
+    assert.ok(projectNode.summary.includes('children'), `project.app summary should be a rollup; got: ${projectNode.summary}`);
+});
+
+test('cascade: no-op when node has no child_of parents', () => {
+    const memory = createTimedStore();
+    memory.set('arch.db', {}, 'agent', { summary: 'Database layer', importance: 7, tags: ['arch'] });
+    // No child_of edges — set should still succeed normally
+    memory.set('arch.db', { updated: true }, 'agent', { summary: 'Database layer v2', importance: 7, tags: ['arch'] });
+    assert.equal(memory.get('arch.db').summary, 'Database layer v2');
+});
+
+test('cascade: max 2 hops (does not propagate beyond project)', () => {
+    const memory = createTimedStore();
+    memory.set('meta.root', {}, 'agent', { summary: 'Meta root', importance: 10, tags: ['meta'] });
+    memory.set('project.app', {}, 'agent', { summary: 'App root', importance: 9, tags: ['project'] });
+    memory.set('feature.auth', {}, 'agent', { summary: 'Auth', importance: 7, tags: ['feature'] });
+    memory.set('task.auth.x', {}, 'agent', { summary: 'Task X', importance: 5, tags: ['task'] });
+
+    // 3-level chain: task → feature → project → meta (should stop at project)
+    memory.relate('project.app', 'meta.root', 'child_of', 'agent');
+    memory.relate('feature.auth', 'project.app', 'child_of', 'agent');
+    memory.relate('task.auth.x', 'feature.auth', 'child_of', 'agent');
+
+    const metaBefore = memory.get('meta.root').summary;
+    memory.set('task.auth.x', {}, 'agent', { summary: 'Task X updated', importance: 5, tags: ['task'] });
+
+    // meta.root is 3 hops away — cascade must stop at 2, so meta.root summary unchanged
+    assert.equal(memory.get('meta.root').summary, metaBefore, 'cascade must not exceed 2 hops');
+});
