@@ -124,8 +124,16 @@ function syncMainNodeVisibility() {
 function expandNode(key) {
     if (!currentEntries[key]) return [];
     expandedNodeIds.add(key);
+
+    // Prefer child_of children if any exist — keeps hierarchy expansion shallow
+    const childOfKeys = (currentEdges || [])
+        .filter((e) => e.from === key && e.relation === 'child_of')
+        .map((e) => e.to)
+        .filter((k) => currentEntries[k]);
+
+    const keysToReveal = childOfKeys.length > 0 ? childOfKeys : getNeighborKeys(key);
     const newKeys = [];
-    for (const neighborKey of getNeighborKeys(key)) {
+    for (const neighborKey of keysToReveal) {
         if (!visibleNodeIds.has(neighborKey)) {
             visibleNodeIds.add(neighborKey);
             newKeys.push(neighborKey);

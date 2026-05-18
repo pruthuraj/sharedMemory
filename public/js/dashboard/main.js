@@ -68,6 +68,7 @@ function bindIdentityControls() {
     on(identityClose, 'click', closeIdentityPanel);
     on(identitySearch, 'input', renderIdentityPanel);
     on(identityList, 'click', handleIdentityListClick);
+    on(identityPanel, 'keydown', handleIdentityKeydown);
 }
 
 // ── Import Panel Controls ──────────────────────────────────────────────

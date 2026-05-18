@@ -53,11 +53,31 @@ function buildDetailBodyHtml(key, entry, recencyColor) {
     const category = getNodeCategory(key);
     const catColor = getCategoryColor(key);
     const importance = Math.max(0, Math.min(10, Number(entry.importance) || 0));
-    const connCount = (currentEdges || []).filter((e) => e.from === key || e.to === key).length;
+
+    const edgeCounts = {};
+    for (const e of (currentEdges || [])) {
+        if (e.from === key || e.to === key) {
+            edgeCounts[e.relation] = (edgeCounts[e.relation] || 0) + 1;
+        }
+    }
+    const connCount = Object.values(edgeCounts).reduce((s, n) => s + n, 0);
+    const breakdown = Object.entries(edgeCounts)
+        .sort((a, b) => b[1] - a[1])
+        .map(([r, n]) => `${esc(r.replace(/_/g, ' '))} ×${n}`)
+        .join(', ');
+    const childCount = (currentEdges || []).filter((e) => e.from === key && e.relation === 'child_of').length;
+    const parentEdge = (currentEdges || []).find((e) => e.from === key && e.relation === 'child_of');
+    const parentKey = parentEdge ? parentEdge.to : null;
 
     const dots = Array.from({ length: 10 }, (_, i) =>
         `<span class="dp-imp-dot${i < importance ? ' filled' : ''}"></span>`
     ).join('');
+
+    const hierarchyHtml = (childCount > 0 || parentKey)
+        ? `<div class="dp-hierarchy">
+  ${childCount > 0 ? `<span class="dp-hier-item">↓ ${childCount} child${childCount !== 1 ? 'ren' : ''}</span>` : ''}
+  ${parentKey ? `<span class="dp-hier-item">↑ <span class="dp-hier-parent">${esc(parentKey)}</span></span>` : ''}
+</div>` : '';
 
     return `
 <div class="dp-key">${esc(key)}</div>
@@ -65,8 +85,10 @@ function buildDetailBodyHtml(key, entry, recencyColor) {
 <div class="dp-meta-row">
   <span class="dp-type-badge" style="background:${catColor}22;color:${catColor};border-color:${catColor}44">${esc(category)}</span>
   <span class="dp-ts" style="color:${recencyColor};margin:0">${age ? esc(age) + ' ago' : esc(date)}</span>
-  <span class="dp-conn-count">${connCount} link${connCount !== 1 ? 's' : ''}</span>
+  <span class="dp-conn-count" title="${breakdown}">${connCount} link${connCount !== 1 ? 's' : ''}</span>
 </div>
+
+${hierarchyHtml}
 
 <div class="dp-summary">${esc(entry.summary || '—')}</div>
 

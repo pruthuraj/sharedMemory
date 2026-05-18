@@ -41,6 +41,7 @@
             mentions: '#06b6d4',
             derived_from: '#a855f7',
             next_step: '#f97316',
+            child_of: '#94a3b8',
         };
     }
 

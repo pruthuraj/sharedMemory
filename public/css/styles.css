@@ -61,6 +61,12 @@ body {
     white-space: nowrap;
 }
 
+.tb-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
 .tb-sep {
     width: 1px;
     height: 16px;
@@ -400,6 +406,32 @@ body.inspector-open #viewport {
     font-size: 9px;
     color: var(--text-soft);
     margin-left: auto;
+    cursor: default;
+}
+
+.dp-hierarchy {
+    display: flex;
+    gap: 10px;
+    font-size: 10px;
+    color: var(--text-soft);
+    padding: 4px 0 2px;
+    border-top: 1px solid var(--border-soft);
+    margin-bottom: 2px;
+}
+
+.dp-hier-item {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+}
+
+.dp-hier-parent {
+    color: var(--accent);
+    font-size: 9px;
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .dp-summary {
@@ -588,6 +620,13 @@ details[open] .dp-raw-toggle::before {
 .identity-item.active {
     border-color: color-mix(in srgb, var(--accent-2) 48%, transparent);
     background: color-mix(in srgb, var(--surface-bg) 72%, var(--accent) 28%);
+}
+
+.identity-item.kb-focus {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--surface-bg) 60%, var(--accent) 40%);
+    outline: 1px solid var(--accent);
+    outline-offset: -1px;
 }
 
 .identity-swatch {

@@ -448,6 +448,16 @@ function buildCyStyle() {
             },
         },
         {
+            selector: 'edge[relation = "child_of"]',
+            style: {
+                'line-style': 'dashed',
+                'line-dash-pattern': [6, 4],
+                'opacity': 0.35,
+                'width': 1,
+                'target-arrow-shape': 'none',
+            },
+        },
+        {
             selector: 'edge.dimmed',
             style: {
                 'opacity': () => dimmedEdgeOpacity(),
