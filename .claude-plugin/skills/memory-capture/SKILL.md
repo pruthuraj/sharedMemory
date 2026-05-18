@@ -70,7 +70,7 @@ Never create `*.v2`, `*.new`, or `*.updated` just to avoid merging. Use the same
 
 ## Key taxonomy
 
-Use lowercase dot-separated keys. Hyphens are allowed inside segments.
+Use lowercase dot-separated keys. Hyphens are allowed inside segments. No camelCase, no underscores, no spaces. 3 segments standard for durable entries; 2 segments for project roots and submain buckets.
 
 Preferred pattern for project-specific memory:
 
@@ -92,29 +92,99 @@ task.sharedmemory.add-sri-dagre
 setup.hextts.aligner
 reference.portfolio.plan-md
 session.2026-05-11
-preference.ui-no-tooltips
+session-section.2026-05-11.what
+preference.sharedmemory.ui-no-tooltips
 ```
 
-Use these prefixes:
+Use these prefixes — and only these. Do not invent new ones (`fact.*`, `analytics.*`, `backend.*`, `mobile.*`, `testing.*` are NOT allowed; map them to the closest existing prefix):
 
-| Prefix                        | Use for                                  |
-| ----------------------------- | ---------------------------------------- |
-| `project.<name>`              | Project identity, scope, status          |
-| `arch.<project>.<topic>`      | Architecture and component boundaries    |
-| `api.<project>.<surface>`     | API endpoints and contracts              |
-| `data.<project>.<model>`      | Database schemas and data models         |
-| `feature.<project>.<name>`    | Implemented or planned features          |
-| `decision.<project>.<topic>`  | Decisions and rationale                  |
-| `insight.<project>.<topic>`   | Lessons, gotchas, debugging knowledge    |
-| `task.<project>.<name>`       | Action items and follow-ups              |
-| `blocker.<project>.<topic>`   | Risks, blockers, unresolved problems     |
-| `setup.<project>.<thing>`     | Configuration, commands, environment     |
-| `reference.<project>.<thing>` | Durable file paths, plans, external refs |
-| `agent.<name>`                | Agent role and behavior                  |
-| `preference.<topic>`          | User or project preference               |
-| `session.<YYYY-MM-DD>`        | Session summary                          |
+| Prefix                                  | Use for                                  |
+| --------------------------------------- | ---------------------------------------- |
+| `project.<name>`                        | Project identity, scope, status          |
+| `arch.<project>.<topic>`                | Architecture and component boundaries    |
+| `api.<project>.<surface>`               | API endpoints and contracts              |
+| `data.<project>.<model>`                | Database schemas and data models         |
+| `feature.<project>.<name>`              | Implemented or planned features          |
+| `file.<project>.<sanitized-path>`       | A specific source file that needs identity |
+| `decision.<project>.<topic>`            | Decisions and rationale                  |
+| `insight.<project>.<topic>`             | Lessons, gotchas, debugging knowledge    |
+| `task.<project>.<name>`                 | Action items and follow-ups              |
+| `blocker.<project>.<topic>`             | Risks, blockers, unresolved problems     |
+| `setup.<project>.<thing>`               | Configuration, commands, environment     |
+| `reference.<project>.<thing>`           | Durable file paths, plans, external refs |
+| `evidence.<project>.<topic>`            | Raw data or proof nodes                  |
+| `agent.<name>`                          | Agent role and behavior                  |
+| `preference.<project-or-topic>`         | User or project preference               |
+| `session.<YYYY-MM-DD>`                  | Session root (date as second segment)    |
+| `session-section.<YYYY-MM-DD>.<part>`   | Session child (what/why/done/files/changes) |
+
+### Canonical project names (lowercase, exact)
+
+The second segment of every non-session entry must be one of:
+
+```text
+sharedmemory   webreader   hextts   ecg-digital-twin   portfolio   cross-project
+```
+
+Never write `sharedMemory`, `WebReader`, `HexTTs`, or `ECG-Digital-Twin`. If the work belongs to a new project, pick a new lowercase hyphen-separated name and use it consistently.
+
+### The `file.*` project rule
+
+The project segment in `file.<project>.*` must be the project where the file **lives**, not the project the current session is about. A sharedmemory session mentioning an ECG MATLAB file must still write `file.ecg-digital-twin.<filename>`.
 
 For older stores that already use shorter keys, update existing keys instead of renaming unless a migration was requested.
+
+---
+
+## Memory hierarchy (`child_of`)
+
+The graph uses a 3-level hierarchy. `memory_map(project.X, depth=1)` returns ~10 submain buckets, not all leaves.
+
+```text
+project.<name>                                ← root (1 per project)
+  ↑ child_of
+<prefix>.<project>                            ← submain bucket (2 segments)
+  ↑ child_of
+<prefix>.<project>.<topic>                    ← leaf (3+ segments)
+```
+
+Wiring rules:
+
+- Every leaf (3+ segment, non-session) → its submain via `child_of`.
+- Every submain (2-segment non-project) → its `project.<project>` root via `child_of`.
+- `project.*` roots have no outgoing `child_of`.
+- `session.*` and `session-section.*` use `documents` (NOT `child_of`):
+  - `session.<date>` → `project.<project>` via `documents`
+  - `session-section.<date>.<part>` → `session.<date>` via `documents`
+
+When writing a new leaf, ensure the submain bucket exists. If it doesn't, create it first as a 2-segment entry with `value: { type, project, role: "submain" }`, then wire `leaf --child_of--> submain --child_of--> project`. The server auto-cascades summaries upward on every `memory_set` (max 2 hops), so submain summaries stay current automatically in the form `[N children] subkey: snippet | ...`.
+
+---
+
+## Importance cutoff rule
+
+A leaf must **NOT** have a direct edge (any relation except `child_of` and `documents`) to its project root or its submain if the leaf's importance is **below the parent's cached `threshold`**.
+
+The threshold is cached on every project and submain node as `value.stats`:
+
+```json
+{
+  "stats": {
+    "count": 23,
+    "sum": 164,
+    "avgImportance": 7.13,
+    "threshold": 7.13,
+    "removedDirectEdges": 0,
+    "lastComputedAt": 1779140000000
+  }
+}
+```
+
+Rationale: a minor fix (importance 3-5) should not weight the parent's neighborhood the same as a core architectural decision (importance 9).
+
+When writing a new entry, check the parent's `stats.threshold` first. If your new entry's importance is below threshold, skip the direct `supports` / `depends_on` / `related_to` edge — the `child_of` edge to the parent submain is enough. If above threshold, you may add 1–2 stronger semantic edges as before.
+
+Refresh stats after bulk writes: `node scripts/apply-importance-cutoff.js --apply`. Handles both project and submain levels in one pass.
 
 ---
 
@@ -215,36 +285,47 @@ After writing a new entry, immediately add 2-4 useful relations.
 
 Minimum links:
 
-1. Link to parent project, for example `project.webreader`.
-2. Link to the current `session.<YYYY-MM-DD>` or source entry.
+1. **Hierarchy** — `child_of` to the submain bucket (which itself wires to the project root). Required for every leaf.
+2. **Semantic** — 1–2 strong relations (`supports` / `depends_on` / `implements` / `documents`) to closely related entries. Skip the direct edge to project root if your entry's importance is below `project.<name>.value.stats.threshold` (see Importance cutoff rule).
+3. **Session** — if a session.* node exists for today, link via `derived_from` from your entry to the session.
 
-Allowed relation types:
+Allowed relation types (11 total):
 
 | Relation       | Meaning                                            |
 | -------------- | -------------------------------------------------- |
+| `child_of`     | A is structurally a child of B (hierarchy backbone) |
+| `documents`    | A documents B (used for session → project + section → session) |
 | `depends_on`   | A requires B to work or be valid                   |
 | `supports`     | A strengthens, enables, or provides evidence for B |
 | `implements`   | A is an implementation of B                        |
-| `documents`    | A documents B                                      |
 | `derived_from` | A was learned from or produced by B                |
 | `next_step`    | A logically follows B                              |
 | `blocks`       | A prevents or slows B                              |
 | `contradicts`  | A conflicts with B                                 |
 | `mentions`     | A lightly references B                             |
-| `related_to`   | General fallback only                              |
+| `related_to`   | General fallback only — avoid when stronger fits   |
 
-Every relation must include a non-empty reason.
+Session/section linkage MUST use `documents`:
 
 ```text
 relate(
-  from="decision.webreader.no-auth",
-  to="project.webreader",
-  relation="supports",
-  reason="The no-auth/no-cloud rule defines the privacy boundary of the WebReader project."
+  from="session.2026-05-18",
+  to="project.sharedmemory",
+  relation="documents",
+  reason="The session captures sharedmemory hierarchy restructure work performed today."
+)
+
+relate(
+  from="session-section.2026-05-18.done",
+  to="session.2026-05-18",
+  relation="documents",
+  reason="Done section enumerates the entries created/updated in this session."
 )
 ```
 
-Avoid vague relations when a stronger one fits. Prefer `supports`, `depends_on`, `implements`, or `documents` over `related_to`.
+Every relation must include a non-empty reason.
+
+Avoid vague relations when a stronger one fits. Prefer `child_of` for hierarchy, `documents` for sessions, and `supports` / `depends_on` / `implements` over `related_to` for everything else.
 
 ---
 
@@ -269,7 +350,7 @@ The session value should include:
 }
 ```
 
-Link the session to each new or updated durable entry with `derived_from` or `mentions`.
+Link the session to its project root with `documents`. Link section nodes (`session-section.<date>.what`, `.why`, `.done`, `.changes`, `.files`) to the session root with `documents`. Link each new or updated durable entry from this session to the session root with `derived_from` or `mentions`.
 
 ---
 
@@ -388,15 +469,26 @@ memory_set(
 )
 ```
 
-Then link:
+Then wire the hierarchy + a strong semantic edge + the session linkage:
 
 ```text
 relate(
   from="decision.webreader.no-auth-no-cloud",
+  to="decision.webreader",                    # submain bucket (create if missing)
+  relation="child_of",
+  reason="Hierarchy: this decision belongs in the decision.webreader bucket."
+)
+
+# Check project.webreader.value.stats.threshold first.
+# If new entry importance (9) >= threshold, add direct supports edge:
+relate(
+  from="decision.webreader.no-auth-no-cloud",
   to="project.webreader",
   relation="supports",
-  reason="This decision defines WebReader's privacy and offline-first boundary."
+  reason="The no-auth/no-cloud rule defines the privacy boundary of the WebReader project."
 )
+# If new entry importance is below threshold, skip the direct edge —
+# child_of via the submain is enough.
 
 relate(
   from="decision.webreader.no-auth-no-cloud",
@@ -409,5 +501,5 @@ relate(
 Brief user-facing note:
 
 ```text
-Stored as decision.webreader.no-auth-no-cloud.
+Stored as decision.webreader.no-auth-no-cloud (importance 9, above project threshold 7.5 → direct supports edge added).
 ```
