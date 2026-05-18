@@ -82,14 +82,14 @@ function buildDetailBodyHtml(key, entry, recencyColor) {
     const stats = (entry.value && typeof entry.value === 'object' && entry.value.stats) || null;
     const statsHtml = stats ? `
 <div class="dp-project-stats">
-  <div class="dp-stats-title">Project descendants</div>
+  <div class="dp-stats-title">Descendant stats</div>
   <div class="dp-stats-grid">
     <span class="dp-stats-label">Count</span><span class="dp-stats-value">${Number(stats.count) || 0}</span>
     <span class="dp-stats-label">Avg importance</span><span class="dp-stats-value">${Number(stats.avgImportance || 0).toFixed(2)}</span>
     <span class="dp-stats-label">Sum</span><span class="dp-stats-value">${Number(stats.sum) || 0}</span>
     <span class="dp-stats-label">Threshold</span><span class="dp-stats-value">${Number(stats.threshold || 0).toFixed(2)}</span>
   </div>
-  <div class="dp-stats-note">Leaves below threshold (${Number(stats.threshold || 0).toFixed(2)}) have no direct edges to this project root.</div>
+  <div class="dp-stats-note">Children below threshold (${Number(stats.threshold || 0).toFixed(2)}) have no direct edges to this node.</div>
 </div>` : '';
 
     return `

@@ -128,7 +128,97 @@ for (const projectKey of projectKeys) {
     totalProjectsUpdated++;
 }
 
+// ── Submain pass ─────────────────────────────────────────────────────────────
+const LEAF_PREFIXES = new Set([
+    'arch', 'api', 'data', 'decision', 'feature', 'file', 'insight',
+    'preference', 'reference', 'setup', 'task', 'blocker', 'agent', 'evidence',
+]);
+const projectKeySet = new Set(projectKeys);
+
+const submainKeys = entries
+    .map((e) => e.key)
+    .filter((k) => {
+        const parts = k.split('.');
+        if (parts.length !== 2) return false;
+        if (k.startsWith('project.') || k.startsWith('session.') || k.startsWith('session-section.')) return false;
+        if (!LEAF_PREFIXES.has(parts[0])) return false;
+        return projectKeySet.has(`project.${parts[1]}`);
+    });
+
+console.log(`\nSubmain pass: ${submainKeys.length} candidates\n`);
+
+let totalSubmainsUpdated = 0;
+
+for (const submainKey of submainKeys) {
+    const children = db.prepare(
+        "SELECT from_key FROM edges WHERE to_key = ? AND relation = 'child_of'"
+    ).all(submainKey).map((r) => r.from_key);
+
+    if (children.length === 0) {
+        console.log(`  ${submainKey}: no children, skipping`);
+        continue;
+    }
+
+    let sum = 0;
+    for (const c of children) {
+        sum += (entryByKey.get(c)?.importance ?? 0);
+    }
+    const avg = sum / children.length;
+    const threshold = avg;
+
+    const directEdges = db.prepare(
+        `SELECT edge_id, from_key, to_key, relation FROM edges
+         WHERE (from_key = ? OR to_key = ?)
+         AND relation NOT IN ('child_of', 'documents')`
+    ).all(submainKey, submainKey);
+
+    const childSet = new Set(children);
+    const toDelete = directEdges.filter((ed) => {
+        const other = ed.from_key === submainKey ? ed.to_key : ed.from_key;
+        if (!childSet.has(other)) return false;
+        const imp = entryByKey.get(other)?.importance ?? 0;
+        return imp < threshold;
+    });
+
+    let submainValue;
+    try {
+        submainValue = JSON.parse(entryByKey.get(submainKey).value_json);
+    } catch {
+        submainValue = {};
+    }
+    if (typeof submainValue !== 'object' || submainValue === null) submainValue = {};
+
+    submainValue.stats = {
+        count: children.length,
+        sum,
+        avgImportance: Number(avg.toFixed(4)),
+        threshold: Number(threshold.toFixed(4)),
+        removedDirectEdges: toDelete.length,
+        lastComputedAt: t,
+    };
+
+    console.log(`  ${submainKey}: count=${children.length} sum=${sum} avg=${avg.toFixed(2)} edges-to-delete=${toDelete.length}`);
+    for (const ed of toDelete) {
+        const other = ed.from_key === submainKey ? ed.to_key : ed.from_key;
+        const otherImp = entryByKey.get(other).importance;
+        console.log(`    ${apply ? 'delete' : '[dry] '}  ${ed.from_key} --${ed.relation}--> ${ed.to_key} (other imp=${otherImp})`);
+    }
+
+    if (apply) {
+        for (const ed of toDelete) {
+            const r = deleteEdge.run(ed.edge_id);
+            totalEdgesDeleted += r.changes;
+        }
+        const newRevision = (entryByKey.get(submainKey).revision || 1) + 1;
+        updateEntry.run(JSON.stringify(submainValue), newRevision, t, 'system:cutoff', submainKey);
+    } else {
+        totalEdgesDeleted += toDelete.length;
+    }
+    totalSubmainsUpdated++;
+}
+
 console.log(`\nSummary:`);
 console.log(`  Projects updated:    ${totalProjectsUpdated}`);
+console.log(`  Submains updated:    ${totalSubmainsUpdated}`);
 console.log(`  Edges deleted:       ${totalEdgesDeleted}`);
 if (!apply) console.log('\n(Dry run — pass --apply to write changes)');
